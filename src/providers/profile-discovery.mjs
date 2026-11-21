@@ -708,6 +708,14 @@ export async function discoverClaudeProfiles({ env = process.env, home = "", dat
       seenDesktopDirs.add(resolvedDesk);
     }
     const profileId = nextUniqueId(id);
+    const dedicatedCliConfigDir = isDesktopInstance
+      ? resolve(resolvedHome, `.claude-${profileId}`)
+      : "";
+    if (dedicatedCliConfigDir) {
+      seenPaths.add(dedicatedCliConfigDir);
+      const dedicatedCanonical = await realpath(dedicatedCliConfigDir).catch(() => dedicatedCliConfigDir);
+      seenPaths.add(dedicatedCanonical);
+    }
     profiles.push({
       id: profileId,
       provider: "claude",
@@ -722,7 +730,7 @@ export async function discoverClaudeProfiles({ env = process.env, home = "", dat
       ...(isDesktopInstance
         ? {
             isDesktopInstance: true,
-            dedicatedCliConfigDir: resolve(resolvedHome, `.claude-${profileId}`),
+            dedicatedCliConfigDir,
           }
         : {}),
     });
@@ -740,21 +748,11 @@ export async function discoverClaudeProfiles({ env = process.env, home = "", dat
     cockpitAccount: envDir ? null : defaultCockpitAccount,
   });
   seenDesktopDirs.add(defaultDesktopDir);
-
-  const launchDirs = await scanLaunchAgentEnvVars(["CLAUDE_CONFIG_DIR"], resolvedHome);
-  for (const item of launchDirs) {
-    await addProfile(basename(item.path).replace(/^\.claude-?/, "") || "agent", `Claude · ${basename(item.path)}`, item.path, true);
-  }
-
-  const homeEntries = await readdir(resolvedHome, { withFileTypes: true }).catch(() => []);
-  for (const entry of homeEntries) {
-    if (!entry.isDirectory() || !entry.name.startsWith(".claude-")) continue;
-    const candidate = resolve(resolvedHome, entry.name);
-    const hasMarker = await pathExists(resolve(candidate, "projects"))
-      || await pathExists(resolve(candidate, "sessions"));
-    if (!hasMarker) continue;
-    const suffix = entry.name.slice(".claude-".length);
-    await addProfile(suffix, `Claude · ${suffix}`, candidate, true);
+  if (defaultCockpitAccount) {
+    const altDefaultDir = resolve(resolvedHome, ".claude-default");
+    seenPaths.add(altDefaultDir);
+    const altDefaultCanonical = await realpath(altDefaultDir).catch(() => altDefaultDir);
+    seenPaths.add(altDefaultCanonical);
   }
 
   for (const inst of claudeRegistry.instances) {
@@ -789,6 +787,22 @@ export async function discoverClaudeProfiles({ env = process.env, home = "", dat
         isDesktopInstance: true,
       });
     }
+  }
+
+  const launchDirs = await scanLaunchAgentEnvVars(["CLAUDE_CONFIG_DIR"], resolvedHome);
+  for (const item of launchDirs) {
+    await addProfile(basename(item.path).replace(/^\.claude-?/, "") || "agent", `Claude · ${basename(item.path)}`, item.path, true);
+  }
+
+  const homeEntries = await readdir(resolvedHome, { withFileTypes: true }).catch(() => []);
+  for (const entry of homeEntries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(".claude-")) continue;
+    const candidate = resolve(resolvedHome, entry.name);
+    const hasMarker = await pathExists(resolve(candidate, "projects"))
+      || await pathExists(resolve(candidate, "sessions"));
+    if (!hasMarker) continue;
+    const suffix = entry.name.slice(".claude-".length);
+    await addProfile(suffix, `Claude · ${suffix}`, candidate, true);
   }
 
   if (dataDir) {

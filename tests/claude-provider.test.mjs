@@ -959,8 +959,10 @@ test("claude-provider readThread preserves file mtime updatedAt consistent with 
   const provider = new ClaudeProvider({
     env: {
       ...process.env,
+      HOME: dir,
+      USERPROFILE: dir,
       CLAUDE_CONFIG_DIR: dir,
-      AGENT_CONTROL_CLAUDE_BIN: MOCK_CLAUDE_BIN,
+      CLAUDE_BIN: MOCK_CLAUDE_BIN,
     },
   });
   const listed = await provider.listThreads("default", { limit: 20 });
@@ -970,4 +972,116 @@ test("claude-provider readThread preserves file mtime updatedAt consistent with 
 
   const detail = await provider.readThread("default", sessionId, { limit: 20 });
   assert.equal(detail.thread.updatedAt, laterSec);
+});
+
+test("discoverClaudeProfiles merges Cockpit desktop dedicated CLI dirs without creating duplicate -2 profiles", async (t) => {
+  const fakeHome = await mkdtemp(resolve(os.tmpdir(), "ac-claude-dedup-"));
+  t.after(() => rm(fakeHome, { recursive: true, force: true }));
+
+  const defaultClaudeDir = resolve(fakeHome, ".claude");
+  const defaultDesktopDir = resolve(fakeHome, "Library", "Application Support", "Claude");
+  const desktopHotmailDir = resolve(fakeHome, ".cockpit_tools", "instances", "claude", "06c986e6");
+  const cockpitDir = resolve(fakeHome, ".antigravity_cockpit");
+  const dedicatedHotmailDir = resolve(fakeHome, ".claude-claude-hotmail");
+  const altDefaultDir = resolve(fakeHome, ".claude-default");
+  const workCliDir = resolve(fakeHome, ".claude-work");
+
+  const histDeskId = "hist-desk-1";
+  const cliSessId = "cli-sess-1";
+  const deskProjDir = resolve(defaultClaudeDir, "projects", "-tmp-proj");
+  const hotmailClaimsDir = resolve(desktopHotmailDir, "claude-code-sessions", "acct-hot", "org-hot");
+  const dedicatedProjDir = resolve(dedicatedHotmailDir, "projects", "-tmp-cli");
+
+  await Promise.all([
+    mkdir(deskProjDir, { recursive: true }),
+    mkdir(defaultDesktopDir, { recursive: true }),
+    mkdir(hotmailClaimsDir, { recursive: true }),
+    mkdir(cockpitDir, { recursive: true }),
+    mkdir(dedicatedProjDir, { recursive: true }),
+    mkdir(resolve(dedicatedHotmailDir, "sessions"), { recursive: true }),
+    mkdir(resolve(altDefaultDir, "projects"), { recursive: true }),
+    mkdir(resolve(workCliDir, "projects"), { recursive: true }),
+  ]);
+
+  await writeFile(resolve(deskProjDir, `${histDeskId}.jsonl`), `${JSON.stringify({
+    type: "user",
+    uuid: "u-d1",
+    cwd: "/tmp/proj",
+    timestamp: "2026-11-16T01:00:00Z",
+    message: { role: "user", content: "桌面版历史会话" },
+  })}\n`, "utf8");
+
+  await writeFile(resolve(hotmailClaimsDir, "local_hot.json"), JSON.stringify({
+    cliSessionId: histDeskId,
+    lastAssistantCliSessionId: histDeskId,
+  }), "utf8");
+
+  await writeFile(resolve(dedicatedProjDir, `${cliSessId}.jsonl`), `${JSON.stringify({
+    type: "user",
+    uuid: "u-c1",
+    cwd: "/tmp/cli",
+    timestamp: "2026-11-16T02:00:00Z",
+    message: { role: "user", content: "专属 CLI 会话" },
+  })}\n`, "utf8");
+
+  await writeFile(resolve(dedicatedHotmailDir, ".mock-auth-status.json"), JSON.stringify({
+    loggedIn: true,
+    authMethod: "claude.ai",
+    email: "user@hotmail.com",
+  }), "utf8");
+
+  await writeFile(resolve(altDefaultDir, ".mock-auth-status.json"), JSON.stringify({
+    loggedIn: true,
+    authMethod: "claude.ai",
+    email: "user@icloud.com",
+  }), "utf8");
+
+  await writeFile(resolve(cockpitDir, "claude_accounts.json"), JSON.stringify({
+    accounts: [
+      { id: "acct_icloud", email: "user@icloud.com", plan_type: "Free", account_uuid: "acct-ic", organization_uuid: "org-ic" },
+      { id: "acct_hotmail", email: "user@hotmail.com", plan_type: "Pro", account_uuid: "acct-hot", organization_uuid: "org-hot" },
+    ],
+  }), "utf8");
+
+  await writeFile(resolve(cockpitDir, "claude_instances.json"), JSON.stringify({
+    defaultSettings: {
+      bindAccountId: "acct_icloud",
+      followLocalAccount: false,
+    },
+    instances: [
+      {
+        id: "inst-hot",
+        name: "claude hotmail",
+        userDataDir: desktopHotmailDir,
+        bindAccountId: "acct_hotmail",
+      },
+    ],
+  }), "utf8");
+
+  const testEnv = {
+    ...process.env,
+    HOME: fakeHome,
+    USERPROFILE: fakeHome,
+    CLAUDE_BIN: MOCK_CLAUDE_BIN,
+  };
+  delete testEnv.CLAUDE_CONFIG_DIR;
+
+  const provider = new ClaudeProvider({ env: testEnv });
+  t.after(() => provider.close());
+
+  const profiles = await provider.listProfiles();
+  assert.deepEqual(profiles.map((p) => p.id), ["default", "claude-hotmail", "work"]);
+
+  const hotmailProfile = profiles.find((p) => p.id === "claude-hotmail");
+  assert.equal(hotmailProfile?.isDesktopInstance, true);
+  assert.equal(hotmailProfile?.dedicatedCliConfigDir, dedicatedHotmailDir);
+  assert.equal(hotmailProfile?.cliConfigDir, dedicatedHotmailDir);
+  assert.equal(hotmailProfile?.historyDir, defaultClaudeDir);
+
+  const defaultProfile = profiles.find((p) => p.id === "default");
+  assert.equal(defaultProfile?.cliConfigDir, altDefaultDir);
+
+  const hotmailThreads = await provider.listThreads("claude-hotmail");
+  assert.ok(hotmailThreads.some((th) => th.rawId === histDeskId));
+  assert.ok(hotmailThreads.some((th) => th.rawId === cliSessId));
 });
