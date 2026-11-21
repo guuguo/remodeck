@@ -142,7 +142,7 @@ detect_existing_remote_mode() {
 if [[ "$REMOTE_MODE" == "auto" ]]; then
   if [[ "$ALREADY_INSTALLED" == "true" ]]; then
     REMOTE_MODE="$(detect_existing_remote_mode)"
-    echo "检测到本机已安装 Agent Control，跳过方案选择并直接更新（远程模式: $REMOTE_MODE）。"
+    echo "检测到本机已安装 Agent Control，跳过方案选择并直接更新（远程模式: ${REMOTE_MODE}）。"
   elif [[ -r /dev/tty && -w /dev/tty && "${AGENT_CONTROL_NONINTERACTIVE:-0}" != "1" ]]; then
     echo "" > /dev/tty
     echo "请选择手机远程接入方案（安装后可随时在页面或命令行切换）：" > /dev/tty
@@ -505,7 +505,7 @@ if [[ "$REMOTE_MODE" == "cloudflare" || "$REMOTE_MODE" == "named" ]]; then
   echo "[3/5] 正在配置 cloudflared ($REMOTE_MODE 模式)..."
   install_cloudflared_if_missing || true
 else
-  echo "[3/5] 已选择远程模式: $REMOTE_MODE（跳过自动安装 cloudflared，后续随时可用 agent-control remote cloudflare 补装）"
+  echo "[3/5] 已选择远程模式: ${REMOTE_MODE}（跳过自动安装 cloudflared，后续随时可用 agent-control remote cloudflare 补装）"
 fi
 
 if [[ "$INSTALL_SERVICE" == "true" ]]; then
@@ -569,7 +569,7 @@ if [[ -n "$INSTALLED_APP_PATH" ]]; then
   echo "  桌面应用: $INSTALLED_APP_PATH"
 fi
 echo "  命令行工具: $CLI_PATH"
-echo "  远程接入模式: $REMOTE_MODE（可在界面「手机远程」或 agent-control remote 随时切换）"
+echo "  远程接入模式: ${REMOTE_MODE}（可在界面「手机远程」或 agent-control remote 随时切换）"
 if [[ -n "$RELAY_PAIR_NOTE" ]]; then
   echo "  中继状态: $RELAY_PAIR_NOTE"
 fi
