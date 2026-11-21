@@ -850,6 +850,8 @@
 
 /* Project Multi-Task Board */
 .project-board {
+  width: 100%;
+  min-width: 0;
   max-width: 1060px;
   margin: 0 auto;
   display: flex;
@@ -2337,6 +2339,9 @@ body.is-immersive-overview #projectBoard {
 .mo-deck-shell {
   position: relative;
   isolation: isolate;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -2376,6 +2381,9 @@ body.is-immersive-overview #projectBoard {
 .mo-cockpit-hero {
   position: relative;
   overflow: hidden;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   border-radius: 16px;
   padding: 16px 18px;
   background: linear-gradient(145deg, rgba(16, 23, 36, 0.92), rgba(10, 15, 24, 0.88));
@@ -2981,13 +2989,14 @@ body.is-immersive-overview #projectBoard {
 
 .mo-topic-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(355px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(355px, 100%), 1fr));
   gap: 14px;
 }
 
 @media (max-width: 640px) {
   .mo-topic-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
   }
 }
 
@@ -2995,6 +3004,8 @@ body.is-immersive-overview #projectBoard {
 .mo-unassigned-card {
   position: relative;
   overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
   background: linear-gradient(165deg, rgba(20, 27, 40, 0.88), rgba(13, 18, 28, 0.92));
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-top: 1px solid rgba(var(--dom-rgb), 0.38);
@@ -3837,11 +3848,14 @@ body.is-immersive-overview #projectBoard {
 
 @media (max-width: 760px) {
   .mo-tycoon-sandbox {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
   }
 }
 
 .mo-tycoon-panel {
+  min-width: 0;
+  max-width: 100%;
   border-radius: 13px;
   border: 1px solid rgba(255, 255, 255, 0.085);
   background: linear-gradient(160deg, rgba(16, 23, 36, 0.9), rgba(11, 16, 26, 0.94));
@@ -4210,7 +4224,7 @@ body.is-immersive-overview #projectBoard {
 /* 5-Stage Production Pipeline Meter */
 .mo-pipeline-track {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 4px;
   padding: 5px 6px;
   border-radius: 8px;
@@ -4584,7 +4598,7 @@ body.is-immersive-overview #projectBoard {
 
 @media (max-width: 860px) {
   .mo-hud-metrics.is-compact-strip {
-    grid-template-columns: repeat(2, minmax(120px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -8266,6 +8280,189 @@ body.is-tycoon3d-active #projectBoard {
 .tycoon3d-tag.is-resting.is-selected,
 .tycoon3d-tag.is-resting.is-search-hit {
   opacity: 1;
+}
+
+/* ===== 梦工厂列表模式移动端适配 (<= 640px) ===== */
+@media (max-width: 640px) {
+  .mo-deck-shell {
+    gap: 14px;
+    padding-bottom: 20px;
+  }
+
+  .mo-ambient-bg {
+    inset: -10px -10px 0 -10px;
+  }
+
+  .mo-cockpit-hero {
+    padding: 12px;
+    gap: 10px;
+    border-radius: 13px;
+  }
+
+  .mo-cockpit-top {
+    gap: 9px;
+  }
+
+  .mo-cockpit-brand {
+    flex: 1 1 100%;
+    gap: 10px;
+  }
+
+  .mo-sonar-orb {
+    width: 30px;
+    height: 30px;
+  }
+
+  .mo-title-line {
+    gap: 6px 8px;
+  }
+
+  .mo-kicker {
+    font-size: 11.5px;
+    letter-spacing: 0.04em;
+  }
+
+  .mo-cockpit-controls {
+    width: 100%;
+    gap: 6px;
+  }
+
+  .mo-refresh-pop {
+    left: 0;
+    right: auto;
+    max-width: calc(100vw - 44px);
+  }
+
+  .mo-dispatcher-bar {
+    padding: 9px 10px;
+    border-radius: 10px;
+  }
+
+  .mo-dispatch-controls {
+    gap: 6px;
+  }
+
+  .mo-dispatch-select,
+  .mo-dispatch-select.is-mode,
+  .mo-dispatch-select.is-priority,
+  .mo-dispatch-select.is-order,
+  .mo-dispatch-select.is-agent,
+  .mo-dispatch-select.is-model {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  .mo-inherit-toggle {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: 100%;
+    height: 32px;
+  }
+
+  .mo-dispatch-input-wrap {
+    flex: 1 1 100%;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .mo-dispatch-preview-btn,
+  .mo-dispatch-submit-btn {
+    flex: 1 1 calc(50% - 4px);
+    justify-content: center;
+  }
+
+  .mo-tycoon-panel {
+    padding: 10px;
+  }
+
+  .mo-pipe-step {
+    gap: 2px;
+    padding: 2px 1px;
+    font-size: 9.5px;
+  }
+
+  .mo-pipe-node {
+    width: 12px;
+    height: 12px;
+    font-size: 8.5px;
+  }
+
+  .mo-spark-form {
+    flex-wrap: wrap;
+  }
+
+  .mo-spark-input {
+    flex: 1 1 140px;
+  }
+
+  .mo-hud-metrics.is-compact-strip {
+    gap: 8px;
+  }
+
+  .mo-metric-tile {
+    padding: 8px 10px;
+  }
+
+  .mo-radar-bar {
+    padding: 7px 9px;
+  }
+
+  .mo-radar-pills {
+    width: 100%;
+  }
+
+  .mo-radar-pill {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .mo-filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .mo-domain-pills {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .mo-search-wrap {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .mo-topic-card,
+  .mo-unassigned-card {
+    padding: 12px;
+    border-radius: 12px;
+  }
+
+  .mo-topic-head {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .mo-topic-actions {
+    flex-wrap: wrap;
+  }
+
+  .mo-origin-tag {
+    max-width: 78px;
+  }
+
+  .mo-kpi-edit-row {
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr) minmax(0, 0.9fr);
+  }
+
+  .mo-kpi-input {
+    min-width: 0;
+    width: 100%;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
