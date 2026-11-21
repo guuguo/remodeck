@@ -36,6 +36,18 @@ function shellQuote(value) {
   return `'${str.replace(/'/g, `'\\''`)}'`;
 }
 
+// Must mirror claudeEnvironment(): runs against ~/.claude drop CLAUDE_CONFIG_DIR,
+// and the macOS keychain entry name depends on whether that variable is set
+// ("Claude Code-credentials" vs "Claude Code-credentials-<hash>"), so logging in
+// with an explicit CLAUDE_CONFIG_DIR=~/.claude would never be seen at runtime.
+function claudeLoginCommand(cliDir, env, homeDir) {
+  const resolvedDir = resolve(String(cliDir));
+  if (resolvedDir === resolve(homeDir, ".claude") && !String(env?.CLAUDE_CONFIG_DIR || "").trim()) {
+    return "env -u CLAUDE_CONFIG_DIR claude auth login";
+  }
+  return `CLAUDE_CONFIG_DIR=${shellQuote(resolvedDir)} claude auth login`;
+}
+
 function applescriptQuote(value) {
   return `"${String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
@@ -263,7 +275,7 @@ export class ClaudeProvider {
       const account = await readClaudePublicAccount(cliDir, homeDir, profile.cockpitAccount || null, {
         allowHomeFallback,
       });
-      const loginCommand = `CLAUDE_CONFIG_DIR=${shellQuote(cliDir)} claude auth login`;
+      const loginCommand = claudeLoginCommand(cliDir, this.#env, homeDir);
       const needsLogin = Boolean(profile.managed && !account.signedIn && !endpoint.endpointHost);
       return {
         ...profile,
@@ -639,7 +651,8 @@ export class ClaudeProvider {
     const profile = await this.#getProfile(profileId);
     const cliDir = this.#configDirFor(profile);
     await mkdir(cliDir, { recursive: true, mode: 0o700 });
-    const loginCommand = `CLAUDE_CONFIG_DIR=${shellQuote(cliDir)} claude auth login`;
+    const homeDir = resolveUserHome(this.#env, process.platform, os.homedir());
+    const loginCommand = claudeLoginCommand(cliDir, this.#env, homeDir);
     let openedTerminal = false;
     if (process.platform === "darwin" && openOnHost && this.#env.AGENT_CONTROL_NO_HOST_OPEN !== "1") {
       try {

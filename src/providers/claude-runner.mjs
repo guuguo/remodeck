@@ -1074,7 +1074,7 @@ export async function probeClaudeProfile({
         );
       }
       throw new Error(
-        `401 CLI未登录：Claude 桌面 App 内置登录态不写入终端 CLI 凭证（桌面历史可正常读取）；请在终端执行 claude auth login${emailArg}`,
+        `401 CLI未登录：Claude 桌面 App 内置登录态不写入终端 CLI 凭证（桌面历史可正常读取）；请在终端执行 env -u CLAUDE_CONFIG_DIR claude auth login${emailArg}`,
       );
     }
   }

@@ -1779,7 +1779,7 @@ export function renderProfilePillsHtml(profiles = [], {
       && !showQuickLogin
       && (meta.badgeText === "CLI未登录" || p.health?.reasonCode === "auth")
     )
-      ? String(p.health?.detail || "").match(/((?:CLAUDE_CONFIG_DIR=\S+\s+)?claude auth login(?:\s+--email\s+\S+)?)/i)
+      ? String(p.health?.detail || "").match(/((?:env -u CLAUDE_CONFIG_DIR\s+|CLAUDE_CONFIG_DIR=\S+\s+)?claude auth login(?:\s+--email\s+\S+)?)/i)
       : null;
     const copyLoginCmd = authCmdMatch?.[1] ? authCmdMatch[1].trim() : "";
     const subParts = [];
