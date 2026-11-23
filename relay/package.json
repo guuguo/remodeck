@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Outbound relay for Agent Control hosts and paired mobile browsers.",
   "private": true,
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "start": "node relay-server.mjs"

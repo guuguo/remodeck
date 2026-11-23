@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/Node.js-22%2B-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node.js 22+" />
   <img src="https://img.shields.io/badge/OS-macOS%20%7C%20Linux%20%7C%20Windows-64748b?style=flat-square" alt="OS" />
   <img src="https://img.shields.io/badge/UI%20Languages-EN%20%7C%20%E7%AE%80%20%7C%20%E7%B9%81%20%7C%20%E6%97%A5%20%7C%20%ED%95%9C-8b5cf6?style=flat-square" alt="5 UI Languages" />
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-f59e0b?style=flat-square" alt="AGPL-3.0" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e?style=flat-square" alt="MIT" /></a>
 </p>
 
 <p align="center">
@@ -250,7 +250,7 @@ npm run desktop:install   # macOS 构建安装 /Applications/Agent Control.app
 
 ## License
 
-[AGPL-3.0-only](LICENSE)
+[MIT](LICENSE)
 
 ## 致谢与社区认可
 

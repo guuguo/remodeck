@@ -3,7 +3,7 @@
   "version": "0.2.4",
   "description": "Self-hosted remote control console for local Codex, Claude Code, and Antigravity sessions.",
   "private": true,
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"

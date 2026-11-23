@@ -33,4 +33,4 @@ curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.s
 - **5가지 원격 연결 옵션**: Cloudflare 무료 임시 터널(기본), Tailscale Funnel(무료 고정 `*.ts.net`), Cloudflare Named Tunnel, Docker/Sealos 셀프 호스팅 릴레이, 로컬 전용.
 - **핸즈프리 음성 제어**: 운전 중이나 이동 중에도 VAD 음성으로 상태 확인 및 승인 처리 지원.
 
-자세한 내용: [영문 README](README.en.md) · [중국어 간체 README](README.md) · [Antigravity 다국어 런처](https://github.com/guuguo/antigravity-zh-launcher) · [공식 사이트](https://hub.guuguo.top/agent-control) · [원격 배포 가이드](docs/remote-deploy.md) · [AGPL-3.0 라이선스](LICENSE)
+자세한 내용: [영문 README](README.en.md) · [중국어 간체 README](README.md) · [Antigravity 다국어 런처](https://github.com/guuguo/antigravity-zh-launcher) · [공식 사이트](https://hub.guuguo.top/agent-control) · [원격 배포 가이드](docs/remote-deploy.md) · [MIT 라이선스](LICENSE)
