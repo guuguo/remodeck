@@ -17,6 +17,10 @@ Summary: Upgraded the 3D Dream Factory overview and Sprite Assistant, added quic
 - **Higher AGY Auto-Compact Threshold**: Allows raising the Antigravity pre-send auto-compact threshold up to 900K tokens.
 - **Markdown File Links & Image Preview**: Refined local file link resolution and image preview sizing inside chat replies.
 
+### Fixed
+
+- **Hide Background Console Windows on Windows**: Fixed `git`, `sqlite3`, `codex`, and voice worker spawns occasionally flashing blank console windows on Windows during overview, quota, or profile discovery refreshes.
+
 ## v0.2.3 (2026-11-19) — Inline Mermaid Diagrams, Unarchive & Clearer Execution Stats
 
 Summary: Render Mermaid flowcharts inline in chat, unarchive archived Codex sessions in one click, read human-friendly model speed stats, and view dedicated user-facing release notes.

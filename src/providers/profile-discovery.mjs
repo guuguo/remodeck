@@ -1,19 +1,16 @@
-import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { access, readdir, readFile, realpath, stat } from "node:fs/promises";
 import os from "node:os";
 import { basename, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { promisify } from "node:util";
 import { readManagedProfiles } from "../managed-profiles.mjs";
 import {
+  execFileCrossPlatform,
   normalizePlatform,
   providerCandidatePaths,
   resolveExecutableCrossPlatform,
   resolveUserHome,
 } from "../platform.mjs";
-
-const execFileAsync = promisify(execFile);
 
 export function extractPublicEndpointHost(rawUrl) {
   const trimmed = String(rawUrl || "").trim();
@@ -860,7 +857,7 @@ export async function discoverAntigravityProfiles({ env = process.env, home = os
 async function readCockpitPublicAccountRows(sqlitePath) {
   if (!sqlitePath || !(await pathExists(sqlitePath))) return [];
   try {
-    const { stdout = "" } = await execFileAsync(
+    const { stdout = "" } = await execFileCrossPlatform(
       "sqlite3",
       [
         "-readonly",

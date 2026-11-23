@@ -3671,6 +3671,7 @@ export class VoiceCallService {
       try {
         child = spawn(pythonBin, [workerScript], {
           env: { ...this.#env },
+          windowsHide: true,
           stdio: ["pipe", "pipe", "pipe"],
         });
       } catch (error) {
@@ -3827,6 +3828,7 @@ export class VoiceCallService {
             HF_HUB_OFFLINE: "1",
             TRANSFORMERS_OFFLINE: "1",
           },
+          windowsHide: true,
           stdio: ["pipe", "pipe", "pipe"],
         });
       } catch (error) {
@@ -3972,6 +3974,7 @@ export class VoiceCallService {
             HF_HUB_OFFLINE: "1",
             TRANSFORMERS_OFFLINE: "1",
           },
+          windowsHide: true,
           stdio: ["pipe", "pipe", "pipe"],
         });
       } catch (error) {

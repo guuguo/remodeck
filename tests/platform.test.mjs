@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -332,4 +332,37 @@ test("service renderers emit valid launchd, systemd, and Windows runner artifact
     nodeVersion: "22.9.0",
   });
   assert.match(legacyNodeWin.cmdContent, /"--experimental-sqlite" "D:\\dev\\agent-control\\src\\server\.mjs"/);
+});
+
+test("prepareCrossPlatformSpawn hides console windows for git and sqlite3 on Windows", () => {
+  const gitLaunch = prepareCrossPlatformSpawn("git", ["-C", "E:\\repo", "status"], { timeout: 2500 }, { platform: "win32" });
+  assert.equal(gitLaunch.command, "git");
+  assert.equal(gitLaunch.options.windowsHide, true);
+  assert.equal(gitLaunch.options.shell, false);
+
+  const sqliteLaunch = prepareCrossPlatformSpawn("sqlite3", ["-readonly", "-json", "db.sqlite"], { timeout: 2000 }, { platform: "win32" });
+  assert.equal(sqliteLaunch.command, "sqlite3");
+  assert.equal(sqliteLaunch.options.windowsHide, true);
+  assert.equal(sqliteLaunch.options.shell, false);
+});
+
+test("background execFile/spawn callers enforce windowsHide on Windows", async () => {
+  const repoRoot = join(import.meta.dirname, "..");
+  for (const relPath of [
+    "src/mission-overview-service.mjs",
+    "src/quota-service.mjs",
+    "src/providers/profile-discovery.mjs",
+    "src/providers/codex-provider.mjs",
+  ]) {
+    const src = await readFile(join(repoRoot, relPath), "utf8");
+    assert.doesNotMatch(src, /promisify\(execFile\)/, `${relPath} must not use raw promisify(execFile)`);
+    assert.match(src, /execFileCrossPlatform/, `${relPath} must use execFileCrossPlatform`);
+  }
+
+  const voiceSrc = await readFile(join(repoRoot, "src/voice-call-service.mjs"), "utf8");
+  const spawnBlocks = voiceSrc.match(/child\s*=\s*spawn\([\s\S]*?\}\);/g) || [];
+  assert.equal(spawnBlocks.length, 3);
+  for (const block of spawnBlocks) {
+    assert.match(block, /windowsHide:\s*true/, "voice-call-service spawn call must set windowsHide: true");
+  }
 });

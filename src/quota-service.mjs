@@ -1,16 +1,13 @@
-import { execFile } from "node:child_process";
 import { open, readdir, readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { promisify } from "node:util";
 import { formatProfileKey } from "./composite-id.mjs";
-import { resolveUserHome } from "./platform.mjs";
+import { execFileCrossPlatform, resolveUserHome } from "./platform.mjs";
 import {
   defaultClaudeDesktopUserDataDir,
   readClaudeDesktopSessionsMeta,
 } from "./providers/profile-discovery.mjs";
 
-const execFileAsync = promisify(execFile);
 const TAIL_READ_BYTES = 128 * 1024;
 const MAX_CLAUDE_FILES = 20;
 const MAX_CODEX_FILES = 5;
@@ -183,7 +180,7 @@ async function readCockpitAccountRows(sqlitePath) {
   const st = await stat(sqlitePath).catch(() => null);
   if (!st?.isFile()) return [];
   try {
-    const { stdout = "" } = await execFileAsync(
+    const { stdout = "" } = await execFileCrossPlatform(
       "sqlite3",
       [
         "-readonly",

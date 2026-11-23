@@ -1,17 +1,19 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { promisify } from "node:util";
 import { defaultDataDir } from "./instance-identity.mjs";
 import { MemoryVault, getSection, parseTable, resolveVaultPath, today as vaultToday } from "./memory-vault.mjs";
-import { prepareCrossPlatformSpawn, killProcessTreeCrossPlatform, normalizeWorkspacePath } from "./platform.mjs";
+import {
+  execFileCrossPlatform,
+  killProcessTreeCrossPlatform,
+  normalizeWorkspacePath,
+  prepareCrossPlatformSpawn,
+} from "./platform.mjs";
 import { claudeEnvironment, claudeExecutable, readClaudeCliAuthStatus } from "./providers/claude-runner.mjs";
 import { resolveProviderExecutables } from "./providers/profile-discovery.mjs";
-
-const execFileAsync = promisify(execFile);
 
 export const DOMAINS_SCHEMA_VERSION = 3;
 export const DEFAULT_OVERVIEW_COOLDOWN_MS = 30 * 60 * 1000;
@@ -687,11 +689,11 @@ export async function collectRepoGitSnapshot(cwd, { timeoutMs = 2_500 } = {}) {
   if (!cleanCwd) return null;
   try {
     const [logRes, statusRes] = await Promise.all([
-      execFileAsync("git", ["-C", cleanCwd, "log", "-n", "3", "--format=%h %s (%cr)"], {
+      execFileCrossPlatform("git", ["-C", cleanCwd, "log", "-n", "3", "--format=%h %s (%cr)"], {
         timeout: timeoutMs,
         maxBuffer: 64 * 1024,
       }).catch(() => ({ stdout: "" })),
-      execFileAsync("git", ["-C", cleanCwd, "status", "--porcelain"], {
+      execFileCrossPlatform("git", ["-C", cleanCwd, "status", "--porcelain"], {
         timeout: timeoutMs,
         maxBuffer: 64 * 1024,
       }).catch(() => ({ stdout: "" })),

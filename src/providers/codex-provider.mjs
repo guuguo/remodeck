@@ -1,9 +1,9 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import { resolve } from "node:path";
-import { promisify } from "node:util";
 import { formatCompositeThreadId } from "../composite-id.mjs";
+import { execFileCrossPlatform } from "../platform.mjs";
 import { codexExecutionPolicy } from "../permissions.mjs";
 import { cleanPreviewText, displayThreadTitle } from "../thread-display.mjs";
 import { visibleControlThreads } from "../thread-access.mjs";
@@ -26,8 +26,6 @@ import {
 } from "./codex-thread-index.mjs";
 import { CodexThreadWriterRegistry } from "./codex-thread-writer.mjs";
 import { discoverCodexProfiles, readCodexPublicEndpoint } from "./profile-discovery.mjs";
-
-const execFileAsync = promisify(execFile);
 
 const CODEX_ACTIVE_WRITER_RE = /already has an active writer|\bactive writer\b|thread is busy|already running|turn in progress/i;
 const CODEX_STEER_FALLBACK_RE = /thread not found|no active turn|turn.*not.*in progress|turn not found|expectedTurnId/i;
@@ -125,7 +123,7 @@ export class CodexProvider {
   constructor({
     env = process.env,
     dataDir = "",
-    execFileImpl = execFileAsync,
+    execFileImpl = execFileCrossPlatform,
     onEvent = () => {},
     onServerRequest = () => {},
   } = {}) {
