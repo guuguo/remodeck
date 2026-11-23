@@ -17,7 +17,7 @@ try {
   $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 } catch {}
 
-$RepoUrl = if ($env:AGENT_CONTROL_REPO_URL) { $env:AGENT_CONTROL_REPO_URL } else { "https://github.com/guuguo/agent-control.git" }
+$RepoUrl = if ($env:AGENT_CONTROL_REPO_URL) { $env:AGENT_CONTROL_REPO_URL } else { "https://github.com/guuguo/remodeck.git" }
 $RepoBranch = if ($env:AGENT_CONTROL_BRANCH) { $env:AGENT_CONTROL_BRANCH } else { "main" }
 
 function Resolve-AgentControlDataDir {
@@ -44,7 +44,7 @@ function Show-AgentControlTroubleshoot {
 
   Write-Host ""
   Write-Host "==================================================" -ForegroundColor Red
-  Write-Host "  Agent Control 安装或启动失败" -ForegroundColor Red
+  Write-Host "  RemoDeck (Agent Control) 安装或启动失败" -ForegroundColor Red
   Write-Host "==================================================" -ForegroundColor Red
   if ($Reason) {
     Write-Host "  错误原因: $Reason" -ForegroundColor Red
@@ -255,7 +255,7 @@ try {
 
   Write-Host ""
   Write-Host "==================================================" -ForegroundColor Green
-  Write-Host "  Agent Control 安装完成" -ForegroundColor Green
+  Write-Host "  RemoDeck (Agent Control) 安装完成" -ForegroundColor Green
   Write-Host "  源码目录: $appDir"
   Write-Host "  数据目录: $dataDir"
   Write-Host "  日志目录: $(Join-Path $dataDir 'logs')"
@@ -269,7 +269,7 @@ try {
     Write-Host "  服务状态: 运行中"
   }
   Write-Host ""
-  Write-Host "  If this helps you, consider giving it a Star: https://github.com/guuguo/agent-control" -ForegroundColor Cyan
+  Write-Host "  If this helps you, consider giving it a Star: https://github.com/guuguo/remodeck" -ForegroundColor Cyan
   Write-Host "==================================================" -ForegroundColor Green
 
   if (-not $NoOpen -and -not $NoService) {

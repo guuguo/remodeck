@@ -33,4 +33,4 @@ if ($Purge) {
   }
 }
 
-Write-Host "[3/3] Agent Control 卸载完成。" -ForegroundColor Green
+Write-Host "[3/3] RemoDeck (Agent Control) 卸载完成。" -ForegroundColor Green

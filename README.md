@@ -1,9 +1,9 @@
 [简体中文](README.md) · **[English](README.en.md)** · [日本語](README.ja.md) · [한국어](README.ko.md) · [繁體中文](README.zh-TW.md)
 
-<h1 align="center">Agent Control</h1>
+<h1 align="center">RemoDeck</h1>
 
 <p align="center">
-  <strong>把 Codex、Claude Code、Antigravity、Grok 和 Qoder 收进一个桌面 + 手机遥控台</strong><br />
+  <strong>把 Codex、Claude Code、Antigravity、Grok 和 Qoder 收进一个桌面 + 手机遥控台</strong>（原 Agent Control）<br />
   出门扫码实时看进度、批权限、打断纠偏、排队派活，不改动原工具的任何配置与数据库。
 </p>
 
@@ -26,19 +26,19 @@
 
 > [!IMPORTANT]
 > **安全与隐私保证（安装前必看）**
-> - **严格只读解析上游记录**：只读解析 `~/.codex`、`~/.claude`、`~/.gemini`，自定义标题、置顶与归档保存在 Agent Control 独立数据目录，**绝不修改**上游工具的任何配置或数据库。
+> - **严格只读解析上游记录**：只读解析 `~/.codex`、`~/.claude`、`~/.gemini`，自定义标题、置顶与归档保存在 RemoDeck（Agent Control）独立数据目录，**绝不修改**上游工具的任何配置或数据库。
 > - **零云端代码与对话存储**：你的代码、Prompt 与对话只留在本机。手机远程通过你自选的隧道或自托管中继直连，配合一次性配对码与 HttpOnly Cookie 鉴权。
 > - **零凭证抓取**：多账号自动发现仅读取显式环境变量、公开路径与展示标签/邮箱，**不读取或转发任何 Token / API Key**。
 
 ---
 
-## 🔄 为什么用 Agent Control？
+## 🔄 为什么用 RemoDeck？
 
 | 日常方案 | 多引擎支持 | 多账号 Codex 额度 | 手机远程与语音控制 | 上手与桌面体验 |
 | --- | :---: | :---: | :---: | --- |
 | 多开 IDE / 终端窗口 | ❌ 各自独立窗口 | ❌ 靠终端盲猜 | ❌ 人离开电脑就断联 | 内存占用高 |
 | 单引擎 Bot / 网页桥接 | ❌ 通常仅单一模型 | ❌ | ⚠️ 需手动配 Bot / Tailscale | ❌ 仅网页或无头服务 |
-| **Agent Control** | ✅ **Codex + Claude + Antigravity + Grok + Qoder** | ✅ **自动识别并标注账号归属** | ✅ **5 秒扫码手机端 + 开车免提语音审批** | ✅ **3D 梦工厂 + macOS / Linux / Windows 客户端** |
+| **RemoDeck** | ✅ **Codex + Claude + Antigravity + Grok + Qoder** | ✅ **自动识别并标注账号归属** | ✅ **5 秒扫码手机端 + 开车免提语音审批** | ✅ **3D 梦工厂 + macOS / Linux / Windows 客户端** |
 
 ---
 
@@ -49,7 +49,7 @@
 **macOS / Linux**（打开「终端」粘贴回车）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/install.sh | bash
 ```
 
 Linux 支持 GTK/WebKitGTK 原生桌面壳和 systemd 用户服务；桌面依赖安装及无桌面、SSH、容器、WSL 的运行方式见 [Linux 安装与运行](docs/linux.md)。
@@ -57,14 +57,14 @@ Linux 支持 GTK/WebKitGTK 原生桌面壳和 systemd 用户服务；桌面依�
 **Windows**（打开 **PowerShell** 粘贴回车）：
 
 ```powershell
-(irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://raw.githubusercontent.com/guuguo/remodeck/main/install.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 **更喜欢先看源码再手动启动？**
 
 ```bash
-git clone https://github.com/guuguo/agent-control.git
-cd agent-control
+git clone https://github.com/guuguo/remodeck.git
+cd remodeck
 npm install
 npm start
 ```
@@ -146,13 +146,13 @@ npm start
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/uninstall.sh | bash
 ```
 
 **Windows (PowerShell)：**
 
 ```powershell
-(irm https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://raw.githubusercontent.com/guuguo/remodeck/main/uninstall.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ---
@@ -160,34 +160,34 @@ curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall
 <details>
 <summary>进阶用法、命令行切换、自托管部署与开发者说明（按需展开）</summary>
 
-### 1. 命令行快捷管理（macOS / Linux）
+### 1. 命令行快捷管理（macOS / Linux，同时兼容旧命令 `agent-control`）
 
 ```bash
-agent-control open                # 打开桌面应用或控制台
-agent-control status              # 查看服务状态
-agent-control logs                # 查看服务日志
-agent-control restart             # 重启后台服务
-agent-control remote status       # 查看当前隧道/中继/固定链接状态
-agent-control remote cloudflare   # 切换或补装 Cloudflare 免费隧道
-agent-control remote tailscale    # 开启 Tailscale Funnel（0 元永久 *.ts.net）
-agent-control remote relay        # 切换并绑定自托管固定中继
-agent-control update              # 拉取最新版本并更新桌面端
+remodeck open                # 打开桌面应用或控制台
+remodeck status              # 查看服务状态
+remodeck logs                # 查看服务日志
+remodeck restart             # 重启后台服务
+remodeck remote status       # 查看当前隧道/中继/固定链接状态
+remodeck remote cloudflare   # 切换或补装 Cloudflare 免费隧道
+remodeck remote tailscale    # 开启 Tailscale Funnel（0 元永久 *.ts.net）
+remodeck remote relay        # 切换并绑定自托管固定中继
+remodeck update              # 拉取最新版本并更新桌面端
 ```
 
 ### 2. 非交互指定安装参数
 
 ```bash
 # 默认：Cloudflare 免费临时隧道
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote cloudflare
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/install.sh | bash -s -- --remote cloudflare
 
 # Tailscale Funnel（0 元免域名固定链接）
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote tailscale
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/install.sh | bash -s -- --remote tailscale
 
 # 直接连接自己的中继服务器
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote relay --relay-url https://relay.example.com --invite 你的邀请码
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/install.sh | bash -s -- --remote relay --relay-url https://relay.example.com --invite 你的邀请码
 
 # 仅本机使用
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote local
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/install.sh | bash -s -- --remote local
 ```
 
 ### 3. 一键容器部署固定中继（Sealos 约 ¥5~15/月 · Docker）
@@ -195,7 +195,7 @@ curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.s
 - **任意带 Docker 的服务器（一行容器脚本）**：
 
 ```bash
-git clone https://github.com/guuguo/agent-control.git && cd agent-control
+git clone https://github.com/guuguo/remodeck.git && cd remodeck
 ./deploy/one-click.sh --url https://relay.example.com
 # 如无公网 80/443 入站，可加 --cf-token <CloudflareTunnelToken> 自动打通 HTTPS
 ```
@@ -205,7 +205,7 @@ git clone https://github.com/guuguo/agent-control.git && cd agent-control
   - 或用一键脚本 `KUBECONFIG=~/.kube/sealos.yaml ./deploy/sealos/deploy.sh --host xxxx.cloud.sealos.run`。
   - 👉 完整图文步骤与环境变量说明见 [docs/remote-deploy.md](docs/remote-deploy.md)。
 
-2. 签发一次性配对邀请码并在控制台「手机远程」或 `agent-control remote relay` 中绑定：
+2. 签发一次性配对邀请码并在控制台「手机远程」或 `remodeck remote relay` 中绑定：
 
 ```bash
 RELAY_PUBLIC_URL=https://relay.example.com RELAY_KEY=你的密钥 npm run invite -- "My Mac"
@@ -218,21 +218,21 @@ RELAY_PUBLIC_URL=https://relay.example.com RELAY_KEY=你的密钥 npm run invite
 
 #### Qoder CLI
 
-按 [Qoder 官方安装说明](https://docs.qoder.com/cli/installation) 安装 CLI，并在服务运行用户下执行 `qoder login`（旧命令名为 `qodercli login`，控制台同时支持发现两者）。Agent Control 使用官方 ACP 接口及本机登录状态，不读取登录凭证。
+按 [Qoder 官方安装说明](https://docs.qoder.com/cli/installation) 安装 CLI，并在服务运行用户下执行 `qoder login`（旧命令名为 `qodercli login`，控制台同时支持发现两者）。RemoDeck 使用官方 ACP 接口及本机登录状态，不读取登录凭证。
 
 在底部 Agent 选择器选择 **Qoder**，可使用 Auto、Lite、Performance 模型档位，设置思考强度和权限，发送图片、查看流式回复与工具执行、处理审批、中断任务或加入控制端队列。切换模型、思考或权限后，下一轮重新加载原会话。
 
 规划模式通过规划指令和控制端只读约束执行：拒绝文件写入、终端执行及工具授权请求；不会向不支持 `--permission-mode plan` 的 CLI 传入该值。
 
-本次接入管理从 Agent Control 创建的 Qoder 会话，历史副本保存在 Agent Control 数据目录下的 `qoder-threads.json`；不会扫描或修改 Qoder 的外部历史。重启服务后仍通过原 session ID 续接。未提供积分余额查询；赠送额度、模型可用性和费用以对应 Qoder 账号为准。
+本次接入管理从 RemoDeck 创建的 Qoder 会话，历史副本保存在数据目录下的 `qoder-threads.json`；不会扫描或修改 Qoder 的外部历史。重启服务后仍通过原 session ID 续接。未提供积分余额查询；赠送额度、模型可用性和费用以对应 Qoder 账号为准。
 
 可通过 `QODER_BIN` 指定 CLI 路径，`AGENT_CONTROL_QODER_CONFIG_DIR` 指定 Qoder 配置目录（默认 `~/.qoder`）。侧边栏智能体筛选栏右侧的设置按钮可隐藏不常用的入口，显示偏好保存在当前浏览器中；隐藏后会话仍在“全部”中。
 
 ### 5. 本地开发与零消耗测试
 
 ```bash
-git clone https://github.com/guuguo/agent-control.git
-cd agent-control
+git clone https://github.com/guuguo/remodeck.git
+cd remodeck
 npm install
 npm run check
 npm test

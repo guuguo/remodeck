@@ -1,8 +1,8 @@
 [简体中文](README.md) · [English](README.en.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [繁體中文](README.zh-TW.md)
 
-# Agent Control
+# RemoDeck
 
-> 在電腦與手機上統一檢視 **Codex**、**Claude Code**、**Antigravity** 與 **Grok** 的任務進度、隨時續跑對話與核准權限 —— 一行指令裝好即用，不改動原工具的任何設定與資料庫。
+> *（原 Agent Control）* 在電腦與手機上統一檢視 **Codex**、**Claude Code**、**Antigravity** 與 **Grok** 的任務進度、隨時續跑對話與核准權限 —— 一行指令裝好即用，不改動原工具的任何設定與資料庫。
 
 <p align="center">
   <img src="docs/tutorial/01-desktop-console.png" alt="Agent Control 桌面端主控制台" width="760" />
@@ -18,12 +18,12 @@
 
 **macOS / Linux：**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/install.sh | bash
 ```
 
 **Windows (PowerShell)：**
 ```powershell
-(irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://raw.githubusercontent.com/guuguo/remodeck/main/install.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ## ✨ 核心功能

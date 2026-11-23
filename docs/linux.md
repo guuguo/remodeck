@@ -1,6 +1,6 @@
 # Linux 安装与运行
 
-Linux 支持 GTK + WebKitGTK 原生桌面窗口，也可使用浏览器控制台；支持本机 Agent CLI、历史会话、任务队列、审批和手机远程控制。各 Agent 本身是否支持当前发行版及架构，以该 CLI 为准。
+Linux 支持 GTK + WebKitGTK 原生桌面窗口，也可使用浏览器控制台（RemoDeck / 原 Agent Control）；支持本机 Agent CLI、历史会话、任务队列、审批和手机远程控制。各 Agent 本身是否支持当前发行版及架构，以该 CLI 为准。
 
 ## 原生桌面窗口
 
@@ -32,7 +32,7 @@ agent-control open
 准备 Node.js 22.13+（或 24+）、npm、Git 和 curl，以运行 Agent CLI 的同一用户安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --no-open
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/install.sh | bash -s -- --no-open
 ```
 
 安装器会创建 `systemd --user` 服务与 `~/.local/bin/agent-control`。服务保留安装时的 PATH，包含选中的 Node 所在目录及用户 CLI 目录，兼容通过 nvm、fnm、Volta 或自定义 npm 目录安装的 CLI。修改 CLI 安装路径后，可运行 `agent-control start` 重新生成服务配置。
@@ -58,7 +58,7 @@ sudo loginctl enable-linger "$(id -un)"
 跳过后台服务注册，以前台进程交给现有进程管理器运行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --no-service --no-open --remote local
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/install.sh | bash -s -- --no-service --no-open --remote local
 ~/.local/bin/agent-control run
 ```
 

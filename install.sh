@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${AGENT_CONTROL_REPO_URL:-https://github.com/guuguo/agent-control.git}"
+REPO_URL="${AGENT_CONTROL_REPO_URL:-https://github.com/guuguo/remodeck.git}"
 REPO_BRANCH="${AGENT_CONTROL_BRANCH:-main}"
 INSTALL_DIR="${AGENT_CONTROL_HOME:-$HOME/.local/share/agent-control/app}"
 PORT="${PORT:-43310}"
@@ -18,10 +18,10 @@ OPEN_AFTER="true"
 
 usage() {
   cat <<'EOF'
-Agent Control 一键安装脚本 (macOS / Linux)
+RemoDeck (原 Agent Control) 一键安装脚本 (macOS / Linux)
 
 用法:
-  curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/install.sh | bash
   或本地仓库运行: ./install.sh [选项]
 
 选项:
@@ -500,6 +500,7 @@ case "\$cmd" in
 esac
 EOF
 chmod +x "$CLI_PATH"
+ln -sf "$CLI_PATH" "$LOCAL_BIN/remodeck"
 
 if [[ "$REMOTE_MODE" == "cloudflare" || "$REMOTE_MODE" == "named" ]]; then
   echo "[3/5] 正在配置 cloudflared ($REMOTE_MODE 模式)..."
@@ -561,15 +562,15 @@ fi
 
 echo ""
 echo "=================================================="
-echo "  Agent Control 安装完成"
+echo "  RemoDeck (Agent Control) 安装完成"
 echo "=================================================="
 echo "  源码目录: $APP_DIR"
 echo "  本地控制台: http://127.0.0.1:${PORT}"
 if [[ -n "$INSTALLED_APP_PATH" ]]; then
   echo "  桌面应用: $INSTALLED_APP_PATH"
 fi
-echo "  命令行工具: $CLI_PATH"
-echo "  远程接入模式: ${REMOTE_MODE}（可在界面「手机远程」或 agent-control remote 随时切换）"
+echo "  命令行工具: $LOCAL_BIN/remodeck（兼容别名: $CLI_PATH）"
+echo "  远程接入模式: ${REMOTE_MODE}（可在界面「手机远程」或 remodeck remote 随时切换）"
 if [[ -n "$RELAY_PAIR_NOTE" ]]; then
   echo "  中继状态: $RELAY_PAIR_NOTE"
 fi
@@ -577,24 +578,24 @@ if [[ "$INSTALL_SERVICE" == "true" ]]; then
   if [[ "$HEALTH_OK" == "true" ]]; then
     echo "  服务状态: 运行中 (http://127.0.0.1:${PORT}/health 正常)"
   else
-    echo "  服务状态: 已配置（如端口尚未就绪，可执行 agent-control logs 查看日志）"
+    echo "  服务状态: 已配置（如端口尚未就绪，可执行 remodeck logs 查看日志）"
   fi
 fi
 echo ""
 echo "  常用命令:"
-echo "    agent-control open                打开控制台"
-echo "    agent-control remote status       查看当前隧道/中继状态"
-echo "    agent-control remote cloudflare   切换/准备 Cloudflare 免费隧道"
-echo "    agent-control remote tailscale    开启 Tailscale Funnel 固定链接"
-echo "    agent-control remote relay        切换/绑定自托管固定中继"
-echo "    agent-control update              一键升级到最新版"
-echo "    agent-control uninstall           卸载"
+echo "    remodeck open                打开控制台"
+echo "    remodeck remote status       查看当前隧道/中继状态"
+echo "    remodeck remote cloudflare   切换/准备 Cloudflare 免费隧道"
+echo "    remodeck remote tailscale    开启 Tailscale Funnel 固定链接"
+echo "    remodeck remote relay        切换/绑定自托管固定中继"
+echo "    remodeck update              一键升级到最新版"
+echo "    remodeck uninstall           卸载"
 if [[ ":$PATH:" != *":$LOCAL_BIN:"* ]]; then
   echo ""
-  echo "  提示: 请将 ~/.local/bin 加入 PATH，或直接使用 $CLI_PATH"
+  echo "  提示: 请将 ~/.local/bin 加入 PATH，或直接使用 $LOCAL_BIN/remodeck"
 fi
 echo ""
-echo "  If this helps you, consider giving it a Star: https://github.com/guuguo/agent-control"
+echo "  If this helps you, consider giving it a Star: https://github.com/guuguo/remodeck"
 echo "=================================================="
 
 if [[ "$OPEN_AFTER" == "true" && "$INSTALL_SERVICE" == "true" ]]; then

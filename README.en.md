@@ -1,9 +1,9 @@
 [简体中文](README.md) · **English** · [日本語](README.ja.md) · [한국어](README.ko.md) · [繁體中文](README.zh-TW.md)
 
-<h1 align="center">Agent Control</h1>
+<h1 align="center">RemoDeck</h1>
 
 <p align="center">
-  <strong>Self-hosted desktop &amp; mobile remote control console for Codex, Claude Code, Antigravity, Grok, and Qoder.</strong><br />
+  <strong>Self-hosted desktop &amp; mobile remote control console for Codex, Claude Code, Antigravity, Grok, and Qoder</strong> <em>(formerly Agent Control)</em>.<br />
   Monitor live progress in a 2D board or 3D Dream Factory view, approve tool permissions by tap or voice, track multi-account quotas, and queue follow-ups from any browser.
 </p>
 
@@ -27,19 +27,19 @@
 
 > [!IMPORTANT]
 > **Security & Privacy Guarantee (Read Before Installing)**
-> - **Strictly Read-Only Upstream Indexing**: Reads `~/.codex`, `~/.claude`, and `~/.gemini` histories in read-only mode. Custom titles, tags, pins, and archives live separately in Agent Control's own data directory—your upstream databases and configs are **never** modified.
+> - **Strictly Read-Only Upstream Indexing**: Reads `~/.codex`, `~/.claude`, and `~/.gemini` histories in read-only mode. Custom titles, tags, pins, and archives live separately in RemoDeck's (Agent Control's) own data directory—your upstream databases and configs are **never** modified.
 > - **Zero Cloud Prompt Storage**: Your code, prompts, and conversation histories never touch a third-party cloud database. Remote access routes directly through your chosen tunnel or self-hosted relay, protected by one-time pairing codes and HTTP-only session cookies.
 > - **No Credential Scraping**: Multi-profile discovery only inspects explicit environment variables, public LaunchAgent paths, and display metadata (email/label)—never tokens or API keys.
 
 ---
 
-## 🔄 Why Agent Control?
+## 🔄 Why RemoDeck?
 
 | Workflow | Multi-Engine Support | Multi-Account Codex Quotas | Remote & Voice Control | Setup & Desktop Experience |
 | --- | :---: | :---: | :---: | :---: |
 | Multiple IDE / Terminal Windows | ❌ Separate apps | ❌ Guess by terminal | ❌ Stuck at desk | High memory usage |
 | Single-Engine Bot / Web Bridges | ❌ Usually Codex or Claude only | ❌ | ⚠️ Manual bot / Tailscale setup | ❌ Web-only or headless |
-| **Agent Control** | ✅ **Codex + Claude + Antigravity + Grok + Qoder** | ✅ **Auto-detected & labeled** | ✅ **5s QR mobile UI + driving voice approvals** | ✅ **3D Dream Factory + macOS / Linux / Windows apps** |
+| **RemoDeck** | ✅ **Codex + Claude + Antigravity + Grok + Qoder** | ✅ **Auto-detected & labeled** | ✅ **5s QR mobile UI + driving voice approvals** | ✅ **3D Dream Factory + macOS / Linux / Windows apps** |
 
 ---
 
@@ -100,20 +100,20 @@ Requires **Node.js 22+** (Node 22.13+ or 24+ recommended on Linux) and **Git**.
 
 **macOS / Linux (one-line installer):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/install.sh | bash
 ```
 
 Linux supports a native GTK/WebKitGTK desktop window and a `systemd --user` service. See the [Linux installation guide](docs/linux.md) for desktop packages, headless servers, SSH port forwarding, containers, and WSL.
 
 **Windows (PowerShell):**
 ```powershell
-(irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://raw.githubusercontent.com/guuguo/remodeck/main/install.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 **Prefer inspecting and running manually without curl-pipe?**
 ```bash
-git clone https://github.com/guuguo/agent-control.git
-cd agent-control
+git clone https://github.com/guuguo/remodeck.git
+cd remodeck
 npm install
 npm start
 ```
@@ -161,12 +161,12 @@ All automated tests run against mock CLIs and consume **zero real LLM tokens**.
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/uninstall.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-(irm https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://raw.githubusercontent.com/guuguo/remodeck/main/uninstall.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ---

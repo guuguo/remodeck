@@ -1,8 +1,8 @@
 [简体中文](README.md) · [English](README.en.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [繁體中文](README.zh-TW.md)
 
-# Agent Control
+# RemoDeck
 
-> **Codex**, **Claude Code**, **Antigravity**, **Grok**을 PC와 스마트폰에서 하나로 제어하는 셀프 호스팅 원격 콘솔입니다. 한 줄 명령어로 설치되며 기존 도구의 설정이나 DB를 절대 수정하지 않습니다.
+> *(구 Agent Control)* **Codex**, **Claude Code**, **Antigravity**, **Grok**을 PC와 스마트폰에서 하나로 제어하는 셀프 호스팅 원격 콘솔입니다. 한 줄 명령어로 설치되며 기존 도구의 설정이나 DB를 절대 수정하지 않습니다.
 
 <p align="center">
   <img src="docs/tutorial/01-desktop-console-ko.png" alt="Agent Control 데스크톱 콘솔" width="760" />
@@ -18,12 +18,12 @@
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-(irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://raw.githubusercontent.com/guuguo/remodeck/main/install.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ## ✨ 주요 기능

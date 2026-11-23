@@ -8,10 +8,10 @@ PURGE="false"
 
 usage() {
   cat <<'EOF'
-Agent Control 一键卸载脚本 (macOS / Linux)
+RemoDeck (原 Agent Control) 一键卸载脚本 (macOS / Linux)
 
 用法:
-  curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/guuguo/remodeck/main/uninstall.sh | bash
   ./uninstall.sh [--purge]
 
 选项:
@@ -76,6 +76,10 @@ if [[ -f "$CLI_PATH" ]]; then
   rm -f "$CLI_PATH"
   echo "已移除 $CLI_PATH"
 fi
+if [[ -L "$LOCAL_BIN/remodeck" || -f "$LOCAL_BIN/remodeck" ]]; then
+  rm -f "$LOCAL_BIN/remodeck"
+  echo "已移除 $LOCAL_BIN/remodeck"
+fi
 
 echo "[3/3] 正在清理安装目录..."
 if [[ -d "$INSTALL_DIR" ]]; then
@@ -97,4 +101,4 @@ else
   echo "已保留用户元信息与日志目录（如需彻底删除请附带 --purge）"
 fi
 
-echo "Agent Control 卸载完成。"
+echo "RemoDeck (Agent Control) 卸载完成。"

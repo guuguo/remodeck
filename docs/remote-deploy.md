@@ -1,6 +1,6 @@
 # 手机远程与固定链接全方案指南
 
-Agent Control 支持 **4 种远程访问方式**，默认推荐使用 **一键免费隧道（Cloudflare Quick Tunnel）**，零门槛 5 秒上手；如果你需要 **永久不变的固定 URL**（把网页添加到手机桌面、电脑重启后无需重新扫码），可以按需选择下面的 **Tailscale Funnel**、**Cloudflare Named Tunnel** 或 **Sealos / Docker 一键容器**。
+RemoDeck（原 Agent Control）支持 **4 种远程访问方式**，默认推荐使用 **一键免费隧道（Cloudflare Quick Tunnel）**，零门槛 5 秒上手；如果你需要 **永久不变的固定 URL**（把网页添加到手机桌面、电脑重启后无需重新扫码），可以按需选择下面的 **Tailscale Funnel**、**Cloudflare Named Tunnel** 或 **Sealos / Docker 一键容器**。
 
 ---
 
@@ -107,8 +107,8 @@ KUBECONFIG=~/.kube/sealos.yaml ./deploy/sealos/deploy.sh --host xxxx.cloud.sealo
 如果你已经有一台装了 Docker 的 VPS 或家用 Linux，只需要一行命令即可拉起中继容器并自动生成随机密钥和首个邀请码：
 
 ```bash
-git clone https://github.com/guuguo/agent-control.git
-cd agent-control
+git clone https://github.com/guuguo/remodeck.git
+cd remodeck
 
 # 模式 1：自带反代（Nginx/Caddy 指向本机 127.0.0.1:8080）
 ./deploy/one-click.sh --url https://relay.example.com
