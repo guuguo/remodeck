@@ -18,12 +18,12 @@
 
 **macOS / Linux：**
 ```bash
-curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
 ```
 
 **Windows (PowerShell)：**
 ```powershell
-(irm https://hub.guuguo.top/install/agent-control.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ## ✨ 核心功能
@@ -33,4 +33,4 @@ curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash
 - **5 種遠端方案自由切換**：Cloudflare 免費臨時通道（預設）、Tailscale Funnel（免費固定 `*.ts.net`）、Cloudflare Named Tunnel、Docker / Sealos 自託管中繼、僅限本機。
 - **免持語音總控**：支援 VAD 自動斷句、打斷與背景任務完成/待核准語音播報。
 
-更多說明：[英文版 README](README.md) · [簡體中文完整教學](README.zh-CN.md) · [遠端部署指南](docs/remote-deploy.md) · [AGPL-3.0 授權](LICENSE)
+更多說明：[英文版 README](README.en.md) · [簡體中文完整教學](README.md) · [Antigravity 多語言無損啟動器](https://github.com/guuguo/antigravity-zh-launcher) · [官網主頁](https://hub.guuguo.top/agent-control) · [遠端部署指南](docs/remote-deploy.md) · [AGPL-3.0 授權](LICENSE)

@@ -1,26 +1,92 @@
 [简体中文](README.md) · **[English](README.en.md)** · [日本語](README.ja.md) · [한국어](README.ko.md) · [繁體中文](README.zh-TW.md)
 
-# Agent Control
+<h1 align="center">Agent Control</h1>
 
-> 在电脑和手机上统一看 **Codex**、**Claude Code**、**Antigravity** 和 **Grok** 的任务进度、随时续跑对话与批复权限 —— 一条命令装好即用，不改动原工具的任何配置与记录。
-> 如果这个工具帮到了你，欢迎点击右上角 **Star ⭐️** 支持一下。
+<p align="center">
+  <strong>把 Codex、Claude Code、Antigravity、Grok 和 Qoder 收进一个桌面 + 手机遥控台</strong><br />
+  出门扫码实时看进度、批权限、打断纠偏、排队派活，不改动原工具的任何配置与数据库。
+</p>
+
+<p align="center">
+  <a href="https://hub.guuguo.top/agent-control"><img src="https://img.shields.io/badge/Website-hub.guuguo.top-0ea5e9?style=flat-square" alt="Website" /></a>
+  <img src="https://img.shields.io/badge/Node.js-22%2B-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node.js 22+" />
+  <img src="https://img.shields.io/badge/OS-macOS%20%7C%20Linux%20%7C%20Windows-64748b?style=flat-square" alt="OS" />
+  <img src="https://img.shields.io/badge/UI%20Languages-EN%20%7C%20%E7%AE%80%20%7C%20%E7%B9%81%20%7C%20%E6%97%A5%20%7C%20%ED%95%9C-8b5cf6?style=flat-square" alt="5 UI Languages" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-f59e0b?style=flat-square" alt="AGPL-3.0" /></a>
+</p>
+
+<p align="center">
+  <sub>如果这个工具帮到了你，欢迎点击右上角 <strong>Star ⭐️</strong> 支持一下。</sub>
+</p>
 
 <p align="center">
   <img src="docs/tutorial/00-demo-overview.gif" alt="Agent Control 14 秒功能总览动图：3D 梦工厂、多账号控制台、5 秒扫码手机远程与免提语音审批" width="760" /><br />
   <sub>14 秒总览：3D 梦工厂 · 多账号只读看板 · 5 秒扫码手机操控 · 开车免提语音审批</sub>
 </p>
 
+> [!IMPORTANT]
+> **安全与隐私保证（安装前必看）**
+> - **严格只读解析上游记录**：只读解析 `~/.codex`、`~/.claude`、`~/.gemini`，自定义标题、置顶与归档保存在 Agent Control 独立数据目录，**绝不修改**上游工具的任何配置或数据库。
+> - **零云端代码与对话存储**：你的代码、Prompt 与对话只留在本机。手机远程通过你自选的隧道或自托管中继直连，配合一次性配对码与 HttpOnly Cookie 鉴权。
+> - **零凭证抓取**：多账号自动发现仅读取显式环境变量、公开路径与展示标签/邮箱，**不读取或转发任何 Token / API Key**。
+
+---
+
+## 🔄 为什么用 Agent Control？
+
+| 日常方案 | 多引擎支持 | 多账号 Codex 额度 | 手机远程与语音控制 | 上手与桌面体验 |
+| --- | :---: | :---: | :---: | --- |
+| 多开 IDE / 终端窗口 | ❌ 各自独立窗口 | ❌ 靠终端盲猜 | ❌ 人离开电脑就断联 | 内存占用高 |
+| 单引擎 Bot / 网页桥接 | ❌ 通常仅单一模型 | ❌ | ⚠️ 需手动配 Bot / Tailscale | ❌ 仅网页或无头服务 |
+| **Agent Control** | ✅ **Codex + Claude + Antigravity + Grok + Qoder** | ✅ **自动识别并标注账号归属** | ✅ **5 秒扫码手机端 + 开车免提语音审批** | ✅ **3D 梦工厂 + macOS / Linux / Windows 客户端** |
+
+---
+
+## ⚡ 一行命令快速安装
+
+只需要本机有 **Node.js 22+** 和 **Git**（如未安装，脚本会自动提示安装命令）。
+
+**macOS / Linux**（打开「终端」粘贴回车）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
+```
+
+Linux 支持 GTK/WebKitGTK 原生桌面壳和 systemd 用户服务；桌面依赖安装及无桌面、SSH、容器、WSL 的运行方式见 [Linux 安装与运行](docs/linux.md)。
+
+**Windows**（打开 **PowerShell** 粘贴回车）：
+
+```powershell
+(irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1).TrimStart([char]0xFEFF) | iex
+```
+
+**更喜欢先看源码再手动启动？**
+
+```bash
+git clone https://github.com/guuguo/agent-control.git
+cd agent-control
+npm install
+npm start
+```
+
+---
+
+## 📸 核心界面与场景
+
+### 1. 3D 梦工厂总控台（全局实时看板 + 自然语言重排）
 <p align="center">
   <img src="docs/tutorial/10-dream-factory-3d.png" alt="Agent Control 3D 梦工厂总控台" width="760" />
 </p>
 
+### 2. 桌面端主控制台（多引擎、多账号额度与实时监控）
 <p align="center">
   <img src="docs/tutorial/01-desktop-console.png" alt="Agent Control 桌面端主控制台" width="760" />
 </p>
 
+### 3. 手机端远程监控、代码 Diff 与排队派活
 <table>
   <tr>
-    <td align="center" width="50%"><strong>手机端 · 项目总控与 4 家实时监控</strong></td>
+    <td align="center" width="50%"><strong>手机端 · 项目总控与多端实时监控</strong></td>
     <td align="center" width="50%"><strong>手机端 · 富文本对话、代码块与排队控制</strong></td>
   </tr>
   <tr>
@@ -29,8 +95,8 @@
   </tr>
 </table>
 
-<details open>
-<summary><strong>更多核心界面（免提语音总控 · 手机扫码隧道 · 一键更新与桌面壳子同步）</strong></summary>
+<details>
+<summary><strong>更多界面与深度能力（免提语音总控 · 手机扫码隧道 · 执行统计与自动更新）</strong></summary>
 
 <table>
   <tr>
@@ -45,41 +111,21 @@
   </tr>
 </table>
 
+- **可选低延迟语音路由模型**：不是所有人都有 Gemini / Antigravity，语音弹窗顶部支持直接切换后端模型——自动优选或手动选用 **Claude Sonnet（低思考）**、**GPT-6.1 Terra（低思考）**、**Antigravity Hydrogen / Flash**、**Grok**。所有非空语音内容均交由所选模型理解意图、定位目标并决定操作；模型不可用时明确报错，不回退到关键词规则。
+- **跨平台语音收发**：macOS 优先使用本地 `mlx-whisper` 离线识别与 `edge-tts` / `say` 播报；未装本地 Whisper 时可回退为浏览器语音识别。播放只使用服务端生成的音频，不再调用手机或浏览器本机 TTS；没有可播放音频时保留文字并标记未播报（也可随时点击键盘图标打字调度）。
+- **Agent 实时监控与执行统计（`execution-stats.json`）**：展开 **Agent 实时监控** 可按 Agent、模型、思考强度汇总成功轮次的中位/P90耗时、首输出、协议 Token 均值和工具次数，并查看最近 30 轮明细。支持 24 小时、7 天、30 天及全部记录筛选。数据从启用后的新轮次开始记录，最多保留 5000 轮，独立保存在数据目录的 `execution-stats.json`，不保存指令或回复正文。耗时含工具和审批等待，不含排队；`/goal` 续跑按轮记录。估算、部分上报、未上报分别标注，不混入协议 Token 均值；跨服务重启未收到终态的轮次标为“结束状态未记录”，不计入成功耗时。
+
 </details>
-
----
-
-## ⚡ 一行命令装好直接用
-
-只需要本机有 **Node.js 22+** 和 **Git**（如未安装，脚本会自动提示安装命令）。
-
-**macOS / Linux**（打开「终端」粘贴回车）：
-
-```bash
-curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash
-```
-
-Linux 支持 GTK/WebKitGTK 原生桌面壳和 systemd 用户服务；桌面依赖安装及无桌面、SSH、容器、WSL 的运行方式见 [Linux 安装与运行](docs/linux.md)。
-
-**Windows**（打开 **PowerShell** 粘贴回车）：
-
-```powershell
-(irm https://hub.guuguo.top/install/agent-control.ps1).TrimStart([char]0xFEFF) | iex
-```
 
 ---
 
 ## ✨ 装完怎么用？
 
-1. **打开即用**：安装完成后会自动打开控制台（macOS 会在「应用程序」生成 **Agent Control** 独立桌面应用，也可浏览器打开 `http://127.0.0.1:43310`）。
-2. **电脑端统一管理**：左侧按项目查看所有正在跑或历史中的智能体任务，点进去即可续发消息、切换模型、设置自动推进或批量归档；同一智能体存在多个账号（如多 Codex 账号）时，列表与顶部栏自动标出具体账号归属。
-3. **手机扫码远程看**：点页面右上角 **「手机远程」** 生成二维码，手机扫一下就能随时看输出、发指令、批权限。👉 [查看手机扫码图文教程](教程.md) · [固定链接与容器部署全指南](docs/remote-deploy.md)
-4. **🚗 开车 / 免提语音总控（不强依赖 Gemini）**：点击顶部 **「通话」** 按钮即可开启免提语音通话（支持屏幕常亮、VAD 自动断句、说话打断、后台任务完成/待审批自动语音提醒与口头批准/拒绝）。
-   - **可选低延迟模型**：不是所有人都有 Gemini/Antigravity，语音弹窗顶部支持直接切换后端模型——自动优选或手动选用 **Claude Sonnet（低思考）**、**GPT-6.1 Terra（低思考）**、**Antigravity Hydrogen / Flash**、**Grok**。所有非空语音内容均交由所选模型理解意图、定位目标并决定操作；模型不可用时明确报错，不回退到关键词规则。
-   - **跨平台语音收发**：macOS 优先使用本地 `mlx-whisper` 离线识别与 `edge-tts` / `say` 播报；未装本地 Whisper 时可回退为浏览器语音识别。播放只使用服务端生成的音频，不再调用手机或浏览器本机 TTS；没有可播放音频时保留文字并标记未播报（也可随时点击键盘图标打字调度）。
-5. **🔄 自动检测与跨端一键更新**：左上/左下角与手机端菜单实时展示版本状态，支持定期检查远端提交、闲时自动平滑重启，并在更新时按源码指纹自动联动更新 **macOS / Windows / Linux** 桌面 App 壳子或快捷入口（也可执行 `npm run version:bump` 统一维护服务与 UI 版本）。
-
-展开 **Agent 实时监控** 可查看执行统计：按 Agent、模型、思考强度汇总成功轮次的中位/P90耗时、首输出、协议 Token 均值和工具次数，并查看最近30轮明细。支持24小时、7天、30天及全部记录筛选。数据从启用后的新轮次开始记录，最多保留5000轮，独立保存在数据目录的 `execution-stats.json`，不保存指令或回复正文。耗时含工具和审批等待，不含排队；`/goal` 续跑按轮记录。估算、部分上报、未上报分别标注，不混入协议 Token 均值；跨服务重启未收到终态的轮次标为“结束状态未记录”，不计入成功耗时。
+1. **打开即用**：安装完成后自动打开控制台（macOS 会在「应用程序」生成 **Agent Control** 独立桌面应用，也可浏览器访问 `http://127.0.0.1:43310`）。
+2. **电脑端统一管理**：左侧按项目查看所有运行中或历史会话，点进去即可续发消息、切换模型、设置 `/goal` 自动推进或批量归档；多账号（如多个 Codex 账号）自动标注归属与额度。
+3. **5 秒手机扫码远程看**：点页面右上角 **「手机远程」** 生成二维码，手机扫码即可随时看输出、批权限、打断或排队派活。👉 [查看手机扫码图文教程](教程.md) · [固定链接与容器部署全指南](docs/remote-deploy.md)
+4. **🚗 开车 / 免提语音总控**：点击顶部 **「通话」** 按钮开启免提语音（支持屏幕常亮、VAD 自动断句、说话打断、后台任务完成/待审批自动语音提醒与口头批准/拒绝）。
+5. **🔄 自动检测与跨端一键更新**：支持定期检查远端提交、闲时自动平滑重启，并在更新时按源码指纹联动更新 **macOS / Windows / Linux** 桌面 App 壳子（也可执行 `npm run version:bump` 统一维护服务与 UI 版本）。
 
 ### 手机远程方案怎么选？（装完随时可换）
 
@@ -95,18 +141,18 @@ Linux 支持 GTK/WebKitGTK 原生桌面壳和 systemd 用户服务；桌面依�
 
 ---
 
-## 🗑️ 不想用了？一行命令卸载
+## 🗑️ 一行命令卸载
 
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://hub.guuguo.top/uninstall/agent-control.sh | bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.sh | bash
 ```
 
 **Windows (PowerShell)：**
 
 ```powershell
-(irm https://hub.guuguo.top/uninstall/agent-control.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ---
@@ -132,16 +178,16 @@ agent-control update              # 拉取最新版本并更新桌面端
 
 ```bash
 # 默认：Cloudflare 免费临时隧道
-curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash -s -- --remote cloudflare
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote cloudflare
 
 # Tailscale Funnel（0 元免域名固定链接）
-curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash -s -- --remote tailscale
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote tailscale
 
 # 直接连接自己的中继服务器
-curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash -s -- --remote relay --relay-url https://relay.example.com --invite 你的邀请码
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote relay --relay-url https://relay.example.com --invite 你的邀请码
 
 # 仅本机使用
-curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash -s -- --remote local
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote local
 ```
 
 ### 3. 一键容器部署固定中继（Sealos 约 ¥5~15/月 · Docker）
@@ -196,6 +242,11 @@ npm run desktop:install   # macOS 构建安装 /Applications/Agent Control.app
 全部自动测试均使用 Mock CLI 模拟智能体进程，**不消耗任何真实模型 Token**。
 
 </details>
+
+## 🔗 同系列配套工具
+
+- **[antigravity-zh-launcher](https://github.com/guuguo/antigravity-zh-launcher)** — Google Antigravity 9 国语言无损双入口启动器（不改 `app.asar`、保留官方签名、支持 AI 思考链路本地化）
+- **[hub.guuguo.top](https://hub.guuguo.top)** — guuguo 独立开发者工具矩阵主页
 
 ## License
 

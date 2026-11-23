@@ -18,12 +18,12 @@
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-(irm https://hub.guuguo.top/install/agent-control.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ## ✨ 主な機能
@@ -33,4 +33,4 @@ curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash
 - **5 つの接続方式**：Cloudflare 無料一時トンネル（デフォルト）、Tailscale Funnel（無料固定 `*.ts.net`）、Cloudflare Named Tunnel、Docker / Sealos 自前リレー、ローカル専用。
 - **ハンズフリー音声コントロール**：運転中や作業中に VAD 音声でタスク状況確認や承認が可能。
 
-詳細ガイド：[英語 README](README.md) · [リモートデプロイ手順](docs/remote-deploy.md) · [AGPL-3.0 ライセンス](LICENSE)
+詳細ガイド：[英語 README](README.en.md) · [簡体字中国語 README](README.md) · [Antigravity 多言語ランチャー](https://github.com/guuguo/antigravity-zh-launcher) · [公式サイト](https://hub.guuguo.top/agent-control) · [リモートデプロイ手順](docs/remote-deploy.md) · [AGPL-3.0 ライセンス](LICENSE)

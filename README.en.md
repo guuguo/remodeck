@@ -171,6 +171,11 @@ curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall
 
 ---
 
+## 🔗 Companion Tools
+
+- **[antigravity-zh-launcher](https://github.com/guuguo/antigravity-zh-launcher)** — Non-intrusive 9-language launcher & AI thinking localization for Google Antigravity (zero binary modification, preserves official code signature).
+- **[hub.guuguo.top](https://hub.guuguo.top)** — Indie developer tools hub by guuguo.
+
 ## Acknowledgements
 
 - Thanks to the [LINUX DO](https://linux.do/) community for feedback, bug reports, and feature ideas.
