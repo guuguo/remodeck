@@ -859,6 +859,83 @@ export function resolveVoicePlanTarget(plan = {}, snapshot = {}) {
   return { project, thread, cwd: resolvedCwd, threadId: thread?.id || "", valid };
 }
 
+const VOICE_ASR_BASE_HOTWORDS = ["Codex", "Claude", "Antigravity", "Gemini", "RemoDeck", "会话", "项目", "撤回", "继续", "派给"];
+
+// Whisper initial_prompt biases decoding toward these spellings (project names are the usual misses).
+export function buildVoiceAsrPrompt(projectNames = [], { maxChars = 180 } = {}) {
+  const seen = new Set();
+  const names = [];
+  for (const raw of projectNames) {
+    const name = String(raw || "").trim();
+    const key = name.toLowerCase();
+    if (!name || name.length > 32 || seen.has(key)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  const head = "普通话语音对话，";
+  const tail = `常用词：${VOICE_ASR_BASE_HOTWORDS.join("、")}。`;
+  let projectPart = "";
+  for (const name of names) {
+    const next = projectPart ? `${projectPart}、${name}` : name;
+    if (head.length + `项目有：${next}。`.length + tail.length > maxChars) break;
+    projectPart = next;
+  }
+  return `${head}${projectPart ? `项目有：${projectPart}。` : ""}${tail}`;
+}
+
+function normalizeVoiceMatchKey(text = "") {
+  return String(text || "").toLowerCase().replace(/[\s\-_.·・/\\]+/g, "");
+}
+
+// When the model fails to pick a valid target, offer the user a short spoken choice instead of an error.
+export function suggestVoiceTargetCandidates(plan = {}, snapshot = {}, { limit = 3 } = {}) {
+  const projects = (snapshot.projects || []).filter((p) => p?.cwd);
+  if (!projects.length) return { unique: null, candidates: [] };
+  const hintCwd = normCwd(plan.targetProjectCwd || "");
+  const hintBase = hintCwd ? normalizeVoiceMatchKey(basename(hintCwd)) : "";
+  const spoken = normalizeVoiceMatchKey(`${plan.heardText || ""} ${plan.instruction || ""}`);
+  const scored = projects.map((p, index) => {
+    const keys = [p.alias, p.name, basename(p.cwd)].map(normalizeVoiceMatchKey).filter((k) => k.length >= 2);
+    let score = 0;
+    if (hintBase && keys.includes(hintBase)) score = 100;
+    else if (hintBase && keys.some((k) => k.includes(hintBase) || hintBase.includes(k))) score = 60;
+    if (score < 100 && spoken && keys.some((k) => spoken.includes(k))) score = Math.max(score, 80);
+    return { project: p, score, index };
+  });
+  const matched = scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score || a.index - b.index);
+  const strongest = matched.filter((s) => s.score === matched[0]?.score);
+  // Only an exact name the model itself chose is auto-resolved; spoken-text matches are asked back.
+  if (strongest.length === 1 && strongest[0].score >= 100) {
+    return { unique: strongest[0].project, candidates: [strongest[0].project] };
+  }
+  const pool = matched.length ? matched : scored;
+  return { unique: null, candidates: pool.slice(0, limit).map((s) => s.project) };
+}
+
+export function buildVoiceClarifyQuestion(candidates = []) {
+  const names = candidates.map((p) => String(p?.alias || p?.name || basename(p?.cwd || "")).trim()).filter(Boolean);
+  if (!names.length) return "要交给哪个项目做？说项目名就行。";
+  if (names.length === 1) return `是交给${names[0]}吗？`;
+  return `是${names.slice(0, -1).join("、")}，还是${names[names.length - 1]}？`;
+}
+
+// Keep in-car replies to about two short sentences so one answer never runs past ~8 seconds of audio.
+export function clampVoiceSpokenReply(text = "", { maxChars = 60 } = {}) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (clean.length <= maxChars) return clean;
+  const sentences = clean.match(/[^。！？!?；;]+[。！？!?；;]?/g) || [clean];
+  let out = "";
+  for (const s of sentences) {
+    if (out && (out + s).length > maxChars) break;
+    out += s;
+    if (out.length >= maxChars) break;
+  }
+  if (out.length > maxChars) {
+    out = `${out.slice(0, maxChars - 1).replace(/[，,、\s]+$/, "")}…`;
+  }
+  return out.trim();
+}
+
 export class VoiceCallService {
   #hub;
   #env;
@@ -887,6 +964,8 @@ export class VoiceCallService {
   #asrReadyPromise = null;
   #asrStdoutBuf = "";
   #asrPending = new Map();
+  #asrHotwordNames = [];
+  #asrHotwordUpdatedAt = 0;
   #edgeTtsChild = null;
   #edgeTtsReadyPromise = null;
   #edgeTtsStdoutBuf = "";
@@ -2043,6 +2122,8 @@ export class VoiceCallService {
         return (b.updatedAt || 0) - (a.updatedAt || 0);
       })
       .slice(0, 24);
+    this.#asrHotwordNames = projects.map((p) => p.alias || p.name);
+    this.#asrHotwordUpdatedAt = Date.now();
 
     let activeThreadReply = "";
     if (activeThreadId) {
@@ -2079,6 +2160,9 @@ export class VoiceCallService {
       projects,
       completedResults: [...(callState?.completedResults || [])],
       delegatedTasks: [...(callState?.delegatedTasks?.values() || [])],
+      ...(callState?.pendingClarification && Date.now() - callState.pendingClarification.askedAt < 180_000
+        ? { pendingClarification: callState.pendingClarification }
+        : {}),
       threads: threads.map(({ id, cwd, title, provider, model, live }) => ({ id, cwd, title, provider, model, live })),
     };
   }
@@ -2422,7 +2506,8 @@ export class VoiceCallService {
       "3. 先判断指令复杂度与归属：（a）简单查询/打开项目/审批/重播/唤醒由你自己直接完成，`executionTier` 设为 `self_simple`；（b）你自己可做但需要较长耗时分析/排查/梳理/总结上下文/对比方案的任务，`intent` 设为 `subagent_hydrogen`、`executionTier` 设为 `subagent_hydrogen`；（c）需要交由其他项目或会话执行的任务，`intent` 设为 `send_turn`（或 `create_thread`）、`executionTier` 设为 `external_thread`（若用户要求直接出结果、给结论、停止等待、别等了、立即发送或别排队，`dispatchMode` 设为 `immediate`，否则设为 `queue`）；若仅停止任务设 `interrupt_thread`；若用户没听清要求再说一遍，设 `intent` 为 `repeat_last`。",
       "询问原因、否认授权、引用别人说的话，均不等于要求执行其中的动作。比如询问为什么停止任务，应只读解释记录，不能再次停止任务。自然问答、闲聊咨询或询问你当前使用的是什么模型/为何没回答时，必须设 intent=summarize_progress、executionTier=self_simple 并直接礼貌回答（严禁当成 no_speech 忽略）；无法确定指代或操作范围时，先口头询问，intent=summarize_progress，不得猜选第一个任务或审批。操作目标必须复制快照中完整的 ID/CWD；新建任务必须指定项目，停止任务必须指定单个会话，审批必须指定 requestId 和明确 decision。",
       "只有明确并非面向你的背景电视声/环境旁白或无意义识别乱码才设 intent=no_speech、spokenReply 留空；只要用户明确在与语音助手对话提问（哪怕只问你是什么模型、在吗、为什么不说话），一律正常回复，不得设为 no_speech。repeat_last 应根据最近播报和未听到的记录重新组织回复。provider/model 只在用户明确要求切换任务执行模型时填写；否则保留已有会话配置。",
-      "4. `spokenReply` 用 1~2 句简短自然的电话口语回复（像电话里的得力副驾，尽量控制在 3~6 秒内播完，方便一来一回对话），绝不念出文件路径、斜杠、代码块、长 ID 或 Markdown 符号；若 `executionTier` 为 `external_thread`，告知已交付给对应会话处理即可，不要念出未完成或冗余长文。",
+      "4. `spokenReply` 用 1~2 句简短自然的电话口语回复（用户多半在开车，先说结论，不超过 40 个汉字，3~6 秒内播完；细节等用户追问再说），绝不念出文件路径、斜杠、代码块、长 ID 或 Markdown 符号；若 `executionTier` 为 `external_thread`，告知已交付给对应会话处理即可，不要念出未完成或冗余长文。",
+      "若快照含 `pendingClarification`，说明你上一轮刚问过用户要交给哪个项目：用户这次多半是在回答项目名（可能有同音误识别），请从 `candidateCwds` 或 `projects` 中选定目标，并沿用其中的 `instruction` 完成原来的派发意图。",
       "5. 最终回复必须且只能输出一个合法 JSON 对象，格式如下：",
       '{"heardText":"听到的用户原话","intent":"no_speech|wake_ping|summarize_progress|open_thread|open_project|subagent_hydrogen|send_turn|create_thread|approve_request|interrupt_thread|repeat_last","executionTier":"self_simple|subagent_hydrogen|external_thread","targetProjectCwd":"","targetThreadId":"","provider":"","model":"","dispatchMode":"immediate|queue","instruction":"","requestId":"","decision":"accept|decline|","spokenReply":"用于电话朗读的简短自然中文回复"}',
       "",
@@ -2503,13 +2588,37 @@ export class VoiceCallService {
         },
       };
     }
-    const fuzzy = resolveVoicePlanTarget(plan, snapshot);
+    let fuzzy = resolveVoicePlanTarget(plan, snapshot);
     const needsTarget = ["open_project", "open_thread", "send_turn", "create_thread", "interrupt_thread"].includes(intent);
     if (!fuzzy.valid || (needsTarget && !fuzzy.threadId && !fuzzy.cwd)) {
-      return { needsBackground: false, immediateResult: {
-        ok: false, action: intent, summaryTag: "目标未确认",
-        overrideReply: "模型未明确选定有效的项目或会话，请补充要操作的目标。",
-      } };
+      const suggestion = intent === "interrupt_thread"
+        ? { unique: null, candidates: [] }
+        : suggestVoiceTargetCandidates(plan, snapshot);
+      if (suggestion.unique) {
+        plan.targetProjectCwd = suggestion.unique.cwd;
+        plan.targetThreadId = "";
+        fuzzy = resolveVoicePlanTarget(plan, snapshot);
+      }
+      if (!fuzzy.valid || (needsTarget && !fuzzy.threadId && !fuzzy.cwd)) {
+        const callState = callId ? this.#ensureCallState(callId) : null;
+        if (callState && suggestion.candidates.length) {
+          callState.pendingClarification = {
+            intent,
+            instruction: String(plan.instruction || plan.heardText || "").slice(0, 400),
+            candidateCwds: suggestion.candidates.map((p) => p.cwd),
+            askedAt: Date.now(),
+          };
+        }
+        return { needsBackground: false, immediateResult: {
+          ok: false, action: intent, summaryTag: "目标未确认",
+          overrideReply: intent === "interrupt_thread"
+            ? "要停哪个任务？说项目名就行。"
+            : buildVoiceClarifyQuestion(suggestion.candidates),
+        } };
+      }
+    }
+    if (callId && this.#callStates.get(callId)?.pendingClarification) {
+      this.#callStates.get(callId).pendingClarification = null;
     }
     const resolvedProject = fuzzy.project;
     const resolvedThreadId = fuzzy.threadId || "";
@@ -2540,8 +2649,8 @@ export class VoiceCallService {
           projectName: targetName,
           summaryTag: `${subagentLabel}处理中`,
           ackReply: useHydrogenNaming
-            ? "好的，这个需要一点时间处理，我先开一个 Hydrogen 子代理帮你做，过程中会持续同步进展，有结果马上反馈给你。"
-            : `好的，我先用${subagentLabel}帮你分析整理，有结果马上反馈给你。`,
+            ? "好，这个要花点时间，我让 Hydrogen 子代理去查，有结果告诉你。"
+            : `好，我让${subagentLabel}去整理，有结果告诉你。`,
         },
         execute: async ({ batchId = "", utteranceId = "", emitProgress = () => {} } = {}) => {
           const res = await this.#runHydrogenSubagent({
@@ -4052,6 +4161,33 @@ export class VoiceCallService {
     return this.#asrReadyPromise;
   }
 
+  async getAsrPromptHints({ pendingSnapshot = null } = {}) {
+    const stale = Date.now() - this.#asrHotwordUpdatedAt > 120_000;
+    if (stale && pendingSnapshot) {
+      // A live snapshot is already listing threads and refreshes the hotword cache itself;
+      // reuse it instead of issuing a second listThreads call.
+      const refresh = Promise.resolve(pendingSnapshot).catch(() => {});
+      await Promise.race([refresh, new Promise((r) => setTimeout(r, this.#asrHotwordNames.length ? 0 : 400))]);
+    } else if (stale && typeof this.#hub?.listThreads === "function") {
+      const refresh = Promise.resolve(this.#hub.listThreads({ archived: "0", limit: 80 }))
+        .then((payload) => {
+          const meta = payload?.projectsMeta || {};
+          const byCwd = new Map();
+          for (const t of payload?.threads || []) {
+            const cwd = String(t.cwd || "").trim();
+            if (!cwd || byCwd.has(cwd)) continue;
+            byCwd.set(cwd, meta[cwd]?.alias || basename(cwd));
+          }
+          this.#asrHotwordNames = [...byCwd.values()].slice(0, 24);
+          this.#asrHotwordUpdatedAt = Date.now();
+        })
+        .catch(() => {});
+      // Never let hotword lookup add noticeable latency to recognition.
+      await Promise.race([refresh, new Promise((r) => setTimeout(r, this.#asrHotwordNames.length ? 0 : 400))]);
+    }
+    return buildVoiceAsrPrompt(this.#asrHotwordNames);
+  }
+
   async transcribeAudio({
     audioBase64 = "",
     audioMimeType = "audio/wav",
@@ -4294,7 +4430,7 @@ export class VoiceCallService {
         audioBase64: cleanAudio,
         audioMimeType,
         overlapMs,
-        promptHints: effectiveScope === "thread" && effectiveThreadId ? "围绕当前代码仓库与会话上下文的技术对话。" : "",
+        promptHints: await this.getAsrPromptHints({ pendingSnapshot: snapshotPromise }),
       })
       : Promise.resolve(null);
 
@@ -4476,6 +4612,10 @@ export class VoiceCallService {
           plan.spokenReply = fallbackMissed.text;
         }
       }
+    }
+
+    if (mode !== "briefing" && plan.intent !== "repeat_last") {
+      plan.spokenReply = clampVoiceSpokenReply(plan.spokenReply, { maxChars: 60 });
     }
 
     const utterancePriority = (plan.intent === "approve_request" || (snapshot.pendingRequests?.length > 0 && plan.intent === "summarize_progress"))

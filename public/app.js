@@ -134,6 +134,7 @@ import {
 import {
   base64ToUint8Array,
   buildVoiceLiveProgressItems,
+  CALL_VOICE_VAD_OPTIONS,
   computeRmsLevel,
   createVadTurnDetector,
   downsampleFloat32ToInt16,
@@ -148,6 +149,7 @@ import {
   loadChatReplyTtsPref,
   loadVoiceConfig,
   mergePcm16ChunksWithGap,
+  mergeQueuedVoiceTurns,
   normalizeVoiceTtsPayload,
   parseVoiceModelSelectionKey,
   renderVoiceCallTranscriptHtml,
@@ -159,7 +161,7 @@ import {
   saveVoiceConfig,
   stripMarkdownForSpeech,
   uint8ArrayToBase64,
-} from "./voice-copilot.js?v=20261119mobilevoice";
+} from "./voice-copilot.js?v=20261124drive";
 
 const $ = (id) => document.getElementById(id);
 
@@ -631,6 +633,8 @@ const state = {
       startedAtMs: 0,
       lastLevelUiAt: 0,
       bargeInFrames: 0,
+      bargeRing: [],
+      queuedSamples: null,
       chunks: [],
       maxTimer: null,
     },
@@ -9129,6 +9133,8 @@ function teardownSpriteMic() {
   mic.audioCtx = null;
   mic.vad = null;
   mic.bargeInFrames = 0;
+  mic.bargeRing = [];
+  mic.queuedSamples = null;
   state.sprite.speechActive = false;
   state.sprite.recordElapsedSec = 0;
 }
@@ -9289,6 +9295,8 @@ async function startSpriteMic({ handsFree = false } = {}) {
     state.sprite.mic.startedAtMs = Date.now();
     state.sprite.mic.lastLevelUiAt = 0;
     state.sprite.mic.bargeInFrames = 0;
+    state.sprite.mic.bargeRing = [];
+    state.sprite.mic.queuedSamples = null;
     state.sprite.recordElapsedSec = 0;
     state.sprite.speechActive = false;
 
@@ -9307,26 +9315,40 @@ async function startSpriteMic({ handsFree = false } = {}) {
         }
       }
 
-      // While transcribing or busy in hands-free mode, wait before feeding next turn
-      if (state.sprite.transcribing || state.sprite.busy) return;
+      const pcm16 = downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000);
+      const mic = state.sprite.mic;
+      const assistantBusy = state.sprite.transcribing || state.sprite.busy;
 
-      // Echo guard + Barge-in when Sprite TTS is speaking
+      // Echo guard + barge-in while Sprite TTS is speaking. Keep the last ~1s so the
+      // first words of an interruption are not lost once playback stops.
       if (state.sprite.speaking) {
+        mic.bargeRing.push({ pcm16, rms });
+        while (mic.bargeRing.length > 24) mic.bargeRing.shift();
         if (rms >= 0.045) {
-          state.sprite.mic.bargeInFrames += 1;
-          if (state.sprite.mic.bargeInFrames >= 3) {
-            state.sprite.mic.bargeInFrames = 0;
+          mic.bargeInFrames += 1;
+          if (mic.bargeInFrames >= 3) {
+            mic.bargeInFrames = 0;
             stopSpriteSpeech();
+            vad.reset();
+            for (const frame of mic.bargeRing) vad.pushSamples(frame.pcm16, frame.rms);
+            mic.bargeRing = [];
           }
         } else {
-          state.sprite.mic.bargeInFrames = 0;
+          mic.bargeInFrames = 0;
         }
         return;
       }
+      mic.bargeRing = [];
 
-      const pcm16 = downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000);
-      if (!state.sprite.handsFree && state.sprite.mic.chunks.length < 450) {
-        state.sprite.mic.chunks.push(pcm16);
+      if (!assistantBusy && mic.queuedSamples?.length) {
+        const queued = mic.queuedSamples;
+        mic.queuedSamples = null;
+        void transcribeSpritePcmSamples(queued);
+        return;
+      }
+
+      if (!state.sprite.handsFree && mic.chunks.length < 450) {
+        mic.chunks.push(pcm16);
       }
 
       const vadEv = vad.pushSamples(pcm16, rms);
@@ -9338,8 +9360,16 @@ async function startSpriteMic({ handsFree = false } = {}) {
       } else if (vadEv.type === "utterance" && vadEv.samples?.length >= 1600) {
         state.sprite.speechActive = false;
         if (state.sprite.handsFree) {
-          state.sprite.mic.chunks = [];
-          void transcribeSpritePcmSamples(vadEv.samples);
+          mic.chunks = [];
+          playVoiceEarcon("heard", ctx);
+          if (state.sprite.transcribing || state.sprite.busy) {
+            // Still busy with the previous request: hold this one (stitched) instead of dropping it.
+            mic.queuedSamples = mic.queuedSamples?.length
+              ? mergePcm16ChunksWithGap([mic.queuedSamples, vadEv.samples], 2560)
+              : vadEv.samples;
+          } else {
+            void transcribeSpritePcmSamples(vadEv.samples);
+          }
         } else {
           void stopSpriteMic({ submit: true, explicitSamples: vadEv.samples });
         }
@@ -9520,6 +9550,29 @@ function ensureVoiceAudioUnlocked() {
   }
 }
 
+// Instant local acknowledgement (no network) so the driver knows the sentence was captured.
+function playVoiceEarcon(kind = "heard", ctx = state.voice.audioCtx) {
+  try {
+    if (!ctx || ctx.state === "closed" || typeof ctx.createOscillator !== "function") return;
+    const tones = kind === "error" ? [660, 440] : kind === "sent" ? [660, 990] : [880, 1320];
+    const t0 = ctx.currentTime + 0.01;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.12, t0 + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.16);
+    gain.connect(ctx.destination);
+    tones.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, t0 + i * 0.07);
+      osc.connect(gain);
+      osc.start(t0 + i * 0.07);
+      osc.stop(t0 + i * 0.07 + 0.08);
+    });
+    setTimeout(() => { try { gain.disconnect(); } catch {} }, 400);
+  } catch {}
+}
+
 function clearVoiceResumeTimer() {
   if (state.voice.resumeListenTimer) {
     clearTimeout(state.voice.resumeListenTimer);
@@ -9573,9 +9626,8 @@ function submitMergedOverlapBuffer(tailSamples = null) {
 
   const mergedSamples = mergePcm16ChunksWithGap(allChunks, gapSamples);
   if (!mergedSamples.length) return;
-  const wavBytes = encodePcm16SamplesToWav(mergedSamples, 16000);
   void sendVoiceTurnToMac({
-    wavUint8Array: wavBytes,
+    samples: mergedSamples,
     overlapDurationMs,
     overlapBotText,
   });
@@ -10097,18 +10149,7 @@ async function startVoiceCallMicPipeline() {
     const silentGain = ctx.createGain();
     silentGain.gain.value = 0;
 
-    const detector = createVadTurnDetector({
-      sampleRate: 16000,
-      preRollMs: 600,
-      silenceMs: 1150,
-      minSpeechMs: 260,
-      maxSpeechMs: 16000,
-      rmsThreshold: 0.009,
-      adaptive: true,
-      requireSustainedOnset: true,
-      minPeakRms: 0.010,
-      minSnrRatio: 1.35,
-    });
+    const detector = createVadTurnDetector({ ...CALL_VOICE_VAD_OPTIONS });
 
     processor.onaudioprocess = (ev) => {
       const nowMs = Date.now();
@@ -10199,7 +10240,8 @@ async function startVoiceCallMicPipeline() {
       highpass.Q.value = 0.707;
       const lowpass = ctx.createBiquadFilter();
       lowpass.type = "lowpass";
-      lowpass.frequency.value = Math.min(3800, Math.max(1200, Math.floor(nyquist * 0.82)));
+      // Whisper reads up to 8 kHz; keep Mandarin fricatives (s/sh/x/c) and only guard against aliasing.
+      lowpass.frequency.value = Math.min(7200, Math.max(1200, Math.floor(nyquist * 0.9)));
       lowpass.Q.value = 0.707;
       source.connect(highpass);
       highpass.connect(lowpass);
@@ -10242,8 +10284,7 @@ async function startVoiceCallMicPipeline() {
           state.voice.isRecording = false;
           state.voice.currentRms = 0;
           if (flushed?.type === "utterance" && flushed.samples?.length) {
-            const wavBytes = encodePcm16SamplesToWav(flushed.samples, 16000);
-            void sendVoiceTurnToMac({ wavUint8Array: wavBytes });
+            void sendVoiceTurnToMac({ samples: flushed.samples });
           } else {
             renderVoiceCallUi();
           }
@@ -11115,6 +11156,7 @@ async function applyVoiceExecutionEffect(executed = {}) {
 }
 
 async function sendVoiceTurnToMac({
+  samples = null,
   wavUint8Array = null,
   transcriptText = "",
   mode = "turn",
@@ -11122,20 +11164,24 @@ async function sendVoiceTurnToMac({
   overlapBotText = "",
 } = {}) {
   if (!state.voice.callActive) return;
-  if (wavUint8Array?.length || String(transcriptText || "").trim() || mode === "briefing") {
+  if (samples?.length || wavUint8Array?.length || String(transcriptText || "").trim() || mode === "briefing") {
     state.voice.pendingVoiceTurns.push({
+      samples,
       wavUint8Array,
       transcriptText,
       mode,
       overlapDurationMs: Number(overlapDurationMs) || 0,
       overlapBotText: String(overlapBotText || ""),
     });
-    while (state.voice.pendingVoiceTurns.length > 2) {
-      state.voice.pendingVoiceTurns.shift();
-    }
+    if (samples?.length) playVoiceEarcon("heard");
+    // Speech captured while the previous turn was in flight is stitched together instead of dropped.
+    state.voice.pendingVoiceTurns = mergeQueuedVoiceTurns(state.voice.pendingVoiceTurns);
   }
   if (state.voice.isProcessing || state.voice.isSpeaking || !state.voice.pendingVoiceTurns.length) return;
-  ({ wavUint8Array, transcriptText, mode, overlapDurationMs = 0, overlapBotText = "" } = state.voice.pendingVoiceTurns.shift());
+  ({ samples = null, wavUint8Array, transcriptText, mode, overlapDurationMs = 0, overlapBotText = "" } = state.voice.pendingVoiceTurns.shift());
+  if (samples?.length && !wavUint8Array?.length) {
+    wavUint8Array = encodePcm16SamplesToWav(samples, 16000);
+  }
   if (mode === "briefing" || String(transcriptText || "").trim()) {
     state.voice.lastUserActivityAt = Date.now();
     clearApprovalVoiceReminder();

@@ -84,7 +84,7 @@ test("invalid targets, missing approval ids and invalid model output never fall 
   for (const plan of [
     { intent: "interrupt_thread", targetThreadId: "first", heardText: "停止 first" },
     { intent: "interrupt_thread" },
-    { intent: "send_turn", targetProjectCwd: "first", instruction: "跑测试" },
+    { intent: "send_turn", targetProjectCwd: "unknown-project", instruction: "跑测试" },
     { intent: "approve_request", decision: "accept" },
     { intent: "approve_request", requestId: "codex:work:req", decision: "maybe" },
     { intent: "create_thread", targetProjectCwd: "/dev/invented", instruction: "开始" },
@@ -98,6 +98,28 @@ test("invalid targets, missing approval ids and invalid model output never fall 
   f.setFailure();
   await assert.rejects(f.turn("停止运行"), /模型连接失败/);
   assert.equal(f.actions.length, 0);
+});
+
+test("unresolved targets ask a short spoken choice, and an exact project name chosen by the model resolves", async (t) => {
+  const f = await fixture(t);
+  f.setResponse({ ...basePlan, intent: "send_turn", targetProjectCwd: "/somewhere/else/second", instruction: "跑测试" });
+  const resolved = await f.turn("让 second 跑测试");
+  assert.equal(resolved.executed.ok, true);
+  assert.notEqual(resolved.executed.summaryTag, "目标未确认");
+
+  f.setResponse({ ...basePlan, intent: "create_thread", targetProjectCwd: "/dev/invented", heardText: "让 second 开始", instruction: "开始" });
+  const asked = await f.turn("让 second 开始");
+  assert.equal(asked.executed.ok, false);
+  assert.equal(asked.spokenReply, "是交给second吗？");
+  assert.doesNotMatch(asked.spokenReply, /模型|有效/);
+
+  f.setResponse({ ...basePlan, intent: "send_turn", instruction: "跑测试" });
+  const ambiguous = await f.turn("跑一下测试");
+  assert.match(ambiguous.spokenReply, /^是.+还是.+？$/);
+  const snapshot = await f.svc.buildLiveSnapshot({ callId: "model-call" });
+  assert.equal(snapshot.pendingClarification.instruction, "跑测试");
+  await f.turn("second");
+  assert.match(f.calls.at(-1).text, /"pendingClarification":\{"intent":"send_turn"/);
 });
 
 test("silence stays acoustic, while model-decided noise and briefings use the same model pipeline", async (t) => {

@@ -2,6 +2,27 @@
 
 > Plain-language English release notes for end users covering key additions, improvements, and fixes in each version. Keep this file in sync with `RELEASE_NOTES.md` whenever user-visible changes ship; the in-app "Version & Updates" modal loads it automatically for non-Chinese UI locales.
 
+## In development (2026-11-24) — In-Car Voice: Full Sentences, Accurate Project Names, Ask-Back
+
+Summary: Fixed the issues that hurt voice use while driving most — sentences cut in half, misheard project names, and replies that ran too long.
+
+### Added
+
+- **"Heard you" chime**: Voice calls and the Sprite Assistant play a short chime when they catch the end of what you said, so you know it was received without looking.
+- **Ask-back when a project isn't found**: Instead of reading out a technical error, voice now asks "A or B?" — just say the project name to continue.
+
+### Improved
+
+- **Sentences stay whole**: Pauses of up to 1.6 seconds no longer split one sentence into two, so you can think mid-sentence while driving.
+- **Better project-name recognition**: Speech recognition now prefers the more accurate Whisper turbo model and is primed with your project names and common terms.
+- **Clearer audio**: The microphone filter now keeps more high-frequency detail, which helps with sounds like "s" and "sh".
+- **Shorter replies**: Spoken replies lead with the conclusion and stay within a sentence or two.
+
+### Fixed
+
+- **Nothing is lost while the AI is busy**: Extra sentences spoken while the AI was thinking or talking used to be dropped; they are now stitched together and sent in full.
+- **Sprite barge-in keeps your first words**: Interrupting the Sprite while it speaks no longer loses the start of what you said.
+
 ## v0.2.4 (2026-11-21) — 3D Dream Factory Polish, LAN Switch & Anonymous Usage Ping
 
 Summary: Upgraded the 3D Dream Factory overview and Sprite Assistant, added quick LAN access switching, improved file/image previewing, and introduced an opt-out anonymous startup ping.

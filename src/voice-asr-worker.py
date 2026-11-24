@@ -20,8 +20,8 @@ def find_local_whisper_model():
 
     hub_dir = Path.home() / ".cache" / "huggingface" / "hub"
     candidates = [
-        "models--mlx-community--whisper-small-mlx",
         "models--mlx-community--whisper-large-v3-turbo",
+        "models--mlx-community--whisper-small-mlx",
         "models--mlx-community--whisper-medium-mlx",
         "models--mlx-community--whisper-tiny",
     ]

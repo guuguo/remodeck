@@ -328,6 +328,52 @@ function concatInt16Chunks(chunks = []) {
   return merged;
 }
 
+// Hands-free call / drive mode: tolerate mid-sentence pauses (people think while driving) and long instructions.
+export const CALL_VOICE_VAD_OPTIONS = Object.freeze({
+  sampleRate: 16000,
+  preRollMs: 600,
+  silenceMs: 1600,
+  minSpeechMs: 260,
+  maxSpeechMs: 30000,
+  rmsThreshold: 0.009,
+  adaptive: true,
+  requireSustainedOnset: true,
+  minPeakRms: 0.010,
+  minSnrRatio: 1.35,
+});
+
+// Merge voice turns that queued up while the previous turn was still processing, so nothing is dropped.
+export function mergeQueuedVoiceTurns(turns = [], { gapSamples = 2560 } = {}) {
+  const list = Array.isArray(turns) ? turns.filter(Boolean) : [];
+  if (list.length <= 1) return list.slice();
+  const out = [];
+  let audioRun = [];
+  const flushAudio = () => {
+    if (!audioRun.length) return;
+    if (audioRun.length === 1) {
+      out.push(audioRun[0]);
+    } else {
+      out.push({
+        ...audioRun[0],
+        samples: mergePcm16ChunksWithGap(audioRun.map((t) => t.samples), gapSamples),
+        overlapDurationMs: audioRun[0].overlapDurationMs || 0,
+        mergedCount: audioRun.length,
+      });
+    }
+    audioRun = [];
+  };
+  for (const turn of list) {
+    if (turn.samples?.length && turn.mode !== "briefing" && !String(turn.transcriptText || "").trim()) {
+      audioRun.push(turn);
+    } else {
+      flushAudio();
+      out.push(turn);
+    }
+  }
+  flushAudio();
+  return out;
+}
+
 export function createVadTurnDetector({
   sampleRate = 16000,
   preRollMs = 320,

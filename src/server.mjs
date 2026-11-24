@@ -1289,6 +1289,7 @@ export async function createAgentControlServer({
           audioBase64,
           audioMimeType: body.audioMimeType || "audio/wav",
           language: body.language || "zh",
+          promptHints: await voiceService.getAsrPromptHints(),
         });
         sendJson(response, 200, result, { requestId });
         return;

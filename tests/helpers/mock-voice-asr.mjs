@@ -21,7 +21,9 @@ rl.on("line", (line) => {
     if (!st.isFile() || st.size <= 0) {
       throw new Error("missing audio");
     }
-    const text = String(process.env.MOCK_VOICE_ASR_TEXT || "让 粉丝站小屋 跑一下测试").trim();
+    const text = process.env.MOCK_VOICE_ASR_ECHO_PROMPT === "1"
+      ? `PROMPT:${String(req?.prompt || "")}`
+      : String(process.env.MOCK_VOICE_ASR_TEXT || "让 粉丝站小屋 跑一下测试").trim();
     process.stdout.write(`${JSON.stringify({
       id,
       ok: true,

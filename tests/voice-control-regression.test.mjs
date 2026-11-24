@@ -78,6 +78,8 @@ test("voice turns received during processing are submitted once in chronological
     renderVoiceCallUi() {},
     scheduleVoiceListenResume() {},
     voiceSelectionPayload: () => ({}),
+    mergeQueuedVoiceTurns: (turns) => turns,
+    playVoiceEarcon() {},
     apiPostWithHotFallback: async (_, body) => { sent.push(body.transcriptText); return { noSpeech: true }; },
   });
   await send({ transcriptText: "第一句" });
@@ -128,6 +130,8 @@ test("turn-taking playback completes even when background noise or user speech a
     renderVoiceCallUi() {},
     scheduleVoiceListenResume() {},
     voiceSelectionPayload: () => ({}),
+    mergeQueuedVoiceTurns: (turns) => turns,
+    playVoiceEarcon() {},
     apiPostWithHotFallback: async () => {
       state.voice.isRecording = true;
       return { heardText: "第一句", spokenReply: "第一句的回答" };
@@ -251,7 +255,7 @@ test("turn-taking capture buffers speech during AI playback without interrupting
   assert.equal(sent.length, 1);
   assert.ok(sent[0].overlapDurationMs > 0);
   assert.equal(sent[0].overlapBotText, "当前项目正在运行测试。");
-  const submitted = Array.from(sent[0].wavUint8Array);
+  const submitted = Array.from(sent[0].samples);
   assert.ok(submitted.includes(1), "should preserve speech buffered during AI playback");
   assert.ok(submitted.includes(100), "should append speech spoken after AI playback");
 });
@@ -436,9 +440,9 @@ print(json.dumps(out, ensure_ascii=False))
   assert.deepEqual(parsed.split, ["先看下日志然后修掉", "先看下日志", "然后修掉"]);
 });
 
-test("Silero VAD rejects car road-hum + turn-signal clicks and app.js wires 100-3800Hz bandpass filters", () => {
+test("Silero VAD rejects car road-hum + turn-signal clicks and app.js wires 100-7200Hz bandpass filters", () => {
   assert.match(appSource, /highpass\.frequency\.value\s*=.*100/);
-  assert.match(appSource, /lowpass\.frequency\.value\s*=.*3800/);
+  assert.match(appSource, /lowpass\.frequency\.value\s*=.*7200/);
   assert.match(appSource, /state\.voice\.filterNodes/);
   assert.match(appSource, /state\.voice\.silentGainNode\s*=\s*silentGain/);
 
