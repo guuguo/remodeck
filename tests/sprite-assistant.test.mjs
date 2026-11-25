@@ -6,6 +6,7 @@ import {
   buildSpriteQueryReply,
   captureSpriteOverviewSnapshot,
   classifySpriteUserInput,
+  buildSpriteTicketReply,
   diffSpriteOverviewEvents,
   renderSpriteAssistantHtml,
 } from "../public/sprite-assistant.js";
@@ -110,6 +111,7 @@ test("Sprite Assistant classifies confirm/cancel/queries/dispatch and escapes XS
 
   assert.equal(classifySpriteUserInput("确认", { hasPendingPreview: true }).intent, "confirm_preview");
   assert.equal(classifySpriteUserInput("算了", { hasPendingPreview: true }).intent, "cancel_preview");
+  assert.equal(classifySpriteUserInput("我的工单").intent, "query_tickets");
   assert.equal(classifySpriteUserInput("汇报进展").intent, "briefing");
   assert.equal(classifySpriteUserInput("谁待拍板").intent, "query_pending");
   assert.equal(classifySpriteUserInput("准收菜").intent, "query_harvest");
@@ -345,11 +347,23 @@ test("multi-turn history stays at six entries and focusStack keeps latest topics
 });
 
 test("work card renders sources, editable continuation and all work order actions safely", () => {
-  const html = renderSpriteWorkCard({ id: "alert:one", type: "alert", title: "登录<脚本>", line: "等回调证据", sources: [{ threadId: "codex:default:one", label: "工位" }] }, { continueCardId: "alert:one", continueMessage: "继续 <script>" });
+  const html = renderSpriteWorkCard({ id: "alert:one", type: "alert", title: "登录<脚本>", line: "等回调证据", threadId: "codex:default:one", sources: [{ threadId: "codex:default:one", label: "工位" }] }, { continueCardId: "alert:one", continueMessage: "继续 <script>" });
   assert.match(html, /data-board-open-thread="codex:default:one"/);
   assert.match(html, /data-sprite-continue-message="alert:one"/);
-  for (const action of ["send_continue", "snooze", "park", "done", "dismiss"]) assert.match(html, new RegExp(`data-sprite-card-action="${action}"`));
+  for (const action of ["send_continue", "snooze", "park", "done", "pin", "dismiss"]) assert.match(html, new RegExp(`data-sprite-card-action="${action}"`));
   assert.doesNotMatch(html, /<script>/);
+  // A 工单 card shows its goal and criteria and is not offered for pinning again.
+  const ticket = renderSpriteWorkCard({ id: "ruin:ticket:tk_1", type: "ruin", title: "账单", line: "停了 4 天", threadId: "codex:default:one", ticketId: "tk_1", goal: "整理账单", criteria: ["能导出 <CSV>"], sources: [] });
+  assert.match(ticket, /目标：整理账单/);
+  assert.match(ticket, /<li>能导出 &lt;CSV&gt;<\/li>/);
+  assert.doesNotMatch(ticket, /data-sprite-card-action="pin"/);
+  // A failed scheduled run offers a retry, not a continuation.
+  const failed = renderSpriteWorkCard({ id: "alert:auto:k", type: "alert", title: "晨报", line: "定时唤起失败：离线", originLabel: "定时任务·晨报", actions: ["retry", "snooze", "dismiss"], sources: [] });
+  assert.match(failed, /data-sprite-card-action="retry"/);
+  assert.match(failed, /定时任务·晨报/);
+  assert.doesNotMatch(failed, /send_continue|data-sprite-continue-message/);
+  const wip = renderSpriteWorkCard({ id: "ruin:t:wip:a.md", type: "ruin", title: "任务卡", line: "久未更新", sources: [] });
+  assert.doesNotMatch(wip, /send_continue/, "没有原工位的卡不给续做");
   const tomorrow = new Date(spriteTomorrowAtEight(new Date(2026, 10, 25, 23, 30)));
   assert.equal(tomorrow.getDate(), 26);
   assert.equal(tomorrow.getHours(), 8);
@@ -366,4 +380,14 @@ test("context shortcuts and prompts follow selected building signals", () => {
   topic.assistantSignals.top = "ruin";
   assert.match(buildSpriteContext(topic).placeholder, /上次停在哪/);
   assert.equal(buildSpriteContext(topic).quick.length, 4);
+});
+
+test("「我的工单」列出每张工单停在哪，可打开工位和改验收标准", () => {
+  const empty = buildSpriteTicketReply({ assistantTickets: [] });
+  assert.match(empty.text, /还没有工单/);
+  const reply = buildSpriteTicketReply({ assistantTickets: [
+    { id: "tk_1", title: "账单分类", topicName: "记账小程序", line: "还差：没看到运行结果", criteria: ["能跑通"], state: "missing", threadId: "codex:default:D" },
+  ] });
+  assert.match(reply.text, /「记账小程序」账单分类：还差：没看到运行结果（验收标准 1 条）/);
+  assert.deepEqual(reply.actions.map((a) => a.type), ["open_thread", "ticket_edit"]);
 });

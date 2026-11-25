@@ -51,3 +51,11 @@
 @media (max-width: 600px) {
   :root[data-theme="light"] .sprite-assistant-mount.is-3d .sprite-popover-card { background: #f5f9fff5; color: #172033; }
 }
+.sprite-card-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sprite-card-tag { font-size: 10px; line-height: 1.4; padding: 0 6px; border-radius: 999px; border: 1px solid #94a3b855; color: var(--text-muted, #94a3b8); }
+.sprite-card-tag.is-ticket { border-color: #f59e0b88; color: #f59e0b; }
+.sprite-card-goal { margin: 4px 0; color: var(--text-muted, #94a3b8); }
+.sprite-card-goal.is-muted { font-style: italic; }
+.sprite-card-criteria { margin: 4px 0 6px; padding-left: 18px; line-height: 1.5; }
+.sprite-icon-btn.sprite-handsfree-btn { width: auto; padding: 0 7px; gap: 3px; }
+.sprite-handsfree-label { font-size: 11px; line-height: 1; }

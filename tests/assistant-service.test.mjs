@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
-import { AssistantLLM } from "../src/assistant-llm.mjs";
+import { AssistantLLM, TICKET_DRAFT_PROMPT } from "../src/assistant-llm.mjs";
 import { computeTopicSignals } from "../src/assistant-service.mjs";
 import { cardSubject, harvestEvidenceForThread, isCardHandled } from "../src/assistant-signals.mjs";
 import { inferPipelineStage } from "../src/mission-overview-service.mjs";
@@ -251,9 +251,11 @@ test("历史问答模型只收到截断证据包，错误/超预算均回落", a
     received = JSON.parse(input.prompt);
     return "待你选择导出格式 [S1]";
   } });
-  const input = { text: "示例商城之前怎么解决", history: [{ role: "user", text: "不应进入模型的无关历史" }] };
+  const input = { text: "示例商城之前怎么解决", history: [{ role: "user", text: "只用来理解指代的历史" }] };
   assert.equal((await f.assistant.ask(input)).usedModel, true);
-  assert.equal(JSON.stringify(received).includes("无关历史"), false);
+  // Earlier turns ride along as conversation, never as citable sources.
+  assert.equal(JSON.stringify(received.sources).includes("理解指代"), false);
+  assert.equal(received.conversation[0].text, "只用来理解指代的历史");
   assert.ok(received.sources.every((s) => Array.from(s.text).length <= 300));
   const exceeded = await f.assistant.ask({ text: "示例商城上次怎么解决" });
   assert.equal(exceeded.usedModel, false);
@@ -351,4 +353,103 @@ test("收菜判定解析：只认合法 JSON，声称验证但无证据降为未
   assert.equal(await judge("看起来完成了").judgeHarvest(input), null);
   assert.equal(await new AssistantLLM({ dataDir: f.dataDir, config: { enabled: true } }).judgeHarvest(input), null);
   assert.equal(await new AssistantLLM({ dataDir: f.dataDir, config: { enabled: false }, completeImpl: async () => "{}" }).judgeHarvest(input), null);
+});
+
+const waitFor = async (fn, tries = 60) => {
+  for (let i = 0; i < tries; i++) { const v = await fn(); if (v) return v; await new Promise((r) => setTimeout(r, 20)); }
+  return null;
+};
+
+test("钉成工单：模型起草目标与验收标准，幂等；验收标准进判定，未逐条满足不亮金；续做走 goal", async (t) => {
+  const f = await fixture(t);
+  const judged = [];
+  f.assistant.llm = new AssistantLLM({ dataDir: f.dataDir, config: { enabled: true }, now: () => ASSISTANT_NOW, completeImpl: async (input) => {
+    const payload = JSON.parse(input.prompt);
+    if (input.system === TICKET_DRAFT_PROMPT) return '{"title":"账单分类","goal":"把账单按分类整理出来","criteria":["分类脚本能跑通","输出分类数量"]}';
+    if (/验收员/.test(input.system)) {
+      judged.push(payload);
+      return payload.criteria?.length
+        ? '{"delivered":true,"verified":false,"evidence":"","missing":"没看到分类脚本运行结果"}'
+        : '{"delivered":true,"verified":true,"evidence":"已给出分类方案","missing":""}';
+    }
+    return null;
+  } });
+  const thread = f.threads[3];
+  const { ticket } = await f.assistant.createTicket({ threadId: thread.id });
+  assert.equal(ticket.title, "账单分类");
+  assert.deepEqual(ticket.criteria, ["分类脚本能跑通", "输出分类数量"]);
+  assert.equal(ticket.topicId, "line-3");
+  assert.equal((await f.assistant.createTicket({ threadId: thread.id })).existed, true);
+  const overview = await waitFor(async () => {
+    const o = await f.overview.getOverview();
+    return o.assistantTickets?.[0]?.state === "missing" ? o : null;
+  });
+  assert.ok(overview, "带验收标准的判定应回写到工单状态");
+  assert.match(overview.assistantTickets[0].line, /还差：没看到分类脚本运行结果/);
+  assert.ok(judged.some((p) => p.criteria?.length === 2), "判定输入应带验收标准");
+  assert.equal(allTopics(overview)[3].assistantSignals.cards.find((c) => c.type === "harvest"), undefined, "验收标准没满足就不亮金");
+  // Editing the criteria re-judges against the new list.
+  await f.assistant.updateTicket(ticket.id, { criteria: "能导出 CSV" });
+  assert.ok(await waitFor(async () => { await f.overview.getOverview(); return judged.some((p) => p.criteria?.[0] === "能导出 CSV"); }));
+  // Continuing a ticket card carries goal and criteria and runs as a goal.
+  f.setNow(ASSISTANT_NOW + 3 * 86400000);
+  const stale = await f.overview.getOverview();
+  const card = allTopics(stale)[3].assistantSignals.cards.find((c) => c.id === `ruin:ticket:${ticket.id}`);
+  assert.ok(card, "停了 3 天的工单重新浮出");
+  assert.equal(card.ticketId, ticket.id);
+  await f.assistant.cardAction(card.id, { type: "continue", message: "接着做" });
+  assert.equal(f.sent.at(-1).threadId, thread.id);
+  assert.equal(f.sent.at(-1).goalMode, true);
+  assert.match(f.sent.at(-1).text, /^接着做\n工单目标：把账单按分类整理出来\n验收标准：\n1\. 能导出 CSV/);
+  await f.assistant.cardAction(card.id, { type: "done" });
+  assert.equal((await f.assistant.listTickets({ status: "done" })).tickets[0].id, ticket.id);
+  assert.equal((await f.assistant.listTickets()).tickets.length, 0);
+  await assert.rejects(f.assistant.updateTicket(ticket.id, { status: "closed" }), /open\/done\/dropped/);
+});
+
+test("没有模型时工单仍可建：目标取会话标题，不带验收标准", async (t) => {
+  const f = await fixture(t);
+  const { ticket } = await f.assistant.createTicket({ threadId: f.threads[0].id });
+  assert.equal(ticket.title, "示例商城导出");
+  assert.deepEqual(ticket.criteria, []);
+  assert.equal(ticket.draftedBy, "");
+  await assert.rejects(f.assistant.createTicket({}), /工位/);
+});
+
+test("定时任务冒泡：失败变待拍板卡并可重试，按 cwd 归产线，家目录归收件箱，卡上标来源任务", async (t) => {
+  const f = await fixture(t);
+  const ran = [];
+  f.assistant.automations = {
+    list: async () => [
+      { taskKey: "codex:default:nightly", name: "夜间巡检", status: "ACTIVE", cwds: ["/Users/alice/projects/demo-1/sub"], lastStatus: "error", lastError: "实例离线", lastTriggeredAtMs: ASSISTANT_NOW - 3600000 },
+      { taskKey: "custom:morning", name: "晨报", status: "ACTIVE", cwds: ["/Users/alice"], lastStatus: "error", lastError: "模型不可用", lastTriggeredAtMs: ASSISTANT_NOW - 7200000 },
+      { taskKey: "custom:export", name: "导出", status: "ACTIVE", cwds: ["/Users/alice/projects/demo-2"], lastStatus: "triggered", lastThreadId: f.threads[2].id },
+    ],
+    run: async (key) => { ran.push(key); },
+  };
+  const o = await f.overview.getOverview();
+  assert.ok(allTopics(o)[1].assistantSignals.cards.some((c) => c.id === "alert:auto:codex:default:nightly" && /实例离线/.test(c.line)));
+  assert.deepEqual(o.assistantInbox.cards.map((c) => c.id), ["alert:auto:custom:morning"]);
+  assert.equal(o.assistantBadges.alert, 3);
+  assert.equal(allTopics(o)[2].assistantSignals.cards.find((c) => c.type === "harvest").originLabel, "定时任务·导出");
+  await f.assistant.cardAction("alert:auto:custom:morning", { type: "retry" });
+  assert.deepEqual(ran, ["custom:morning"]);
+  await assert.rejects(f.assistant.cardAction(allTopics(o)[0].assistantSignals.cards[0].id, { type: "retry" }), /不是定时任务/);
+  const tour = await f.assistant.tour();
+  assert.ok(tour.stops.some((s) => s.topicId === "" && s.cards[0].id === "alert:auto:custom:morning"));
+});
+
+test("连续对话：之前几轮对话随证据包交给模型，用来理解指代", async (t) => {
+  const f = await fixture(t);
+  let seen = null;
+  f.assistant.llm = new AssistantLLM({ dataDir: f.dataDir, config: { enabled: true }, now: () => ASSISTANT_NOW, completeImpl: async (input) => {
+    if (/验收员/.test(input.system)) return '{"delivered":false,"verified":false,"evidence":"","missing":""}';
+    seen = JSON.parse(input.prompt);
+    return "停在导出格式要你选 A 还是 B [S1]";
+  } });
+  const answer = await f.assistant.ask({ text: "它卡在哪", focus: ["line-0"], history: [
+    { role: "user", text: "示例商城做到哪了" }, { role: "assistant", text: "示例商城停在导出格式。" }] });
+  assert.equal(answer.usedModel, true);
+  assert.deepEqual(seen.conversation.map((h) => h.role), ["user", "assistant"]);
+  assert.equal(seen.conversation[0].text, "示例商城做到哪了");
 });

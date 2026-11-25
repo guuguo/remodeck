@@ -255,6 +255,8 @@ export async function createAgentControlServer({
     onEvent: (eventName, payload) => broadcastSse(eventName, payload),
   });
   await automationScheduler.load();
+  // The park assistant surfaces failed scheduled runs and can retry them.
+  overviewService.assistant.automations = { list: () => automationScheduler.listTasks(), run: (taskKey) => automationScheduler.runNow(taskKey) };
 
   const humanVerify = new HumanVerifyManager({
     dataDir,
@@ -643,6 +645,17 @@ export async function createAgentControlServer({
       }
       if (pathname === "/api/assistant/profile/aliases" && request.method === "POST") {
         sendJson(response, 200, await overviewService.assistant.addAlias(await readJsonBody(request)), { requestId });
+        return;
+      }
+      if (pathname === "/api/assistant/tickets" && ["GET", "POST"].includes(request.method)) {
+        const result = request.method === "POST" ? await overviewService.assistant.createTicket(await readJsonBody(request))
+          : await overviewService.assistant.listTickets({ status: url.searchParams.get("status") || "open" });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+      const assistantTicket = pathname.match(/^\/api\/assistant\/tickets\/([^/]+)$/);
+      if (assistantTicket && request.method === "POST") {
+        sendJson(response, 200, await overviewService.assistant.updateTicket(decodeURIComponent(assistantTicket[1]), await readJsonBody(request)), { requestId });
         return;
       }
       const assistantCardAction = pathname.match(/^\/api\/assistant\/cards\/([^/]+)\/action$/);

@@ -1,7 +1,9 @@
 import { MemoryVault, resolveVaultPath } from "./memory-vault.mjs";
 import { AssistantLLM } from "./assistant-llm.mjs";
 import { AssistantStore } from "./assistant-store.mjs";
-import { computeTopicSignals, cardSubject, SIGNAL_TYPES, shortText, timestamp, isoTime, threadTail, threadSource, judgeInputOf } from "./assistant-signals.mjs";
+import { createHash, randomUUID } from "node:crypto";
+import { normalizeWorkspacePath } from "./platform.mjs";
+import { computeTopicSignals, cardSubject, SIGNAL_TYPES, shortText, timestamp, isoTime, threadTail, threadSource, judgeInputOf, automationFailureCard, isCardHandled } from "./assistant-signals.mjs";
 
 export { computeTopicSignals } from "./assistant-signals.mjs";
 const topicsOf = (overview) => (overview.domains || []).flatMap((d) => d.topics || []);
@@ -17,6 +19,35 @@ const normal = (s) => String(s || "").toLowerCase().replace(/[\p{P}\s]/gu, "");
 const JUDGE_WINDOW_MS = 14 * 86_400_000;
 const JUDGE_RETRY_MS = 30 * 60_000;
 const JUDGE_CONCURRENCY = 2;
+const TICKET_STATUSES = ["open", "done", "dropped"];
+const threadsOfTopic = (topic) => [...(topic.activeThreads || []), ...(topic.archivedThreads || [])];
+const criteriaKey = (criteria = []) => criteria.length ? `#${createHash("sha256").update(criteria.join("\n")).digest("hex").slice(0, 12)}` : "";
+function cleanCriteria(value) {
+  const list = Array.isArray(value) ? value : typeof value === "string" ? value.split(/\n+|[；;]/) : null;
+  if (!list || list.some((c) => typeof c !== "string")) throw error("验收标准必须是文本列表");
+  const out = list.map((c) => shortText(c.replace(/^\s*(?:\d+[.、)]|[-*•])\s*/, ""), 120)).filter(Boolean);
+  if (out.length > 8) throw error("验收标准最多 8 条");
+  return out;
+}
+const underPath = (cwd, root) => Boolean(cwd && root && (cwd === root || cwd.startsWith(`${root.replace(/\/+$/, "")}/`)));
+
+// What the park shows for a 工单: where its latest session stands.
+function ticketView(ticket, threads, now) {
+  const linked = threads.filter((t) => ticket.threadIds.includes(t.id)).sort((a, b) => timestamp(b.updatedAt) - timestamp(a.updatedAt));
+  const latest = linked[0], tail = latest ? latest.assistantTail || threadTail(latest) : null;
+  let state = "idle", line = "等工位交付后验收";
+  if (!latest) { state = "lost"; line = "暂时找不到关联工位"; }
+  else if (latest.pendingCount > 0) { state = "waiting"; line = "工位等你拍板"; }
+  else if (latest.live) { state = "running"; line = "工位正在做"; }
+  else if (latest.lastError || latest.lastTurnStatus === "failed") { state = "failed"; line = "上一轮出错了"; }
+  else if (tail?.judgedBy === "model" && tail.evidence) { state = "passed"; line = `验收通过：${tail.evidence}`; }
+  else if (tail?.missing) { state = "missing"; line = `还差：${tail.missing}`; }
+  else if (tail?.asking) { state = "asking"; line = `等你回复：${tail.question || "工位在问你"}`; }
+  const at = Math.max(timestamp(ticket.updatedAt), ...linked.map((t) => timestamp(t.updatedAt)));
+  if (["idle", "missing"].includes(state) && at && now - at >= 3 * 86_400_000) line = `停了 ${Math.floor((now - at) / 86_400_000)} 天 · ${line}`;
+  return { id: ticket.id, title: ticket.title, goal: ticket.goal, criteria: ticket.criteria, status: ticket.status, state, line: shortText(line, 60),
+    threadIds: ticket.threadIds, ...(latest ? { threadId: latest.id } : {}), createdAt: ticket.createdAt, updatedAt: isoTime(at) || ticket.updatedAt };
+}
 
 export class AssistantService {
   #tails = new Map();
@@ -26,7 +57,10 @@ export class AssistantService {
   #judgeFailures = new Map();
   #judging = 0;
   #judgedTimer = null;
-  constructor({ hub, getOverview, dataDir, env = process.env, now = () => Date.now(), vault = null, llm = null, llmOptions = {}, evidenceBudgetMs = 1500, onJudged = null } = {}) {
+  #tickets = null;
+  #judgeInFlight = new Set();
+  // `automations` ({ list, run }) is attached by the host once the scheduler exists.
+  constructor({ hub, getOverview, dataDir, env = process.env, now = () => Date.now(), vault = null, llm = null, llmOptions = {}, evidenceBudgetMs = 1500, onJudged = null, automations = null } = {}) {
     this.hub = hub;
     this.getOverview = getOverview;
     this.dataDir = dataDir;
@@ -35,6 +69,7 @@ export class AssistantService {
     this.vault = vault;
     this.evidenceBudgetMs = evidenceBudgetMs;
     this.onJudged = onJudged;
+    this.automations = automations;
     this.store = new AssistantStore(dataDir);
     this.llm = llm || new AssistantLLM({ dataDir, now, store: this.store, ...llmOptions });
   }
@@ -78,19 +113,27 @@ export class AssistantService {
     const ids = new Set(visible.map((t) => t.id));
     for (const id of this.#tails.keys()) if (!ids.has(id)) this.#tails.delete(id);
     const judgments = await this.#loadJudgments();
+    const criteriaOf = new Map();
+    for (const ticket of await this.openTickets()) for (const id of ticket.threadIds) if (ticket.criteria.length) criteriaOf.set(id, ticket.criteria);
     const toJudge = [];
     const out = visible.map((t) => {
       if (!needsRead(t)) { this.#tails.delete(t.id); return t; }
       const cached = this.#tails.get(t.id);
       if (cached?.fingerprint !== fingerprintOf(t)) return t;
-      const judged = judgments[t.id]?.fingerprint === cached.fingerprint ? judgments[t.id] : null;
-      if (!judged && this.#judgeable(t, cached)) toJudge.push(t);
+      // A verdict is about this turn against these criteria: editing a 工单's
+      // acceptance criteria re-judges its sessions.
+      const criteria = criteriaOf.get(t.id) || [];
+      const key = `${cached.fingerprint}${criteriaKey(criteria)}`;
+      const judged = judgments[t.id]?.fingerprint === key ? judgments[t.id] : null;
+      if (!judged && this.#judgeable(t, cached, key)) toJudge.push({ id: t.id, updatedAt: t.updatedAt, base: cached.fingerprint, key, criteria });
       // The model's verdict replaces the wording heuristic; until it arrives
-      // (or when no model answers) the heuristic stays as the fallback.
-      const tail = judged ? { ...cached.tail, evidence: judged.verified ? judged.evidence : null, judgedBy: "model", missing: judged.missing || "" } : cached.tail;
+      // (or when no model answers) the heuristic stays as the fallback — except
+      // for criteria, which only a model can check.
+      const tail = judged ? { ...cached.tail, evidence: judged.verified ? judged.evidence : null, judgedBy: "model", missing: judged.missing || "" }
+        : criteria.length && cached.tail ? { ...cached.tail, evidence: null } : cached.tail;
       return { ...t, assistantTail: tail, lastError: t.lastError || cached.lastError };
     });
-    if (toJudge.length) void this.#enqueueJudgments(toJudge, fingerprintOf);
+    if (toJudge.length) void this.#enqueueJudgments(toJudge);
     return out;
   }
 
@@ -99,20 +142,20 @@ export class AssistantService {
     return this.#judgments;
   }
 
-  #judgeable(t, cached) {
+  #judgeable(t, cached, key) {
     const tail = cached.tail;
     if (!cached.judgeInput || !tail || tail.role !== "assistant" || tail.status !== "completed" || tail.error || tail.asking) return false;
     if (t.live || t.pendingCount > 0 || t.queuedCount > 0 || t.lastError || cached.lastError || t.lastTurnStatus === "failed") return false;
     if (this.now() - timestamp(t.updatedAt) > JUDGE_WINDOW_MS) return false;
     const failed = this.#judgeFailures.get(t.id);
-    return !(failed && failed.fingerprint === cached.fingerprint && this.now() - failed.at < JUDGE_RETRY_MS);
+    return !(failed && failed.fingerprint === key && this.now() - failed.at < JUDGE_RETRY_MS);
   }
 
-  async #enqueueJudgments(threads, fingerprintOf) {
+  async #enqueueJudgments(jobs) {
     if (!await this.llm.available?.()) return;
-    const queued = new Set(this.#judgeQueue.map((job) => job.id));
-    const fresh = threads.filter((t) => !queued.has(t.id)).sort((a, b) => timestamp(b.updatedAt) - timestamp(a.updatedAt))
-      .map((t) => ({ id: t.id, fingerprint: fingerprintOf(t) }));
+    // In-flight jobs have left the queue but must not be judged twice.
+    const queued = new Set([...this.#judgeQueue.map((job) => `${job.id}:${job.key}`), ...this.#judgeInFlight]);
+    const fresh = jobs.filter((job) => !queued.has(`${job.id}:${job.key}`)).sort((a, b) => timestamp(b.updatedAt) - timestamp(a.updatedAt));
     // Newest work first: it is what the park is showing right now.
     this.#judgeQueue.unshift(...fresh);
     while (this.#judging < JUDGE_CONCURRENCY && this.#judgeQueue.length) void this.#judgeNext();
@@ -122,13 +165,14 @@ export class AssistantService {
     const job = this.#judgeQueue.shift();
     if (!job) return;
     this.#judging++;
+    this.#judgeInFlight.add(`${job.id}:${job.key}`);
     try {
       const cached = this.#tails.get(job.id);
-      if (cached?.fingerprint !== job.fingerprint || !cached.judgeInput) return;
-      const verdict = await this.llm.judgeHarvest(cached.judgeInput);
-      if (!verdict) { this.#judgeFailures.set(job.id, { fingerprint: job.fingerprint, at: this.now() }); return; }
+      if (cached?.fingerprint !== job.base || !cached.judgeInput) return;
+      const verdict = await this.llm.judgeHarvest({ ...cached.judgeInput, criteria: job.criteria });
+      if (!verdict) { this.#judgeFailures.set(job.id, { fingerprint: job.key, at: this.now() }); return; }
       this.#judgeFailures.delete(job.id);
-      const record = { fingerprint: job.fingerprint, ...verdict, at: new Date(this.now()).toISOString() };
+      const record = { fingerprint: job.key, ...verdict, at: new Date(this.now()).toISOString() };
       this.#judgments[job.id] = record;
       await this.store.update("harvest-judgments", (all) => {
         const next = { ...all, [job.id]: record };
@@ -139,6 +183,7 @@ export class AssistantService {
       }).catch(() => {});
       this.#notifyJudged();
     } finally {
+      this.#judgeInFlight.delete(`${job.id}:${job.key}`);
       this.#judging--;
       if (this.#judgeQueue.length) void this.#judgeNext();
     }
@@ -165,14 +210,108 @@ export class AssistantService {
     return out;
   }
 
-  async decorateOverview(overview) {
+  // ---- 工单: sessions pinned as persistent work items ----
+  async #allTickets() {
+    if (!this.#tickets) this.#tickets = await this.store.read("tickets", {}).catch(() => ({}));
+    return this.#tickets;
+  }
+
+  async openTickets() {
+    return Object.values(await this.#allTickets()).filter((t) => t.status === "open");
+  }
+
+  async #saveTicket(ticket) {
+    this.#tickets = await this.store.update("tickets", (all) => ({ ...all, [ticket.id]: ticket }), {});
+    return ticket;
+  }
+
+  async listTickets({ status = "open" } = {}) {
+    const all = Object.values(await this.#allTickets()).filter((t) => status === "all" || t.status === status);
+    const overview = await this.getOverview();
+    const views = new Map((overview.assistantTickets || []).map((v) => [v.id, v]));
+    return { tickets: all.sort((a, b) => timestamp(b.updatedAt) - timestamp(a.updatedAt)).map((t) => views.get(t.id) || t) };
+  }
+
+  async createTicket({ threadId, title, goal, criteria } = {}) {
+    if (typeof threadId !== "string" || !threadId) throw error("需要要钉成工单的工位");
+    const existing = (await this.openTickets()).find((t) => t.threadIds.includes(threadId));
+    if (existing) return { ok: true, existed: true, ticket: existing };
+    const overview = await this.getOverview();
     const topics = topicsOf(overview);
-    const [cardState, idleWip] = await Promise.all([this.store.read("card-state"), this.idleWip(topics)]);
-    const badges = { alert: 0, harvest: 0, ruin: 0 };
-    for (const topic of topics) {
-      topic.assistantSignals = computeTopicSignals(topic, { now: this.now(), cardState, idleWip });
-      for (const type of SIGNAL_TYPES) badges[type] += topic.assistantSignals.counts[type];
+    const topic = topics.find((t) => threadsOfTopic(t).some((th) => th.id === threadId));
+    const thread = (topic ? threadsOfTopic(topic) : overview.unassignedActive || []).find((th) => th.id === threadId) || {};
+    let input = this.#tails.get(threadId)?.judgeInput;
+    if (!input && typeof this.hub?.readThread === "function") {
+      input = judgeInputOf((await this.hub.readThread(threadId, { limit: 1, detail: "auto" }).catch(() => null))?.thread || {});
     }
+    input ||= { title: shortText(thread.title, 80), ask: shortText(thread.preview, 600), reply: "" };
+    // The model drafts what the user did not write; the user can edit it later.
+    const draft = goal === undefined || criteria === undefined ? await this.llm.draftTicket?.(input) : null;
+    const at = new Date(this.now()).toISOString();
+    const ticket = { id: `tk_${randomUUID().slice(0, 8)}`, title: shortText(title || draft?.title || thread.title || input.title || "未命名工单", 40),
+      goal: shortText(goal ?? draft?.goal ?? input.ask ?? "", 200), criteria: criteria !== undefined ? cleanCriteria(criteria) : draft?.criteria || [],
+      topicId: topic?.id || "", threadIds: [threadId], status: "open", draftedBy: draft ? "model" : "", createdAt: at, updatedAt: at };
+    await this.#saveTicket(ticket);
+    this.#notifyJudged();
+    return { ok: true, ticket };
+  }
+
+  async updateTicket(id, { title, goal, criteria, status, addThreadId } = {}) {
+    const ticket = (await this.#allTickets())[id];
+    if (!ticket) throw error("工单不存在", 404);
+    if (status !== undefined && !TICKET_STATUSES.includes(status)) throw error("工单状态只能是 open/done/dropped");
+    const at = new Date(this.now()).toISOString();
+    const next = { ...ticket, ...(title !== undefined ? { title: shortText(title, 40) || ticket.title } : {}),
+      ...(goal !== undefined ? { goal: shortText(goal, 200) } : {}), ...(criteria !== undefined ? { criteria: cleanCriteria(criteria) } : {}),
+      ...(typeof addThreadId === "string" && addThreadId && !ticket.threadIds.includes(addThreadId) ? { threadIds: [...ticket.threadIds, addThreadId] } : {}),
+      ...(status !== undefined ? { status, ...(status === "open" ? { closedAt: undefined } : { closedAt: at }) } : {}), updatedAt: at };
+    await this.#saveTicket(next);
+    return { ok: true, ticket: next };
+  }
+
+  #automationCache = null;
+  async #automationTasks() {
+    if (typeof this.automations?.list !== "function") return [];
+    // Listing scans every instance's task files; the overview refreshes often.
+    if (this.#automationCache && this.now() - this.#automationCache.at < 30_000) return this.#automationCache.tasks;
+    let tasks = [];
+    try { tasks = await this.automations.list(); } catch { /* scheduler unavailable: no automation cards */ }
+    this.#automationCache = { at: this.now(), tasks: Array.isArray(tasks) ? tasks : [] };
+    return this.#automationCache.tasks;
+  }
+
+  async decorateOverview(overview) {
+    const topics = topicsOf(overview), now = this.now();
+    const [cardState, idleWip, tickets, tasks] = await Promise.all([this.store.read("card-state"), this.idleWip(topics), this.openTickets(), this.#automationTasks()]);
+    const automationByThread = new Map(tasks.filter((t) => t.lastThreadId).map((t) => [t.lastThreadId, t.name || t.taskKey]));
+    const failedTasks = tasks.filter((t) => t.lastStatus === "error" && t.status !== "PAUSED" && t.taskKey);
+    const ticketTopic = new Map(), failureTopic = new Map();
+    for (const ticket of tickets) {
+      const topic = topics.find((t) => threadsOfTopic(t).some((th) => ticket.threadIds.includes(th.id))) || topics.find((t) => t.id === ticket.topicId);
+      ticketTopic.set(ticket.id, topic?.id || "");
+    }
+    for (const task of failedTasks) {
+      const cwds = (task.cwds || []).map((c) => normalizeWorkspacePath(c));
+      const topic = topics.find((t) => { const root = normalizeWorkspacePath(t.primaryCwd || ""); return root && cwds.some((c) => underPath(c, root)); });
+      failureTopic.set(task.taskKey, topic?.id || "");
+    }
+    const badges = { alert: 0, harvest: 0, ruin: 0 };
+    const signalsFor = (topic) => computeTopicSignals(topic, { now, cardState, idleWip, automationByThread,
+      tickets: tickets.filter((tk) => ticketTopic.get(tk.id) === topic.id),
+      extraCards: failedTasks.filter((task) => failureTopic.get(task.taskKey) === topic.id).map((task) => automationFailureCard(task, topic.id)) });
+    for (const topic of topics) {
+      topic.assistantSignals = signalsFor(topic);
+      for (const type of SIGNAL_TYPES) badges[type] += topic.assistantSignals.counts[type];
+      topic.assistantTickets = tickets.filter((tk) => ticketTopic.get(tk.id) === topic.id).map((tk) => ticketView(tk, threadsOfTopic(topic), now));
+    }
+    // Scheduled runs started in the home directory and sessions outside every
+    // topic still need a place to surface: the park's inbox.
+    const inboxTopic = { id: "", name: "定时任务与零散工单", activeThreads: (overview.unassignedActive || []).filter((t) => automationByThread.has(t.id)
+      || tickets.some((tk) => !ticketTopic.get(tk.id) && tk.threadIds.includes(t.id))) };
+    overview.assistantInbox = signalsFor(inboxTopic);
+    for (const type of SIGNAL_TYPES) badges[type] += overview.assistantInbox.counts[type];
+    overview.assistantTickets = [...topics.flatMap((t) => (t.assistantTickets || []).map((v) => ({ ...v, topicId: t.id, topicName: t.name }))),
+      ...tickets.filter((tk) => !ticketTopic.get(tk.id)).map((tk) => ({ ...ticketView(tk, overview.unassignedActive || [], now), topicId: "", topicName: "" }))];
     overview.assistantBadges = badges;
     // The compact top-level topic catalogue is consumed separately from domains.
     for (const topic of overview.topics || []) {
@@ -226,7 +365,7 @@ export class AssistantService {
     } else if (!matched.length && /^(?:做到哪了|进度如何|卡在哪|怎么样)[？?]?$/.test(text) && byId.has(contextTopicId)) {
       return { topic: byId.get(contextTopicId) };
     }
-    if (!matched.length && /忘了什么|有哪些|全园|巡园|待拍板|待收菜|有什么没做完|你好|早上好/.test(text)) return { global: true };
+    if (!matched.length && /忘了什么|有哪些|全园|巡园|待拍板|待收菜|有什么没做完|你好|早上好|工单|定时任务/.test(text)) return { global: true };
     return { candidates: (matched.length ? matched.map((h) => h.topic) : topics).slice(0, 2) };
   }
 
@@ -250,10 +389,15 @@ export class AssistantService {
     const topic = resolved.topic, selected = topic ? [topic] : topics;
     const records = [], keys = new Set();
     const add = (source, body) => {
-      const key = `${source.kind}:${source.threadId || source.sha || source.path || source.topicId}`;
+      const key = `${source.kind}:${source.ticketId || source.threadId || source.sha || source.path || source.topicId}`;
       if (keys.has(key)) return;
       keys.add(key); records.push({ source, text: shortText(body || source.label, 300) });
     };
+    // Pinned 工单 come first: they are what the user said matters.
+    for (const tk of (overview.assistantTickets || []).filter((v) => !topic || v.topicId === topic.id).slice(0, 6)) {
+      add({ kind: "ticket", label: shortText(`工单·${tk.title}`, 60), ticketId: tk.id, ...(tk.topicId ? { topicId: tk.topicId } : {}), ...(tk.threadId ? { threadId: tk.threadId } : {}), ...(isoTime(tk.updatedAt) ? { at: isoTime(tk.updatedAt) } : {}) },
+        `目标：${tk.goal || "未写"}\n验收标准：${tk.criteria?.length ? tk.criteria.join("；") : "未定"}\n现状：${tk.line}`);
+    }
     for (const t of selected) {
       if (t.summary?.progress) add({ kind: "summary", label: `产线摘要·${t.name}`, topicId: t.id, ...(isoTime(t.summary.updatedAt) ? { at: isoTime(t.summary.updatedAt) } : {}) }, `${t.summary.progress}\n下一步：${t.summary.nextStep || "未记录"}`);
       const recent = [...(t.activeThreads || []), ...(t.archivedThreads || [])].filter((th) => !th.internal && !th.isSlice).sort((a, b) => timestamp(b.updatedAt) - timestamp(a.updatedAt)).slice(0, 3);
@@ -268,6 +412,7 @@ export class AssistantService {
       for (const th of (result.threads || []).filter((t) => !t.internal).slice(0, 8)) add(threadSource(th, topic?.id || th.topicId), th.searchMatch?.matchSnippet || threadTail(th)?.text || th.preview);
     }
     const emitKind = async (step, kind, label) => { const count = records.filter((r) => r.source.kind === kind).length; if (count) await emit(step, `${label} ${count} 条`, count); };
+    await emitKind("tickets", "ticket", "对了工单");
     await emitKind("threads", "thread", "翻了相关工位");
     for (const t of selected) for (const commit of (t.gitSnapshot?.commits || []).slice(0, 3)) {
       const sha = typeof commit === "string" ? commit.match(/^[a-f0-9]+/i)?.[0] : commit.sha;
@@ -290,7 +435,7 @@ export class AssistantService {
     await emitKind("memory", "memory", "查到记忆");
     await emit("compose", "依据出处整理回答", records.length);
     const sources = records.map((r) => r.source);
-    const cards = selected.flatMap((t) => t.assistantSignals?.cards || []).sort((a, b) => SIGNAL_TYPES.indexOf(a.type) - SIGNAL_TYPES.indexOf(b.type) || timestamp(a.since) - timestamp(b.since));
+    const cards = [...selected.flatMap((t) => t.assistantSignals?.cards || []), ...(topic ? [] : overview.assistantInbox?.cards || [])].sort((a, b) => SIGNAL_TYPES.indexOf(a.type) - SIGNAL_TYPES.indexOf(b.type) || timestamp(a.since) - timestamp(b.since));
     const first = cards[0];
     let conclusion = first ? `${topic?.name || selected.find((t) => t.id === first.topicId)?.name}：${first.line}`
       : topic?.summary?.progress ? `${topic.name}：${shortText(topic.summary.progress, 220)}` : topic ? `${topic.name}：现有记录不足以确认停在哪。` : `当前有 ${overview.assistantBadges?.alert || 0} 项待拍板、${overview.assistantBadges?.harvest || 0} 项待收菜、${overview.assistantBadges?.ruin || 0} 项久未推进。`;
@@ -307,6 +452,9 @@ export class AssistantService {
         remaining -= Array.from(body).length;
         return { id: `S${i + 1}`, label: shortText(r.source.label, 60), text: body };
       }) };
+      // Earlier turns let the model follow「它」「然后呢」; they are not sources.
+      const conversation = (input.history || []).slice(-4).map((h) => ({ role: h.role, text: shortText(h.text, 200) })).filter((h) => h.text);
+      if (conversation.length) evidence.conversation = conversation;
       const composed = await this.llm.complete({ evidence });
       if (composed) { answerText = composed; usedModel = true; }
     }
@@ -322,23 +470,42 @@ export class AssistantService {
   }
 
   async cardAction(id, { type, until, reason, message } = {}) {
-    if (!["continue", "harvest", "snooze", "park", "done", "dismiss"].includes(type)) throw error("不支持的工单动作");
+    if (!["continue", "harvest", "snooze", "park", "done", "dismiss", "retry"].includes(type)) throw error("不支持的工单动作");
     if (type === "snooze" && (!timestamp(until) || timestamp(until) <= this.now())) throw error("稍后时间必须在未来");
     const overview = await this.getOverview();
     const subject = cardSubject(id);
-    const cards = topicsOf(overview).flatMap((t) => t.assistantSignals?.cards || []);
+    const cards = [...topicsOf(overview).flatMap((t) => t.assistantSignals?.cards || []), ...(overview.assistantInbox?.cards || [])];
     // The card may have changed type or already been hidden since the client
     // rendered it; bookkeeping actions still apply to the same subject.
     let card = cards.find((c) => c.id === id) || cards.find((c) => cardSubject(c.id) === subject);
+    const ticketId = card?.ticketId || subject.match(/^ticket:(.+)$/)?.[1] || "";
+    const ticket = ticketId ? (await this.#allTickets())[ticketId] : null;
+    if (!card && ticket) card = { id, ticketId, threadId: ticket.threadIds.at(-1), title: ticket.title, goal: ticket.goal, criteria: ticket.criteria, line: ticket.goal };
+    if (!card && /^auto:./.test(subject)) card = { id, taskKey: subject.slice(5) };
     if (!card && !subject.includes(":wip:") && ["continue", "harvest"].includes(type)) card = { id, threadId: subject };
     if (!card && !/^(alert|harvest|ruin):./.test(id)) throw error("工单不存在或已处理", 404);
     if (!card) card = { id };
     if (["continue", "harvest"].includes(type) && !card.threadId) throw error("该工单没有原工位");
+    if (type === "retry") {
+      if (!card.taskKey) throw error("这张卡不是定时任务");
+      if (typeof this.automations?.run !== "function") throw error("定时任务暂不可重试", 409);
+      await this.automations.run(card.taskKey);
+      this.#automationCache = null;
+    }
     if (type === "continue") {
       if (typeof this.hub?.sendTurn !== "function") throw error("原工位暂不可续做", 409);
-      await this.hub.sendTurn({ threadId: card.threadId, text: String(message || `继续上次的工作。当前记录：${card.line}。请从原工位接着推进。`) });
+      const criteria = ticket?.criteria || [];
+      // A 工单 with acceptance criteria continues as a goal: the session keeps
+      // going until it can show each criterion met.
+      const text = ticket
+        ? [message ? String(message) : `继续推进工单「${ticket.title}」。${card.line ? `当前记录：${card.line}` : ""}`, ticket.goal ? `工单目标：${ticket.goal}` : "",
+          criteria.length ? `验收标准：\n${criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}\n逐条做到并给出实证（命令输出、测试结果或可打开的产物）后再结束。` : ""].filter(Boolean).join("\n")
+        : String(message || `继续上次的工作。当前记录：${card.line}。请从原工位接着推进。`);
+      await this.hub.sendTurn({ threadId: card.threadId, text, ...(criteria.length ? { goalMode: true } : {}) });
       this.#tails.delete(card.threadId);
     }
+    // Accepting or closing a 工单's card settles the 工单 itself.
+    if (ticket?.status === "open" && ["harvest", "done", "dismiss"].includes(type)) await this.updateTicket(ticket.id, { status: type === "dismiss" ? "dropped" : "done" });
     await this.store.update("card-state", (states) => ({ ...states, [subject]: { type, at: new Date(this.now()).toISOString(),
       ...(type === "snooze" ? { until: new Date(timestamp(until)).toISOString() } : {}), ...(reason ? { reason: String(reason).slice(0, 500) } : {}) } }));
     return { ok: true, card, ...(card.threadId ? { threadId: card.threadId } : {}) };
@@ -354,6 +521,11 @@ export class AssistantService {
       const mark = SIGNAL_TYPES.find((type) => cards.some((c) => c.type === type));
       stops.push({ topicId: topic.id, topicTitle: topic.name, mark,
         bubble: tourBubble(topic.name, mark === "alert" ? "等你拍板" : mark === "harvest" ? "有成品待验收" : "有任务久未推进"), cards });
+    }
+    const inbox = (overview.assistantInbox?.cards || []).filter((c) => !since || timestamp(c.since) > timestamp(since));
+    if (inbox.length) {
+      const mark = SIGNAL_TYPES.find((type) => inbox.some((c) => c.type === type));
+      stops.push({ topicId: "", topicTitle: "定时任务", mark, bubble: tourBubble("定时任务", mark === "alert" ? "有任务没跑成" : mark === "harvest" ? "有结果待验收" : "有任务久未推进"), cards: inbox });
     }
     stops.sort((a, b) => SIGNAL_TYPES.indexOf(a.mark) - SIGNAL_TYPES.indexOf(b.mark)
       || Math.min(...a.cards.filter((c) => c.type === a.mark).map((c) => timestamp(c.since))) - Math.min(...b.cards.filter((c) => c.type === b.mark).map((c) => timestamp(c.since))));

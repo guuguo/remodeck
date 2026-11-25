@@ -118,6 +118,17 @@ export function cardSubject(id = "") {
   return String(id).replace(/^(alert|harvest|ruin):/, "");
 }
 
+// Failed scheduled runs: the task never produced a session, so the card is
+// about the task itself and offers a retry.
+export function automationFailureCard(task, topicId = "") {
+  const at = timestamp(task.lastTriggeredAtMs);
+  return { id: `alert:auto:${task.taskKey}`, topicId, type: "alert", title: shortText(task.name || "定时任务", 24),
+    line: shortText(`定时唤起失败：${plainText(task.lastError) || "未知原因"}`, 40), since: isoTime(at || Date.now()),
+    origin: "automation", originLabel: `定时任务·${shortText(task.name, 20)}`, taskKey: task.taskKey,
+    sources: [{ kind: "automation", label: shortText(`定时任务·${task.name || task.taskKey}`, 60), taskKey: task.taskKey, ...(topicId ? { topicId } : {}) }],
+    actions: ["retry", "snooze", "dismiss"] };
+}
+
 export function isCardHandled(card, cardState = {}, now = Date.now()) {
   const state = cardState[cardSubject(card.id)] || cardState[card.id];
   if (!state) return false;
@@ -128,7 +139,12 @@ export function isCardHandled(card, cardState = {}, now = Date.now()) {
   return false;
 }
 
-export function computeTopicSignals(topic, { now = Date.now(), cardState = {}, idleWip = [] } = {}) {
+const TICKET_STALE_MS = 3 * DAY;
+const ticketFields = (ticket) => ({ ticketId: ticket.id, title: shortText(ticket.title, 24), goal: ticket.goal || "", criteria: ticket.criteria || [] });
+
+// `tickets` are the open 工单 whose sessions live in this topic;
+// `automationByThread` maps a thread id to the scheduled task that started it.
+export function computeTopicSignals(topic, { now = Date.now(), cardState = {}, idleWip = [], tickets = [], automationByThread = new Map(), extraCards = [] } = {}) {
   const groups = [];
   const seen = new Set();
   const threads = [...(topic.activeThreads || []), ...(topic.archivedThreads || [])]
@@ -156,10 +172,30 @@ export function computeTopicSignals(topic, { now = Date.now(), cardState = {}, i
       type = "ruin"; line = tail.question || lastAsking(tail.text) || plainText(tail.text);
     }
     if (!type || !at) continue;
+    const ticket = tickets.find((tk) => group.threads.some((th) => tk.threadIds.includes(th.id)));
+    const automation = group.threads.map((th) => automationByThread.get(th.id)).find(Boolean);
     candidates.push({ id: `${type}:${t.id}`, topicId: topic.id, type, title: shortText(t.title, 24), line: shortText(line, 40),
       since: isoTime(at), threadId: t.id, relatedCount: group.threads.length,
       sources: group.threads.map((th) => threadSource(th, topic.id)),
-      actions: type === "harvest" ? ["harvest", "continue", "snooze"] : ["continue", "snooze", "park"] });
+      actions: type === "harvest" ? ["harvest", "continue", "snooze"] : ["continue", "snooze", "park"],
+      ...(ticket ? ticketFields(ticket) : {}), ...(automation ? { origin: "automation", originLabel: `定时任务·${shortText(automation, 20)}` } : {}) });
+  }
+  // A pinned 工单 with no signal of its own still must not go quiet: if none
+  // of its sessions moved for 3 days and nothing was accepted, it resurfaces.
+  const allThreads = [...(topic.activeThreads || []), ...(topic.archivedThreads || [])].filter((t) => t?.id);
+  for (const ticket of tickets) {
+    if (candidates.some((c) => c.ticketId === ticket.id)) continue;
+    const linked = allThreads.filter((t) => ticket.threadIds.includes(t.id)).sort((a, b) => timestamp(b.updatedAt) - timestamp(a.updatedAt));
+    if (linked.some((t) => t.live || t.pendingCount > 0 || t.queuedCount > 0)) continue;
+    const at = Math.max(timestamp(ticket.updatedAt), ...linked.map((t) => timestamp(t.updatedAt)));
+    if (!at || now - at < TICKET_STALE_MS) continue;
+    const latest = linked[0];
+    const missing = latest?.assistantTail?.missing;
+    candidates.push({ id: `ruin:ticket:${ticket.id}`, topicId: topic.id, type: "ruin",
+      line: shortText(`停了 ${Math.floor((now - at) / DAY)} 天${missing ? `，还差：${missing}` : `：${ticket.goal || "未写目标"}`}`, 40),
+      since: isoTime(at), ...(latest ? { threadId: latest.id } : {}), relatedCount: linked.length,
+      sources: [{ kind: "ticket", label: shortText(`工单·${ticket.title}`, 60), ticketId: ticket.id, topicId: topic.id }, ...linked.map((th) => threadSource(th, topic.id))],
+      actions: latest ? ["continue", "snooze", "done"] : ["snooze", "done"], ...ticketFields(ticket) });
   }
   for (const wip of idleWip) {
     const at = timestamp(wip.updated);
@@ -169,6 +205,7 @@ export function computeTopicSignals(topic, { now = Date.now(), cardState = {}, i
       sources: [{ kind: "wip", label: `任务卡·${shortText(wip.title, 30)}`, topicId: topic.id, path: wip.rel, at: isoTime(at) }],
       actions: ["snooze", "park", "done"] });
   }
+  candidates.push(...extraCards);
   const counts = { alert: 0, harvest: 0, ruin: 0 };
   const cards = candidates.sort((a, b) => SIGNAL_TYPES.indexOf(a.type) - SIGNAL_TYPES.indexOf(b.type) || timestamp(a.since) - timestamp(b.since))
     .filter((card) => {

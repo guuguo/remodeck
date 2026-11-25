@@ -276,14 +276,36 @@ function renderSources(sources = []) {
 }
 
 export function renderSpriteWorkCard(card, { busy = false, continueMessage } = {}) {
-  const action = card.type === "harvest" ? "harvest" : "continue";
+  const retry = (card.actions || []).includes("retry");
+  const action = retry ? "retry" : card.type === "harvest" ? "harvest" : card.threadId ? "continue" : "";
   const message = continueMessage ?? t("接着上次停下的地方继续：{line}", { line: card.line });
   const button = (type, label) => `<button type="button" data-sprite-card-id="${escapeHtml(card.id)}" data-sprite-card-action="${type}" ${busy ? "disabled" : ""}>${t(label)}</button>`;
-  return `<article class="sprite-work-card"><strong>${escapeHtml(card.title)}</strong><p>${escapeHtml(card.line)}</p>
+  const tags = [card.ticketId ? `<span class="sprite-card-tag is-ticket">${t("工单")}</span>` : "", card.originLabel ? `<span class="sprite-card-tag">${escapeHtml(card.originLabel)}</span>` : ""].join("");
+  const ticket = card.ticketId ? `${card.goal ? `<p class="sprite-card-goal">${t("目标")}：${escapeHtml(card.goal)}</p>` : ""}${card.criteria?.length
+    ? `<ol class="sprite-card-criteria">${card.criteria.map((c) => `<li>${escapeHtml(c)}</li>`).join("")}</ol>` : `<p class="sprite-card-goal is-muted">${t("还没定验收标准")}</p>`}` : "";
+  const primary = action === "retry" ? button("retry", "重试") : action === "harvest" ? button("harvest", "收菜") : action === "continue" ? button("send_continue", "续做") : "";
+  return `<article class="sprite-work-card"><div class="sprite-card-head"><strong>${escapeHtml(card.title)}</strong>${tags}</div><p>${escapeHtml(card.line)}</p>${ticket}
     <div class="sprite-msg-chips">${renderSources(card.sources)}</div>
     ${action === "continue" ? `<textarea data-sprite-continue-message="${escapeHtml(card.id)}" aria-label="${t("续做语")}">${escapeHtml(message)}</textarea>` : ""}
-    <div class="sprite-card-actions">${button(action === "continue" ? "send_continue" : action, action === "harvest" ? "收菜" : "续做")}${button("snooze", "稍后")}${button("park", "搁置")}
-${button("done", "完成")}<button type="button" class="sprite-card-quiet" data-sprite-card-id="${escapeHtml(card.id)}" data-sprite-card-action="dismiss" ${busy ? "disabled" : ""}>${t("不用提醒")}</button></div></article>`;
+    <div class="sprite-card-actions">${primary}${button("snooze", "稍后")}${retry ? "" : button("park", "搁置")}
+${retry ? "" : button("done", "完成")}${!retry && !card.ticketId && card.threadId ? button("pin", "钉成工单") : ""}<button type="button" class="sprite-card-quiet" data-sprite-card-id="${escapeHtml(card.id)}" data-sprite-card-action="dismiss" ${busy ? "disabled" : ""}>${t(card.ticketId ? "放弃工单" : "不用提醒")}</button></div></article>`;
+}
+
+// 工单 list for the local「我的工单」intent: each line is where the pinned
+// work stands now, with its sessions one tap away.
+export function buildSpriteTicketReply(overview) {
+  const tickets = Array.isArray(overview?.assistantTickets) ? overview.assistantTickets : [];
+  if (!tickets.length) {
+    return { tone: "idle", text: t("还没有工单。在会话顶栏「更多」里点「钉成工单」，或在提醒卡上点「钉成工单」。"), spokenText: t("还没有工单。"), actions: [] };
+  }
+  const lines = tickets.slice(0, 6).map((tk, i) => `${i + 1}. ${tk.topicName ? `「${tk.topicName}」` : ""}${tk.title}：${tk.line}${tk.criteria?.length ? `（${t("验收标准 {count} 条", { count: tk.criteria.length })}）` : ""}`);
+  const actions = tickets.slice(0, 3).flatMap((tk) => [
+    ...(tk.threadId ? [{ label: t("打开：{title}", { title: tk.title.slice(0, 8) }), type: "open_thread", payload: { threadId: tk.threadId } }] : []),
+    { label: t("改验收：{title}", { title: tk.title.slice(0, 6) }), type: "ticket_edit", payload: { ticketId: tk.id } },
+  ]);
+  return { tone: tickets.some((tk) => ["waiting", "failed"].includes(tk.state)) ? "urgent" : "idle",
+    text: `${t("共 {count} 张进行中的工单：", { count: tickets.length })}\n${lines.join("\n")}`,
+    spokenText: t("共有 {count} 张工单，第一张：{line}", { count: tickets.length, line: `${tickets[0].title}，${tickets[0].line}` }), actions: actions.slice(0, 6) };
 }
 
 export function buildSpriteTopicBriefing(topic, nowSec = Math.floor(Date.now() / 1000)) {
@@ -484,6 +506,9 @@ export function classifySpriteUserInput(rawText, {
   }
   if (/^(准收菜|收菜|临门一脚|能收菜|哪些能收菜|哪些能变现)[?？!！。.~～]*$/i.test(text)) {
     return { intent: "query_harvest" };
+  }
+  if (/^(工单|我的工单|看工单|工单列表|有哪些工单|工单进度|工单怎么样了)[?？!！。.~～]*$/i.test(text)) {
+    return { intent: "query_tickets" };
   }
 
   let matchedTopicId = "";
@@ -897,12 +922,12 @@ export function renderSpriteAssistantHtml(spriteState = {}, {
               </button>
               <button
                 type="button"
-                class="sprite-icon-btn ${handsFree ? "is-active is-handsfree" : ""}"
+                class="sprite-icon-btn sprite-handsfree-btn ${handsFree ? "is-active is-handsfree" : ""}"
                 data-sprite-action="open-call"
                 aria-pressed="${handsFree ? "true" : "false"}"
                 title="${handsFree ? "免提连续对话中（点击结束免提）" : "开启免提连续语音对话（自动收听 · 播报 · 开口打断）"}"
               >
-                ${iconSvg("radio", { size: 13 })}
+                ${iconSvg("radio", { size: 13 })}<span class="sprite-handsfree-label">${handsFree ? "免提中" : "免提"}</span>
               </button>
               <button type="button" class="sprite-icon-btn" data-sprite-action="close" title="收起小精灵">
                 ${iconSvg("close", { size: 13 })}

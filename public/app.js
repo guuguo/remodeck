@@ -124,6 +124,7 @@ import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261125sa1";
 import {
   buildSpriteOpeningBriefing,
   buildSpriteQueryReply,
+  buildSpriteTicketReply,
   buildSpriteTopicBriefing,
   captureSpriteOverviewSnapshot,
   classifySpriteUserInput,
@@ -136,7 +137,7 @@ import {
   spriteTomorrowAtEight,
   renderSpriteAssistantHtml,
   saveSpritePrefs,
-} from "./sprite-assistant.js?v=20261125sa3";
+} from "./sprite-assistant.js?v=20261125sa4";
 import {
   captureSubtreeUiState,
   replaceHtmlPreservingUiState,
@@ -3320,6 +3321,7 @@ function renderTopbarAndControls() {
     goalBtn.hidden = true;
     interruptBtn.hidden = true;
     renameBtn.hidden = true;
+    if ($("pinTicketBtn")) $("pinTicketBtn").hidden = true;
     if (toggleImgBtn) toggleImgBtn.hidden = true;
     archiveBtn.hidden = true;
     if (moreDot) moreDot.hidden = !state.updateStatus?.hasUpdate;
@@ -3424,6 +3426,13 @@ function renderTopbarAndControls() {
 
   interruptBtn.hidden = !running;
   renameBtn.hidden = false;
+  const pinTicketBtn = $("pinTicketBtn");
+  if (pinTicketBtn) {
+    const pinned = (state.missionOverview?.assistantTickets || []).some((tk) => tk.threadIds?.includes(thread.id));
+    pinTicketBtn.hidden = Boolean(thread.internal);
+    pinTicketBtn.textContent = pinned ? "已是工单" : "钉成工单";
+    pinTicketBtn.disabled = pinned;
+  }
   if (toggleImgBtn) {
     toggleImgBtn.hidden = false;
     toggleImgBtn.textContent = isThreadImagesUnlocked(thread.id) ? "收起本会话预览图" : "加载本会话预览图";
@@ -10034,8 +10043,10 @@ function openSpriteCards(topicId, type) {
 async function actOnSpriteCard(cardId, type) {
   if (state.sprite.busy) return;
   const card = state.sprite.cards.find((entry) => entry.id === cardId)
-    || state.missionOverview?.domains?.flatMap((d) => d.topics || []).flatMap((tp) => tp.assistantSignals?.cards || []).find((entry) => entry.id === cardId);
+    || [...(state.missionOverview?.domains?.flatMap((d) => d.topics || []).flatMap((tp) => tp.assistantSignals?.cards || []) || []),
+      ...(state.missionOverview?.assistantInbox?.cards || [])].find((entry) => entry.id === cardId);
   if (!card) return;
+  if (type === "pin") { await pinThreadAsTicket(card.threadId); return; }
   if (type === "continue") {
     if (!state.sprite.cards.some((entry) => entry.id === cardId)) state.sprite.cards = [card];
     renderSpriteAssistantMount();
@@ -10052,12 +10063,41 @@ async function actOnSpriteCard(cardId, type) {
       ...(type === "snooze" ? { until: spriteTomorrowAtEight() } : {}), ...(message ? { message } : {}),
     });
     state.sprite.cards = state.sprite.cards.filter((entry) => entry.id !== cardId);
-    const ack = { done: "好，记为完成", park: "先搁着，有新动静再说", snooze: "明早 8 点再提醒你", dismiss: "这条以后不再提醒", send_continue: "已发回原工位接着做" }[type];
+    const ack = { done: "好，记为完成", park: "先搁着，有新动静再说", snooze: "明早 8 点再提醒你", dismiss: card.ticketId ? "工单已放弃" : "这条以后不再提醒",
+      send_continue: "已发回原工位接着做", retry: "已重新唤起定时任务" }[type];
     if (ack) tycoon3dInstance?.spriteSay?.(t(ack), { proactive: false });
     if (type === "harvest" && result.threadId) await selectThread(result.threadId);
     void loadMissionOverview({ trigger: "assistant-action" });
   } catch (error) { pushSpriteMessage({ text: formatActionError(error), tone: "worry" }); }
   finally { state.sprite.busy = false; renderSpriteAssistantMount(); }
+}
+
+// Pins a session as a persistent 工单; the model drafts goal and acceptance
+// criteria from the session, which the user can edit from「我的工单」.
+async function pinThreadAsTicket(threadId) {
+  if (!threadId || state.sprite.busy) return;
+  state.sprite.busy = true;
+  renderSpriteAssistantMount();
+  try {
+    const { ticket } = await apiPost("/api/assistant/tickets", { threadId });
+    const criteria = ticket.criteria?.length ? `\n${ticket.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}` : "";
+    pushSpriteMessage({ text: `${t("已钉成工单：{title}", { title: ticket.title })}${ticket.goal ? `\n${t("目标")}：${ticket.goal}` : ""}${criteria}`,
+      actions: [{ label: t("改验收：{title}", { title: ticket.title.slice(0, 6) }), type: "ticket_edit", payload: { ticketId: ticket.id } }] });
+    state.sprite.cards = state.sprite.cards.map((c) => c.threadId === threadId ? { ...c, ticketId: ticket.id, goal: ticket.goal, criteria: ticket.criteria } : c);
+    showToastBanner(t("已钉成工单：{title}", { title: ticket.title }));
+    void loadMissionOverview({ trigger: "assistant-action" });
+  } catch (error) {
+    showToastBanner(t("钉成工单失败"), { detail: formatActionError(error), error: true });
+  } finally { state.sprite.busy = false; renderSpriteAssistantMount(); }
+}
+
+async function editSpriteTicketCriteria(ticketId) {
+  const ticket = (state.missionOverview?.assistantTickets || []).find((tk) => tk.id === ticketId);
+  const next = prompt(t("验收标准，一行一条（留空表示不设）："), (ticket?.criteria || []).join("\n"));
+  if (next === null) return;
+  const { ticket: saved } = await apiPost(`/api/assistant/tickets/${encodeURIComponent(ticketId)}`, { criteria: next.split(/\n+/).map((c) => c.trim()).filter(Boolean) });
+  pushSpriteMessage({ text: t("工单「{title}」的验收标准已更新", { title: saved.title }) });
+  void loadMissionOverview({ trigger: "assistant-action" });
 }
 
 let spriteTourPending = false;
@@ -10095,8 +10135,11 @@ async function showSpriteTourStop() {
   if (!stop) { endSpriteTour(); return; }
   openSpriteCards(stop.topicId);
   state.sprite.cards = stop.cards || [];
+  if (!stop.topicId) state.sprite.scopedTopicName = stop.topicTitle || "";
   renderSpriteAssistantMount();
-  await tycoon3dInstance?.spriteVisit?.(stop.topicId, { bubble: stop.bubble });
+  // The scheduled-task inbox has no building to fly to; the bubble still speaks.
+  if (stop.topicId) await tycoon3dInstance?.spriteVisit?.(stop.topicId, { bubble: stop.bubble });
+  else tycoon3dInstance?.spriteSay?.(stop.bubble, { proactive: true });
 }
 
 function endSpriteTour() {
@@ -10117,6 +10160,7 @@ async function runSpriteAnswerAction(action, message) {
   if (action.type === "focus") { await tycoon3dInstance?.spriteVisit?.(payload.topicId); return; }
   if (action.type === "open_thread") { await selectThread(payload.threadId); return; }
   if (action.type === "card_action") { await actOnSpriteCard(payload.cardId, payload.action); return; }
+  if (action.type === "ticket_edit") { await editSpriteTicketCriteria(payload.ticketId); return; }
   if (action.type === "clarify_pick") {
     await apiPost("/api/assistant/profile/aliases", { alias: payload.alias, topicId: payload.topicId });
     await requestSpriteAnswer(message.originalText);
@@ -10196,6 +10240,11 @@ async function handleSpriteCommand(rawInput = "") {
       text: "好的，已取消本次派工预览。",
       spokenText: "已取消本次派工预览。",
     });
+    return;
+  }
+  if (parsed.intent === "query_tickets") {
+    const reply = buildSpriteTicketReply(state.missionOverview);
+    pushSpriteMessage({ role: "sprite", tone: reply.tone, text: reply.text, spokenText: reply.spokenText, actions: reply.actions });
     return;
   }
   if (parsed.intent === "briefing" || parsed.intent === "query_pending" || parsed.intent === "query_harvest") {
@@ -15774,6 +15823,11 @@ function bindEvents() {
       setComposerStatus("error", `重命名失败：${errMsg}`);
       showToastBanner("重命名失败", { detail: errMsg, error: true });
     }
+  });
+
+  $("pinTicketBtn")?.addEventListener("click", () => {
+    setTopbarMenuOpen(false);
+    void pinThreadAsTicket(state.activeThreadId);
   });
 
   $("toggleThreadImagesBtn")?.addEventListener("click", () => {
