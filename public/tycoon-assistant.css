@@ -1,0 +1,57 @@
+/* Assistant overlays stay inside the existing projected-label collision layout. */
+.tycoon-signal-badge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  min-height: 24px;
+  padding: 0 6px;
+  margin-left: 3px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.tycoon-signal-badge.is-alert { color: #fff; background: #dc2626; border-color: #f87171; }
+.tycoon-signal-badge.is-harvest { color: #713f12; background: #fde68a; border-color: #f59e0b; }
+.tycoon-signal-badge.is-ruin { color: #7c2d12; background: #fed7aa; border-color: #fb923c; }
+.tycoon-signal-badge.is-inferred { color: #a18c5d; background: transparent; border-style: dashed; opacity: .8; }
+.tycoon-signal-badge:focus-visible { outline: 2px solid #38bdf8; outline-offset: 3px; }
+.tycoon3d-tag.tycoon-sprite-bubble {
+  width: max-content;
+  max-width: calc(100% - 16px);
+  padding: 5px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+  animation: none;
+  cursor: pointer;
+}
+.tycoon3d-tag.tycoon-sprite-bubble.is-speaking {
+  color: #f8fafc;
+  background: #0f172a;
+  border: 1px solid #67e8f9;
+  box-shadow: 0 4px 14px #02061750;
+}
+.tycoon-sprite-bubble.is-speaking::after {
+  content: "";
+  position: absolute;
+  left: calc(50% - 5px);
+  bottom: -6px;
+  border: 5px solid transparent;
+  border-top-color: #0f172a;
+  border-bottom: 0;
+}
+.tycoon-sprite-bubble.is-fading { animation: tycoon-speech-fade .45s ease-out forwards; }
+@keyframes tycoon-speech-fade { to { filter: opacity(0); } }
+@media (max-width: 390px) {
+  .tycoon3d-tag.tycoon-sprite-bubble { font-size: 11px; padding: 4px 8px; }
+  .tycoon-signal-badge { min-width: 24px; min-height: 26px; padding: 0 4px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tycoon-sprite-bubble.is-fading { animation-duration: .01s; }
+}
