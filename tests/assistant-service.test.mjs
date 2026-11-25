@@ -310,3 +310,45 @@ test("工单处理按主体记：类型变了照样能标完成，新动静后�
   // States written before subject keys existed still apply.
   assert.equal(isCardHandled({ id: card.id, since: "2026-11-24T08:00:00.000Z" }, { [card.id]: { type: "park", at: doneAt } }), true);
 });
+
+test("收菜由模型判：模型裁决覆盖措辞规则，无实锤不亮金，裁决持久化", async (t) => {
+  const f = await fixture(t);
+  const prompts = [];
+  f.assistant.llm = new AssistantLLM({ dataDir: f.dataDir, config: { enabled: true }, now: () => ASSISTANT_NOW, completeImpl: async (input) => {
+    assert.match(input.system, /验收员/);
+    const payload = JSON.parse(input.prompt);
+    prompts.push(payload);
+    return payload.reply.includes("账单")
+      ? '判定如下 {"delivered":true,"verified":true,"evidence":"分类脚本已跑通，输出 12 类","missing":""}'
+      : '{"delivered":true,"verified":false,"evidence":"","missing":"没看到运行结果"}';
+  } });
+  const harvestOf = (o, i) => allTopics(o)[i].assistantSignals.cards.find((c) => c.type === "harvest");
+  // Before verdicts arrive the wording rule is the fallback.
+  assert.ok(harvestOf(await f.overview.getOverview(), 2));
+  let overview;
+  for (let i = 0; i < 50; i++) {
+    overview = await f.overview.getOverview();
+    if (harvestOf(overview, 3)) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.equal(harvestOf(overview, 3).line, "分类脚本已跑通，输出 12 类");
+  assert.equal(harvestOf(overview, 2), undefined, "模型说没有实锤，措辞再像也不亮金");
+  assert.equal(allTopics(overview)[2].readyToHarvest, false);
+  // Asking and live threads are never sent to the judge.
+  assert.deepEqual(prompts.map((p) => p.reply).sort(), ["可以按分类整理账单。", "已完成导出，生成了 24 个文件，测试全部通过。"].sort());
+  await new Promise((r) => setTimeout(r, 30));
+  const stored = JSON.parse(await readFile(resolve(f.dataDir, "assistant", "harvest-judgments.json"), "utf8"));
+  assert.equal(stored[f.threads[3].id].verified, true);
+  assert.equal(stored[f.threads[2].id].missing, "没看到运行结果");
+});
+
+test("收菜判定解析：只认合法 JSON，声称验证但无证据降为未验证，模型不可用回落", async (t) => {
+  const f = await fixture(t);
+  const judge = (text) => new AssistantLLM({ dataDir: f.dataDir, config: { enabled: true }, completeImpl: async () => text });
+  const input = { title: "导出", ask: "导出账单", reply: "已导出" };
+  assert.equal((await judge('{"delivered":true,"verified":true,"evidence":"","missing":""}').judgeHarvest(input)).verified, false);
+  assert.equal((await judge('{"delivered":false,"verified":true,"evidence":"x"}').judgeHarvest(input)).verified, false);
+  assert.equal(await judge("看起来完成了").judgeHarvest(input), null);
+  assert.equal(await new AssistantLLM({ dataDir: f.dataDir, config: { enabled: true } }).judgeHarvest(input), null);
+  assert.equal(await new AssistantLLM({ dataDir: f.dataDir, config: { enabled: false }, completeImpl: async () => "{}" }).judgeHarvest(input), null);
+});

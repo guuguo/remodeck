@@ -18,7 +18,8 @@ Summary: The sprite in the 3D park is now a patrolling butler robot that answers
 ### Improved
 
 - **Confirm-before-dispatch**: When you say "dispatch …", the sprite first restates who will do what on which line and only sends after you confirm; ordinary questions are no longer mistaken for dispatches.
-- **Stricter harvest signal**: Gold "harvest" lights up only when a thread contains a real delivery summary; stage-based guesses show "likely harvest" instead.
+- **Harvest is judged by a model**: After each round in a thread, the sprite asks a model (through the Gemini / Codex / Claude CLIs you are already signed in to) whether the work was delivered and actually verified. Gold "harvest" lights up only with hard evidence, and the card shows that evidence; claims without proof stay dark. Stage-based guesses still show "likely harvest", and the old wording rules are the fallback when no model is available.
+- **Answers are written by a model by default**: Progress and history questions are condensed by a model into a few lines, each with a source; the template is only the fallback when no model answers or the answer lacks sources.
 - **An opening line with a point of view**: Opening the panel tells you which line deserves a look right now with one suggested action; quick prompts adapt to the selected building.
 - **Cleaner mobile layout**: The HUD fits on one row with quality, perspective, and stock-take tucked into "⋯"; the sprite opens as a bottom drawer that also holds the dispatch input.
 

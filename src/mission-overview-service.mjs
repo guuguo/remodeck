@@ -887,7 +887,17 @@ export class MissionOverviewService {
     this.#runAiImpl = typeof runAiImpl === "function" ? runAiImpl : null;
     this.#collectGitImpl = typeof collectGitImpl === "function" ? collectGitImpl : collectRepoGitSnapshot;
     this.#env = env;
-    this.assistant = new AssistantService({ hub, dataDir, env, getOverview: () => this.getOverview({ trigger: "assistant" }), ...assistantOptions });
+    this.assistant = new AssistantService({
+      hub, dataDir, env,
+      getOverview: () => this.getOverview({ trigger: "assistant" }),
+      onJudged: () => {
+        if (!this.#broadcast) return;
+        void this.getOverview({ trigger: "assistant" }).then((overview) => this.#broadcast?.("overview_updated", overview)).catch(() => {});
+      },
+      ...assistantOptions,
+      // Tests never reach a real model: without an injected runner there is no channel at all.
+      llmOptions: { completeImpl: this.#runAiImpl || !isTestRuntime(env) ? (input) => this.completeAssistantText(input) : null, ...(assistantOptions.llmOptions || {}) },
+    });
   }
 
   async #ensureLoaded() {
@@ -2728,6 +2738,17 @@ export class MissionOverviewService {
     };
   }
 
+  #lightweightCandidates(preferredModel = "auto") {
+    return preferredModel && preferredModel !== "auto"
+      ? [OVERVIEW_MODEL_OPTIONS.find((o) => o.key === preferredModel)].filter(Boolean)
+      : [
+          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "antigravity:gemini-3.8-flash"),
+          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "antigravity:gemini-4-hydrogen"),
+          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "codex:gpt-6.1-terra"),
+          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "claude:claude-sonnet-5-5"),
+        ].filter(Boolean);
+  }
+
   async #invokeLightweightModel(prompt, preferredModel = "auto") {
     if (this.#runAiImpl) {
       const raw = await this.#runAiImpl({ prompt, preferredModel });
@@ -2738,15 +2759,15 @@ export class MissionOverviewService {
       return { parsed: null, error: "测试环境跳过外部模型" };
     }
 
-    const candidates = preferredModel && preferredModel !== "auto"
-      ? [OVERVIEW_MODEL_OPTIONS.find((o) => o.key === preferredModel)].filter(Boolean)
-      : [
-          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "antigravity:gemini-3.8-flash"),
-          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "antigravity:gemini-4-hydrogen"),
-          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "codex:gpt-6.1-terra"),
-          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "claude:claude-sonnet-5-5"),
-        ].filter(Boolean);
+    const candidates = this.#lightweightCandidates(preferredModel);
 
+    const result = await this.#runModelChain(prompt, candidates, parseJsonFromAiText);
+    return result.value ? { parsed: result.value, modelLabel: result.modelLabel } : { parsed: null, error: result.error };
+  }
+
+  // Tries each channel in order through the user's own CLI logins and returns
+  // the first output that `accept` turns into a value.
+  async #runModelChain(prompt, candidates, accept) {
     let lastErr = "无可用均衡模型通道";
     for (const cand of candidates) {
       try {
@@ -2758,16 +2779,27 @@ export class MissionOverviewService {
         } else if (cand.provider === "antigravity") {
           text = await this.#runAntigravityOnce(prompt, cand.model);
         }
-        const parsed = parseJsonFromAiText(text);
-        if (parsed) {
-          return { parsed, modelLabel: cand.label };
-        }
-        lastErr = `${cand.label} 返回格式非 JSON`;
+        const value = accept(text);
+        if (value) return { value, modelLabel: cand.label };
+        lastErr = `${cand.label} 返回格式不符`;
       } catch (err) {
         lastErr = err?.message || `${cand.label} 调用失败`;
       }
     }
-    return { parsed: null, error: lastErr };
+    return { value: null, error: lastErr };
+  }
+
+  // One-shot completion adapter for the sprite assistant (answers and harvest
+  // verdicts). Same channels and fallback order as the overview summariser.
+  async completeAssistantText({ system = "", prompt = "" } = {}) {
+    const fullPrompt = system ? `${system}\n\n${prompt}` : prompt;
+    if (this.#runAiImpl) {
+      const raw = await this.#runAiImpl({ prompt: fullPrompt, preferredModel: "auto", purpose: "assistant" });
+      return typeof raw === "string" ? raw : typeof raw?.text === "string" ? raw.text : null;
+    }
+    if (isTestRuntime(this.#env)) return null;
+    const result = await this.#runModelChain(fullPrompt, this.#lightweightCandidates("auto"), (text) => String(text || "").trim() || null);
+    return result.value;
   }
 
   async #runClaudeOnce(prompt, model = "claude-sonnet-5-5", timeoutMs = 35_000) {

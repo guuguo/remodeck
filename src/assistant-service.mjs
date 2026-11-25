@@ -1,7 +1,7 @@
 import { MemoryVault, resolveVaultPath } from "./memory-vault.mjs";
 import { AssistantLLM } from "./assistant-llm.mjs";
 import { AssistantStore } from "./assistant-store.mjs";
-import { computeTopicSignals, cardSubject, SIGNAL_TYPES, shortText, timestamp, isoTime, threadTail, threadSource } from "./assistant-signals.mjs";
+import { computeTopicSignals, cardSubject, SIGNAL_TYPES, shortText, timestamp, isoTime, threadTail, threadSource, judgeInputOf } from "./assistant-signals.mjs";
 
 export { computeTopicSignals } from "./assistant-signals.mjs";
 const topicsOf = (overview) => (overview.domains || []).flatMap((d) => d.topics || []);
@@ -14,11 +14,19 @@ const tourBubble = (name, verdict) => {
   return `${chars.length > room ? `${chars.slice(0, room - 1).join("")}…` : chars.join("")}：${verdict}`;
 };
 const normal = (s) => String(s || "").toLowerCase().replace(/[\p{P}\s]/gu, "");
+const JUDGE_WINDOW_MS = 14 * 86_400_000;
+const JUDGE_RETRY_MS = 30 * 60_000;
+const JUDGE_CONCURRENCY = 2;
 
 export class AssistantService {
   #tails = new Map();
   #reading = new Set();
-  constructor({ hub, getOverview, dataDir, env = process.env, now = () => Date.now(), vault = null, llm = null, llmOptions = {}, evidenceBudgetMs = 1500 } = {}) {
+  #judgments = null;
+  #judgeQueue = [];
+  #judgeFailures = new Map();
+  #judging = 0;
+  #judgedTimer = null;
+  constructor({ hub, getOverview, dataDir, env = process.env, now = () => Date.now(), vault = null, llm = null, llmOptions = {}, evidenceBudgetMs = 1500, onJudged = null } = {}) {
     this.hub = hub;
     this.getOverview = getOverview;
     this.dataDir = dataDir;
@@ -26,6 +34,7 @@ export class AssistantService {
     this.now = now;
     this.vault = vault;
     this.evidenceBudgetMs = evidenceBudgetMs;
+    this.onJudged = onJudged;
     this.store = new AssistantStore(dataDir);
     this.llm = llm || new AssistantLLM({ dataDir, now, store: this.store, ...llmOptions });
   }
@@ -55,7 +64,7 @@ export class AssistantService {
           const t = pending[next++];
           try {
             const result = await this.hub.readThread(t.id, { limit: 1, detail: "auto" });
-            this.#tails.set(t.id, { fingerprint: fingerprintOf(t), tail: threadTail(result?.thread || {}), lastError: result?.thread?.lastError || "" });
+            this.#tails.set(t.id, { fingerprint: fingerprintOf(t), tail: threadTail(result?.thread || {}), judgeInput: judgeInputOf(result?.thread || {}), lastError: result?.thread?.lastError || "" });
           } catch { /* unreadable transcript: no evidence */ } finally { this.#reading.delete(t.id); }
         }
       }));
@@ -68,11 +77,77 @@ export class AssistantService {
     }
     const ids = new Set(visible.map((t) => t.id));
     for (const id of this.#tails.keys()) if (!ids.has(id)) this.#tails.delete(id);
-    return visible.map((t) => {
+    const judgments = await this.#loadJudgments();
+    const toJudge = [];
+    const out = visible.map((t) => {
       if (!needsRead(t)) { this.#tails.delete(t.id); return t; }
       const cached = this.#tails.get(t.id);
-      return cached?.fingerprint === fingerprintOf(t) ? { ...t, assistantTail: cached.tail, lastError: t.lastError || cached.lastError } : t;
+      if (cached?.fingerprint !== fingerprintOf(t)) return t;
+      const judged = judgments[t.id]?.fingerprint === cached.fingerprint ? judgments[t.id] : null;
+      if (!judged && this.#judgeable(t, cached)) toJudge.push(t);
+      // The model's verdict replaces the wording heuristic; until it arrives
+      // (or when no model answers) the heuristic stays as the fallback.
+      const tail = judged ? { ...cached.tail, evidence: judged.verified ? judged.evidence : null, judgedBy: "model", missing: judged.missing || "" } : cached.tail;
+      return { ...t, assistantTail: tail, lastError: t.lastError || cached.lastError };
     });
+    if (toJudge.length) void this.#enqueueJudgments(toJudge, fingerprintOf);
+    return out;
+  }
+
+  async #loadJudgments() {
+    if (!this.#judgments) this.#judgments = await this.store.read("harvest-judgments", {}).catch(() => ({}));
+    return this.#judgments;
+  }
+
+  #judgeable(t, cached) {
+    const tail = cached.tail;
+    if (!cached.judgeInput || !tail || tail.role !== "assistant" || tail.status !== "completed" || tail.error || tail.asking) return false;
+    if (t.live || t.pendingCount > 0 || t.queuedCount > 0 || t.lastError || cached.lastError || t.lastTurnStatus === "failed") return false;
+    if (this.now() - timestamp(t.updatedAt) > JUDGE_WINDOW_MS) return false;
+    const failed = this.#judgeFailures.get(t.id);
+    return !(failed && failed.fingerprint === cached.fingerprint && this.now() - failed.at < JUDGE_RETRY_MS);
+  }
+
+  async #enqueueJudgments(threads, fingerprintOf) {
+    if (!await this.llm.available?.()) return;
+    const queued = new Set(this.#judgeQueue.map((job) => job.id));
+    const fresh = threads.filter((t) => !queued.has(t.id)).sort((a, b) => timestamp(b.updatedAt) - timestamp(a.updatedAt))
+      .map((t) => ({ id: t.id, fingerprint: fingerprintOf(t) }));
+    // Newest work first: it is what the park is showing right now.
+    this.#judgeQueue.unshift(...fresh);
+    while (this.#judging < JUDGE_CONCURRENCY && this.#judgeQueue.length) void this.#judgeNext();
+  }
+
+  async #judgeNext() {
+    const job = this.#judgeQueue.shift();
+    if (!job) return;
+    this.#judging++;
+    try {
+      const cached = this.#tails.get(job.id);
+      if (cached?.fingerprint !== job.fingerprint || !cached.judgeInput) return;
+      const verdict = await this.llm.judgeHarvest(cached.judgeInput);
+      if (!verdict) { this.#judgeFailures.set(job.id, { fingerprint: job.fingerprint, at: this.now() }); return; }
+      this.#judgeFailures.delete(job.id);
+      const record = { fingerprint: job.fingerprint, ...verdict, at: new Date(this.now()).toISOString() };
+      this.#judgments[job.id] = record;
+      await this.store.update("harvest-judgments", (all) => {
+        const next = { ...all, [job.id]: record };
+        const ids = Object.keys(next);
+        // Keep the newest verdicts only; old ones are re-judged if they move.
+        if (ids.length > 600) ids.sort((a, b) => timestamp(next[a].at) - timestamp(next[b].at)).slice(0, ids.length - 600).forEach((id) => delete next[id]);
+        return next;
+      }).catch(() => {});
+      this.#notifyJudged();
+    } finally {
+      this.#judging--;
+      if (this.#judgeQueue.length) void this.#judgeNext();
+    }
+  }
+
+  #notifyJudged() {
+    if (typeof this.onJudged !== "function" || this.#judgedTimer) return;
+    this.#judgedTimer = setTimeout(() => { this.#judgedTimer = null; try { this.onJudged(); } catch { /* listener errors stay local */ } }, 3000);
+    this.#judgedTimer.unref?.();
   }
 
   async idleWip(topics) {
@@ -223,8 +298,9 @@ export class AssistantService {
     if (conclusionSource >= 0) conclusion += ` [S${conclusionSource + 1}]`;
     const evidenceLines = records.slice(0, 3).map((r, i) => `${r.source.label}：${shortText(r.text, 180)} [S${i + 1}]`);
     let answerText = [conclusion, ...evidenceLines].join("\n"), usedModel = false;
-    // Unchanged single-topic progress and garden inventory are rule-answerable.
-    if (topic && /上次|之前|历史|怎么解决|为什么/.test(text) && records.length) {
+    // Every answer with evidence goes through the model; the template above is
+    // the fallback when no model channel answers or the reply is ungrounded.
+    if (records.length) {
       let remaining = 5500;
       const evidence = { question: shortText(text, 300), sources: records.map((r, i) => {
         const body = shortText(r.text, Math.max(0, Math.min(300, remaining)));

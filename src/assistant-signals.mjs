@@ -56,15 +56,29 @@ function harvestTextEvidence(raw) {
 // establish who spoke last; tool output and reasoning never count as delivery.
 // The full message is classified once here and only a short excerpt is kept,
 // so overview payloads stay small.
+const isChatItem = (item) => ["agentMessage", "userMessage"].includes(item?.type) || ["assistant", "user"].includes(item?.role);
+const itemRole = (item) => item.type === "agentMessage" ? "assistant" : item.type === "userMessage" ? "user" : item.role;
+const itemText = (item) => String(item.text || (Array.isArray(item.content)
+  ? item.content.filter((p) => p.type === "text" || p.type === "input_text" || p.type === "output_text").map((p) => p.text || "").join("\n") : item.content) || "");
+
+// What the harvest judge reads: the request that opened the last turn and the
+// final reply, both as plain text and bounded so prompts stay small.
+export function judgeInputOf(thread = {}) {
+  const items = (thread.turns?.at(-1)?.items || []).filter(isChatItem);
+  const reply = [...items].reverse().find((item) => itemRole(item) === "assistant");
+  if (!reply) return null;
+  const ask = items.find((item) => itemRole(item) === "user");
+  const clip = (text, size) => { const chars = Array.from(plainText(text)); return chars.length > size ? `${chars.slice(0, size / 2).join("")}…${chars.slice(-size / 2).join("")}` : chars.join(""); };
+  return { title: shortText(thread.title, 80), ask: ask ? clip(itemText(ask), 600) : "", reply: clip(itemText(reply), 2400) };
+}
+
 export function threadTail(thread = {}) {
   const turn = thread.turns?.at(-1);
   if (!turn) return thread.assistantTail || null;
-  const message = [...(turn.items || [])].reverse().find((item) =>
-    ["agentMessage", "userMessage"].includes(item?.type) || ["assistant", "user"].includes(item?.role));
+  const message = [...(turn.items || [])].reverse().find(isChatItem);
   if (!message) return null;
-  const role = message.type === "agentMessage" ? "assistant" : message.type === "userMessage" ? "user" : message.role;
-  const text = String(message.text || (Array.isArray(message.content)
-    ? message.content.filter((p) => p.type === "text" || p.type === "input_text" || p.type === "output_text").map((p) => p.text || "").join("\n") : message.content) || "");
+  const role = itemRole(message);
+  const text = itemText(message);
   return { role, text: shortText(plainText(text), TAIL_TEXT_LIMIT), status: turn.status || "", error: Boolean(turn.error),
     asking: ASKING_RE.test(text.trim()), question: ASKING_RE.test(text.trim()) ? shortText(lastAsking(text), 80) : "",
     evidence: harvestTextEvidence(text) };
