@@ -41,6 +41,11 @@
   .sprite-tour-controls { padding: 5px 10px; }
   .sprite-pop-titles strong { max-width: 125px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sprite-prefs-drawer, .sprite-memory { max-height: 12dvh; overflow: auto; }
+  /* Typing: the keyboard takes half the screen, so the conversation gets the
+     room and the tour bar, work cards and quick chips step aside until blur. */
+  .sprite-assistant-mount.is-3d .sprite-popover-card:has(.sprite-input-row :focus) { max-height: calc(var(--app-height, 100dvh) * .62); }
+  .sprite-popover-card:has(.sprite-input-row :focus) :is(.sprite-tour-controls, .sprite-work-cards, .sprite-quick-row) { display: none; }
+  .sprite-popover-card:has(.sprite-input-row :focus) .sprite-feed { min-height: 96px; }
 }
 
 @media (max-width: 600px) {
