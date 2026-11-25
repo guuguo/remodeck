@@ -1,4 +1,23 @@
 import { escapeHtml } from "./markdown.js";
+import { createSpriteBrain } from "./sprite-brain.js";
+
+// Keep new assistant copy local: the shared locale dictionary is owned separately.
+const assistantLocale = () => globalThis.window?.AgentControlI18n?.getLocale?.() || "zh-CN";
+const assistantText = (zh, en) => assistantLocale().startsWith("zh")
+  ? (globalThis.window?.AgentControlI18n?.t?.(zh) || zh) : en;
+
+export function selectAssistantSignalBadge(topic = {}, locale = "zh-CN") {
+  const signals = topic.assistantSignals;
+  const type = signals?.top;
+  if (type === "alert") return { type, text: "!", inferred: false };
+  if (type === "harvest") return { type, text: `$${Number(signals.counts?.harvest) || 1}`, inferred: false };
+  if (type === "ruin") return { type, text: `🚧${signals.ruinDays ?? 0}${locale.startsWith("zh") ? "天" : "d"}`, inferred: false };
+  if (topic.harvestInferred && !(signals?.cards || []).some((card) => card.type === "harvest")) {
+    return { type: "harvest", text: locale.startsWith("zh") ? "$准收菜" : "$Soon", inferred: true };
+  }
+  return null;
+}
+
 
 export const ROOM_BLUEPRINTS = Object.freeze({
   "indie-lab": {
@@ -227,6 +246,8 @@ export function buildTycoonWorldLayout(overview, {
         stageIndex: Math.max(1, Math.min(5, Number(tp.pipeline?.stageIndex) || 1)),
         stageLabel: tp.pipeline?.stageLabel || "研发",
         readyToHarvest: Boolean(tp.pipeline?.readyToHarvest),
+        assistantSignals: tp.assistantSignals,
+        harvestInferred: Boolean(tp.harvestInferred),
         liveCount,
         pendingCount,
         activeCount: activeCnt,
@@ -663,10 +684,21 @@ export function createTycoon3DWorld(containerEl, {
   onSelectRoom = null,
   onSelectIncubator = null,
   onSelectSprite = null,
+  onSignalBadgeClick = null,
+  onSpriteBubbleClick = null,
   onClearSelection = null,
 } = {}) {
   let THREE = null;
   let spriteRecord = null;
+  const spriteBrain = createSpriteBrain();
+  let spriteMood = "patrol";
+  let lastSpriteLegacyMood = "idle";
+  let spriteOverrideUntil = 0;
+  let spriteBubble = null;
+  let spriteUserBusy = false;
+  let spriteMotion = null;
+  let spriteProactive = [];
+  const SPRITE_MOODS = new Set(["patrol", "inspect", "guide", "thinking", "report", "good", "worry", "waiting", "listening", "idle"]);
   let renderer = null;
   let scene = null;
   let camera = null;
@@ -777,6 +809,7 @@ export function createTycoon3DWorld(containerEl, {
       || window.innerWidth <= 768
     )
   );
+  const spriteReducedMotion = () => isMobilePerf || Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
   let cachedViewport = { w: 1024, h: 680 };
   let lastRenderAt = 0;
 
@@ -2395,83 +2428,341 @@ export function createTycoon3DWorld(containerEl, {
       light0.intensity = nexusParts.baseLightIntensity * (0.85 + 0.15 * Math.sin(t * 3));
     });
 
-    // 3D Floating Sprite Companion hovering beside the central Nexus
-    const spRoot = new THREE.Group();
-    spRoot.position.set(2.35, 2.55, 1.85);
-    const spBodyMat = phys(0x38bdf8, { rough: 0.18, metal: 0.25, clear: 0.8, emissive: 0x0284c7, ei: 0.45 });
-    const spBody = mesh(sphereGeo(0.38, 18, 14), spBodyMat, { cast: !isMobilePerf });
-    const spVisor = mesh(capsuleGeo(0.14, 0.26), phys(0x0f172a, { rough: 0.15, metal: 0.6 }), { cast: false });
-    spVisor.rotation.z = Math.PI / 2;
-    spVisor.position.set(0, 0.03, 0.28);
-    const spEyeMat = neon(0x67e8f9);
-    [-0.1, 0.1].forEach((ex) => {
-      const eye = mesh(sphereGeo(0.045, 10, 8), spEyeMat, { cast: false });
-      eye.position.set(ex, 0.04, 0.41);
-      spRoot.add(eye);
-    });
-    const spHaloMat = neon(0xfbbf24);
-    const spHalo = mesh(torusGeo(0.28, 0.028, 8, 32), spHaloMat, { cast: false });
-    spHalo.rotation.x = Math.PI / 2;
-    spHalo.position.y = 0.52;
-
-    const wingMat = glassMat(0x7dd3fc, 0.42);
-    const makeWing = (side) => {
-      const wg = new THREE.Group();
-      wg.position.set(side * 0.34, 0.08, -0.08);
-      const blade = mesh(octaGeo(0.28), wingMat, { cast: false });
-      blade.scale.set(1.25, 0.58, 0.16);
-      blade.position.x = side * 0.24;
-      wg.add(blade);
-      spRoot.add(wg);
-      return wg;
-    };
-    const leftWing = makeWing(-1);
-    const rightWing = makeWing(1);
-    const spGlow = glowSprite(0x38bdf8, 1.85, 0.55);
-    const spHit = mesh(sphereGeo(0.78, 8, 8), invisibleMat(), { cast: false });
-    spHit.userData = { kind: "sprite" };
-    interactiveMeshes.push(spHit);
-
-    spRoot.add(spBody, spVisor, spHalo, spGlow, spHit);
+    // Finalized butler, sharing the world's primitive geometry/material caches.
+    const spRoot = buildButler(spriteMood);
+    spRoot.scale.setScalar(1.3);
+    if (spriteRecord) spRoot.position.copy(spriteRecord.group.position);
+    else spRoot.position.set(2.35, 1.0, 1.85);
     spRoot.rotation.y = Math.PI / 4;
+    const spHit = mesh(sphereGeo(1.1, 8, 8), invisibleMat(), { cast: false });
+    spHit.position.y = 1.3;
+    spHit.userData = { kind: "sprite" };
+    spRoot.add(spHit);
+    interactiveMeshes.push(spHit);
     dynamicGroup.add(spRoot);
+    const spLabelEl = document.createElement("button");
+    spLabelEl.type = "button";
+    spLabelEl.className = "tycoon3d-tag tycoon3d-sprite-tag tycoon-sprite-bubble";
+    spLabelEl.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (spriteBubble?.topicId) onSpriteBubbleClick?.(spriteBubble.topicId);
+      else onSelectSprite?.();
+    });
+    labelsWrap.appendChild(spLabelEl);
+    spriteRecord = { group: spRoot, anchor: new THREE.Vector3(), labelEl: spLabelEl };
+    updateSpriteBubble();
+    animators.push(updateSprite);
 
-    let spLabelEl = null;
-    if (!isMobilePerf) {
-      spLabelEl = document.createElement("button");
-      spLabelEl.type = "button";
-      spLabelEl.className = "tycoon3d-tag tycoon3d-sprite-tag";
-      spLabelEl.innerHTML = `<span class="tycoon3d-sprite-dot"></span><span class="tycoon3d-name">小精灵总管</span><span class="tycoon3d-sprite-badge" hidden>1</span>`;
-      spLabelEl.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        onSelectSprite?.();
-      });
-      labelsWrap.appendChild(spLabelEl);
+  }
+
+
+  function changeSpriteMood(mood) {
+    const next = SPRITE_MOODS.has(mood) ? mood : "idle";
+    if (spriteMood === next) return;
+    spriteMood = next;
+    spriteRecord?.group.userData.setMood(next);
+  }
+
+  function updateSpriteBubble(now = Date.now()) {
+    const el = spriteRecord?.labelEl;
+    if (!el) return;
+    if (spriteBubble && now >= spriteBubble.expiresAt) spriteBubble = null;
+    const text = spriteBubble?.text || assistantText("小精灵总管", "Sprite Butler");
+    const limit = window.innerWidth <= 390 ? 12 : 18;
+    const chars = Array.from(text);
+    const short = chars.length > limit ? chars.slice(0, limit - 1).join("") + "…" : text;
+    if (el.textContent !== short) el.textContent = short;
+    el.title = text;
+    el.classList.toggle("is-speaking", Boolean(spriteBubble));
+    el.classList.toggle("is-fading", Boolean(spriteBubble && spriteBubble.expiresAt - now <= 450));
+    el.dataset.topicId = spriteBubble?.topicId || "";
+  }
+
+  function showSpriteBubble(text, { topicId = "", ttlMs = 6000 } = {}) {
+    if (!text) return;
+    spriteBubble = { text: String(text), topicId, expiresAt: Date.now() + Math.max(0, ttlMs) };
+    updateSpriteBubble();
+  }
+
+  function spriteSay(text, { topicId = "", ttlMs = 6000, proactive = true } = {}) {
+    if (!text || disposed) return;
+    if (!proactive) {
+      spriteBrain.noteUserBubble();
+      showSpriteBubble(text, { topicId, ttlMs });
+      return;
     }
+    const mark = wsRecords.get(topicId)?.ws.assistantSignals?.top || "alert";
+    spriteProactive.push({ topicId: topicId || "__nexus__", mark, bubble: String(text), ttlMs, queuedOnly: true });
+  }
 
-    const spAnchor = new THREE.Vector3(2.35, 3.45, 1.85);
-    spriteRecord = {
-      group: spRoot,
-      anchor: spAnchor,
-      labelEl: spLabelEl,
-      bodyMat: spBodyMat,
-      eyeMat: spEyeMat,
-      halo: spHalo,
-    };
+  function finishSpriteVisit() {
+    const motion = spriteMotion;
+    spriteMotion = null;
+    motion?.resolve();
+  }
 
-    animators.push((t) => {
-      const ox = 2.35 + Math.cos(t * 0.65) * 0.38;
-      const oz = 1.85 + Math.sin(t * 0.65) * 0.38;
-      const oy = 2.45 + Math.sin(t * 2.8) * 0.18;
-      spRoot.position.set(ox, oy, oz);
-      spRoot.rotation.y = Math.PI / 4 + Math.sin(t * 1.1) * 0.25;
-      spHalo.rotation.z = t * 1.5;
-      const flap = Math.sin(t * 11) * 0.42;
-      leftWing.rotation.y = flap;
-      rightWing.rotation.y = -flap;
-      spAnchor.set(ox, oy + 0.85, oz);
+  function spriteDestination(topicId) {
+    const ws = wsRecords.get(topicId)?.ws;
+    // Stand in front of, and to the side of, the building's label/roof.
+    return ws ? { x: ws.x + 2.1, y: 0.95, z: ws.z + 2.2 } : null;
+  }
+
+  function spriteVisit(topicId, { bubble, mood = "guide", camera: followCamera = true } = {}) {
+    if (disposed) return Promise.resolve();
+    finishSpriteVisit();
+    changeSpriteMood(mood);
+    spriteOverrideUntil = Date.now() + 6000;
+    if (bubble) spriteSay(bubble, { topicId, proactive: false });
+    return new Promise((resolve) => {
+      spriteMotion = { topicId, camera: followCamera, resolve };
+      const dest = spriteDestination(topicId);
+      if (dest && spriteRecord && spriteReducedMotion()) {
+        spriteRecord.group.position.set(dest.x, dest.y, dest.z);
+        if (followCamera) panToPosition(dest.x, dest.z, 1.42);
+        finishSpriteVisit();
+      }
     });
   }
+
+  function setSpriteMood(mood, { topicId, bubble, ttlMs = 6000 } = {}) {
+    // A new user state supersedes an earlier guide, including in-flight thinking.
+    finishSpriteVisit();
+    changeSpriteMood(mood);
+    spriteOverrideUntil = Date.now() + ttlMs;
+    if (topicId) {
+      void spriteVisit(topicId, { mood, camera: mood === "guide" });
+      spriteOverrideUntil = Date.now() + ttlMs;
+    }
+    if (bubble) spriteSay(bubble, { topicId, ttlMs, proactive: false });
+  }
+
+  function patrolStops() {
+    const stops = [];
+    for (const { ws } of wsRecords.values()) {
+      const mark = ws.assistantSignals?.top;
+      if (!mark) continue;
+      const days = mark === "ruin" ? ws.assistantSignals.ruinDays : Math.floor(
+        (Date.now() - Date.parse(ws.assistantSignals.cards?.find((c) => c.type === mark)?.since)) / 86400000);
+      const age = Number.isFinite(days) && days > 0 ? assistantText(` ${days} 天`, ` ${days}d`) : "";
+      const message = mark === "alert" ? assistantText("等你拍板", "Needs you")
+        : mark === "harvest" ? assistantText("有菜可收", "Ready to review") : assistantText("停在半途", "Left unfinished");
+      const dest = spriteDestination(ws.topicId);
+      const position = spriteRecord.group.position;
+      stops.push({ topicId: ws.topicId, topicTitle: ws.name, mark,
+        bubble: `${ws.name}：${message}${age}`,
+        arrived: spriteReducedMotion() || Math.hypot(position.x - dest.x, position.z - dest.z) < 0.12 });
+    }
+    return stops;
+  }
+
+  function updateSprite(t, dt) {
+    if (!spriteRecord) return;
+    const now = Date.now();
+    const root = spriteRecord.group;
+    const controlled = spriteMotion || now < spriteOverrideUntil;
+    const busy = spriteUserBusy || isUserDragging || heldKeys.size > 0;
+    const decision = spriteBrain.step({ signals: [...patrolStops(), ...spriteProactive], now, userBusy: busy || Boolean(controlled) });
+    spriteProactive = [];
+    if (!controlled && !busy) {
+      changeSpriteMood(decision.mood);
+      if (decision.bubble) {
+        const b = decision.bubble;
+        showSpriteBubble(b.text, { ...b, topicId: b.topicId === "__nexus__" ? "" : b.topicId });
+      }
+    }
+    let dest = null;
+    if (spriteMotion) {
+      dest = spriteDestination(spriteMotion.topicId);
+      if (!dest) finishSpriteVisit();
+    } else if (!controlled && !busy && !spriteReducedMotion()) {
+      dest = spriteDestination(decision.targetTopicId) || {
+        x: 2.35 + Math.cos(t * 0.3) * 0.65, y: 1, z: 1.85 + Math.sin(t * 0.3) * 0.65,
+      };
+    }
+    if (dest) {
+      const distance = Math.hypot(dest.x - root.position.x, dest.y - root.position.y, dest.z - root.position.z);
+      const amount = spriteReducedMotion() ? 1 : Math.min(1, dt * 4 / Math.max(0.001, distance));
+      root.position.x += (dest.x - root.position.x) * amount;
+      root.position.y += (dest.y - root.position.y) * amount;
+      root.position.z += (dest.z - root.position.z) * amount;
+      if (spriteMotion?.camera) {
+        camGoal.x = root.position.x; camGoal.z = root.position.z; camGoal.zoom = 1.42;
+        abortChase();
+      }
+      if (spriteMotion && distance < 0.12) finishSpriteVisit();
+    }
+    // Face the user; internal head/hand gestures follow the finalized preview.
+    root.rotation.y = Math.atan2(camera.position.x - root.position.x, camera.position.z - root.position.z);
+    root.userData.tick(spriteReducedMotion() ? 0 : t);
+    spriteRecord.anchor.copy(root.position);
+    spriteRecord.anchor.y += (spriteMood === "waiting" ? 3.55 : 2.65) * root.scale.y;
+    updateSpriteBubble(now);
+  }
+
+  function uniqueSpriteMaterial(material) {
+    const copy = material.clone();
+    copy.userData.cached = false;
+    return copy;
+  }
+
+  const FACE_W = 256, FACE_H = 160;
+  function drawFace(ctx, state, t) {
+    ctx.clearRect(0, 0, FACE_W, FACE_H);
+    const bg = ctx.createLinearGradient(0, 0, 0, FACE_H);
+    bg.addColorStop(0, "#0b1530"); bg.addColorStop(1, "#050a18");
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, FACE_W, FACE_H);
+    const col = { good: "#fcd34d", worry: "#fb923c", waiting: "#f87171", doze: "#64748b" }[state] || "#67e8f9";
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.shadowColor = col; ctx.shadowBlur = 14;
+    const L = 88, R = 168, Y = 72;
+    const blink = state === "idle" && (t % 3.2) < 0.12;
+    const eyeCapsule = (x, y, w, h) => { ctx.beginPath(); ctx.roundRect(x - w / 2, y - h / 2, w, h, Math.min(w, h) / 2); ctx.fill(); };
+    const mouthSmile = (w = 26, d = 10) => { ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(128 - w, 112); ctx.quadraticCurveTo(128, 112 + d, 128 + w, 112); ctx.stroke(); };
+    switch (state) {
+      case "idle": case "report":
+        eyeCapsule(L, Y, 22, blink ? 4 : 42); eyeCapsule(R, Y, 22, blink ? 4 : 42); mouthSmile(); break;
+      case "inspect": {
+        eyeCapsule(L, Y, 34, 10); eyeCapsule(R, Y, 34, 10);
+        const sy = 20 + ((t * 90) % 120); ctx.globalAlpha = .45; ctx.fillRect(10, sy, FACE_W - 20, 4); ctx.globalAlpha = 1; break; }
+      case "guide":
+        eyeCapsule(L + 16, Y, 22, 40); eyeCapsule(R + 16, Y, 22, 40); mouthSmile(18, 8); break;
+      case "thinking": {
+        for (let i = 0; i < 3; i++) { const on = Math.floor(t * 3) % 3 === i; ctx.globalAlpha = on ? 1 : .3;
+          ctx.beginPath(); ctx.arc(92 + i * 36, Y + 8, on ? 13 : 10, 0, 7); ctx.fill(); }
+        ctx.globalAlpha = 1; break; }
+      case "good":
+        ctx.lineWidth = 9;
+        [L, R].forEach((x) => { ctx.beginPath(); ctx.moveTo(x - 20, Y + 10); ctx.quadraticCurveTo(x, Y - 22, x + 20, Y + 10); ctx.stroke(); });
+        ctx.beginPath(); ctx.moveTo(100, 104); ctx.quadraticCurveTo(128, 140, 156, 104); ctx.closePath(); ctx.fill(); break;
+      case "worry":
+        eyeCapsule(L, Y + 6, 22, 30); eyeCapsule(R, Y + 6, 22, 30);
+        ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(L - 22, Y - 30); ctx.lineTo(L + 16, Y - 20); ctx.moveTo(R + 22, Y - 30); ctx.lineTo(R - 16, Y - 20); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(108, 122); ctx.quadraticCurveTo(128, 110, 148, 122); ctx.stroke(); break;
+      case "waiting":
+        ctx.beginPath(); ctx.arc(L, Y, 18, 0, 7); ctx.arc(R, Y, 18, 0, 7); ctx.fill();
+        ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(128, 116, 8, 0, 7); ctx.stroke(); break;
+      case "listening": {
+        ctx.beginPath(); ctx.arc(L, Y - 6, 20, 0, 7); ctx.arc(R, Y - 6, 20, 0, 7); ctx.fill();
+        for (let i = 0; i < 5; i++) { const h = 8 + Math.abs(Math.sin(t * 8 + i * 1.3)) * 22; ctx.fillRect(100 + i * 12, 118 - h / 2, 7, h); }
+        break; }
+      case "doze":
+        ctx.lineWidth = 6;
+        [L, R].forEach((x) => { ctx.beginPath(); ctx.moveTo(x - 18, Y); ctx.quadraticCurveTo(x, Y + 12, x + 18, Y); ctx.stroke(); });
+        ctx.font = "bold 30px sans-serif"; ctx.fillText("z", 196, 44); ctx.font = "bold 20px sans-serif"; ctx.fillText("z", 220, 26); break;
+    }
+    ctx.shadowBlur = 0;
+  }
+
+  function buildButler(state = "idle") {
+    const root = new THREE.Group();
+    const body = new THREE.Group(); root.add(body);
+    const shell = phys(0xf8fafc, { rough: 0.25, clear: 1 });
+    const accent = uniqueSpriteMaterial(phys(0x38bdf8, { rough: 0.2, clear: 0.9, emissive: 0x0284c7, ei: 0.35 }));
+    const gold = phys(0xfbbf24, { rough: 0.25, metal: 0.4, emissive: 0xb45309, ei: 0.35 });
+
+    // 头：略扁的大圆头 + 正面脸屏
+    const head = new THREE.Group(); head.position.y = 1.55; body.add(head);
+    const skull = mesh(sphereGeo(0.62, 40, 28), shell); skull.scale.set(1.12, 0.95, 1); head.add(skull);
+    const rim = mesh(torusGeo(0.47, 0.035, 10, 48), accent); rim.scale.set(1.26, 0.86, 1); rim.position.z = 0.47; head.add(rim);
+    const cv = document.createElement("canvas"); cv.width = FACE_W; cv.height = FACE_H;
+    const fctx = cv.getContext("2d"); const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+    const faceGeo = new THREE.SphereGeometry(0.632, 40, 24, Math.PI / 2 - 0.78, 1.56, Math.PI / 2 - 0.46, 0.9);
+    const face = mesh(faceGeo, new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }), { cast: false });
+    face.scale.set(1.12, 0.95, 1); face.position.z = 0.005; head.add(face);
+    // 耳朵灯 + 天线
+    [-1, 1].forEach((s) => { const ear = mesh(cylGeo(0.13, 0.13, 0.1, 24), accent); ear.rotation.z = Math.PI / 2; ear.position.x = s * 0.7; head.add(ear); });
+    const halo = mesh(torusGeo(0.36, 0.04, 10, 48), uniqueSpriteMaterial(neon(0xfbbf24))); halo.rotation.x = Math.PI / 2; halo.position.y = 0.82; head.add(halo);
+
+    // 身子：小圆身 + 金色领结（管家）
+    const torso = mesh(sphereGeo(0.42, 32, 24), shell); torso.scale.set(1, 1.05, 0.9); torso.position.y = 0.72; body.add(torso);
+    const belt = mesh(torusGeo(0.39, 0.03, 8, 40), accent); belt.rotation.x = Math.PI / 2; belt.position.y = 0.6; body.add(belt);
+    const bow = new THREE.Group(); bow.position.set(0, 1.0, 0.36);
+    [-1, 1].forEach((s) => { const w = mesh(new THREE.ConeGeometry(0.1, 0.18, 4), gold); w.rotation.z = s * Math.PI / 2; w.position.x = s * 0.09; bow.add(w); });
+    bow.add(mesh(sphereGeo(0.045, 12, 10), gold)); body.add(bow);
+    // 胸口状态灯
+    const chest = mesh(new THREE.CircleGeometry(0.07, 24), uniqueSpriteMaterial(neon(0x67e8f9)), { cast: false }); chest.position.set(0, 0.74, 0.39); body.add(chest);
+    // 背后小推进翼
+    const wingMat = glassMat(0x7dd3fc, 0.55);
+    const wings = [-1, 1].map((s) => { const g = new THREE.Group(); g.position.set(s * 0.3, 0.9, -0.3);
+      const b = mesh(octaGeo(0.26), wingMat, { cast: false }); b.scale.set(1.3, 0.55, 0.14); b.position.x = s * 0.26; g.add(b); body.add(g); return g; });
+    // 底部推进光
+    const thruster = mesh(new THREE.ConeGeometry(0.2, 0.32, 24, 1, true), neon(0x38bdf8, { opacity: 0.55 }), { cast: false }); thruster.rotation.x = Math.PI; thruster.position.y = 0.2; body.add(thruster);
+    const tg = glowSprite(0x38bdf8, 1.0, 0.7); tg.position.y = 0.12; body.add(tg);
+
+    // 悬浮的手（不连手臂）
+    const mkHand = () => { const h = new THREE.Group(); const palm = mesh(sphereGeo(0.15, 20, 16), shell); palm.scale.set(1, 0.9, 0.8); h.add(palm);
+      const thumb = mesh(sphereGeo(0.06, 12, 10), shell); thumb.position.set(0.1, 0.05, 0.05); h.add(thumb);
+      const cuff = mesh(torusGeo(0.11, 0.025, 8, 24), accent); cuff.rotation.y = Math.PI / 2; cuff.position.x = -0.1; h.add(cuff); return h; };
+    const handL = mkHand(); const handR = mkHand(); handL.scale.x = -1; body.add(handL, handR);
+    const finger = mesh(new THREE.CapsuleGeometry(0.035, 0.14, 4, 10), shell); finger.rotation.z = -Math.PI / 2; finger.position.set(0.18, 0, 0); finger.visible = false; handR.add(finger);
+
+    // 平板（汇报时举起）
+    const tablet = new THREE.Group();
+    const slab = mesh(boxGeo(0.42, 0.56, 0.04), phys(0x1e293b, { rough: 0.3 })); tablet.add(slab);
+    const tc = document.createElement("canvas"); tc.width = 128; tc.height = 170; const tx = tc.getContext("2d");
+    tx.fillStyle = "#0b1530"; tx.fillRect(0, 0, 128, 170); tx.fillStyle = "#67e8f9"; tx.font = "bold 18px sans-serif"; tx.fillText(assistantText("工单 3", "Cards 3"), 14, 28);
+    [["#ef4444", "!"], ["#fbbf24", "$"], ["#fb923c", "🚧"]].forEach(([c, s], i) => { tx.fillStyle = c; tx.beginPath(); tx.arc(24, 60 + i * 36, 10, 0, 7); tx.fill();
+      tx.fillStyle = "#cbd5e1"; tx.fillRect(44, 54 + i * 36, 70, 10); });
+    const ttex = new THREE.CanvasTexture(tc); ttex.colorSpace = THREE.SRGBColorSpace;
+    const scr = mesh(new THREE.PlaneGeometry(0.36, 0.5), new THREE.MeshBasicMaterial({ map: ttex, toneMapped: false }), { cast: false }); scr.position.z = 0.022; tablet.add(scr);
+    tablet.visible = false; body.add(tablet);
+
+    // 头顶 ! 标记
+    const bang = new THREE.Group(); const bm = neon(0xef4444);
+    const bar = mesh(new THREE.CapsuleGeometry(0.07, 0.26, 4, 12), bm, { cast: false }); bar.position.y = 0.2; bang.add(bar);
+    const dot = mesh(sphereGeo(0.075, 12, 10), bm, { cast: false }); dot.position.y = -0.1; bang.add(dot);
+    bang.add(glowSprite(0xef4444, 1.1, 0.5)); bang.position.y = 2.98; bang.visible = state === "waiting"; root.add(bang);
+
+    // 金币（报喜）
+    const coin = mesh(cylGeo(0.16, 0.16, 0.04, 28), gold); coin.rotation.x = Math.PI / 2; coin.visible = state === "good"; root.add(coin);
+
+    const shadow = mesh(new THREE.CircleGeometry(0.55, 32), new THREE.MeshBasicMaterial({ color: 0x0f172a, transparent: true, opacity: 0.16, depthWrite: false }), { cast: false });
+    shadow.rotation.x = -Math.PI / 2; shadow.position.y = -0.38; root.add(shadow);
+
+    root.userData.setMood = (next) => {
+      state = next === "patrol" ? "idle" : next;
+      const tint = { worry: 0xfb923c, good: 0xfbbf24, waiting: 0xf87171, doze: 0x64748b }[state];
+      chest.material.color.setHex(tint || 0x67e8f9);
+      accent.color.setHex(tint || 0x38bdf8);
+      accent.emissive.setHex(tint || 0x0284c7);
+      accent.emissiveIntensity = tint ? 0.25 : 0.35;
+      halo.material.color.setHex(state === "doze" ? 0x94a3b8 : 0xfbbf24);
+      bang.visible = state === "waiting";
+      coin.visible = state === "good";
+      faceAt = -Infinity;
+    };
+    root.userData.textures = [tex, ttex];
+    let faceAt = -Infinity;
+    root.userData.setMood(state);
+    root.userData.tick = (t) => {
+      if (t - faceAt >= 0.1) { drawFace(fctx, state, t); tex.needsUpdate = true; faceAt = t; }
+      const bobAmp = state === "doze" ? 0.02 : 0.08;
+      body.position.y = Math.sin(t * 2.2) * bobAmp + (state === "doze" ? -0.15 : 0);
+      const flapHz = { guide: 14, worry: 5, doze: 1.5 }[state] ?? 8;
+      wings.forEach((w, i) => { w.rotation.y = (i ? -1 : 1) * Math.sin(t * flapHz) * 0.45; });
+      halo.rotation.z = t * ({ thinking: 7, guide: 3 }[state] ?? 1.2);
+      if (state === "thinking") halo.material.color.setHSL(0.5 + 0.08 * Math.sin(t * 4), 0.9, 0.6);
+      // 手势
+      let l = [-0.62, 0.72, 0.15], r = [0.62, 0.72, 0.15], lr = 0, rr = 0;
+      finger.visible = false; tablet.visible = false; head.rotation.set(0, 0, 0); body.rotation.set(0, 0, 0);
+      switch (state) {
+        case "idle": l[1] += Math.sin(t * 2.2 + 1) * 0.04; r[1] += Math.sin(t * 2.2 + 2) * 0.04; break;
+        case "inspect": r = [0.5, 1.95, 0.42]; rr = -0.6; head.rotation.y = 0.35; head.rotation.x = 0.12; break;
+        case "guide": r = [1.05, 1.35, 0.35]; finger.visible = true; head.rotation.y = 0.45; body.rotation.z = -0.12; break;
+        case "thinking": r = [0.32, 1.12, 0.55]; rr = -0.8; head.rotation.z = 0.12; head.rotation.x = -0.08; break;
+        case "good": l = [-0.75, 1.85, 0.2]; r = [0.75, 1.85, 0.2]; lr = 0.5; rr = -0.5;
+          coin.position.set(0, 2.6 + ((t * 1.2) % 1) * 0.5, 0.2); coin.rotation.z = t * 6; break;
+        case "worry": l = [-0.42, 1.45, 0.5]; r = [0.42, 1.45, 0.5]; head.rotation.x = 0.15; break;
+        case "waiting": r = [0.78, 1.7 + Math.sin(t * 6) * 0.08, 0.25]; rr = Math.sin(t * 6) * 0.4; bang.position.y = 2.98 + Math.abs(Math.sin(t * 4)) * 0.12; break;
+        case "listening": l = [-0.78, 1.55, 0.05]; r = [0.78, 1.55, 0.05]; head.rotation.x = -0.1; break;
+        case "doze": l = [-0.55, 0.5, 0.2]; r = [0.55, 0.5, 0.2]; head.rotation.x = 0.3; head.rotation.z = 0.15; break;
+        case "report": l = [-0.3, 1.05, 0.62]; r = [0.3, 1.05, 0.62]; tablet.visible = true; tablet.position.set(0, 1.2, 0.68); tablet.rotation.x = -0.25; head.rotation.x = 0.18; break;
+      }
+      handL.position.set(...l); handR.position.set(...r); handL.rotation.z = lr; handR.rotation.z = rr;
+    };
+    return root;
+  }
+
 
   // --------------------------------------------------------------- rooms
   function buildRoomDecor(rm, group) {
@@ -3535,7 +3826,10 @@ export function createTycoon3DWorld(containerEl, {
           ? `<path d="M9.1 1.75 3.6 9h4.1l-1 5.25 5.7-7.25H8.3l.8-5.25Z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>`
           : `<path d="M12.85 9.95A5.25 5.25 0 0 1 6.05 3.15a5.25 5.25 0 1 0 6.8 6.8Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>`);
     const statePillHtml = `<span class="tycoon3d-state-pill is-${act.state} is-tier-${act.intensityTier}"><svg class="tycoon3d-state-ico" viewBox="0 0 16 16" width="11" height="11" fill="none" aria-hidden="true">${stateIconPath}</svg><span class="tycoon3d-state-txt">${escapeHtml(act.statusText)}</span></span>`;
-    const harvestBadgeHtml = act.showHarvest ? `<span class="tycoon3d-mini-badge is-coin">$收菜</span>` : "";
+    const signalBadge = selectAssistantSignalBadge(ws, assistantLocale());
+    const signalTitle = signalBadge ? assistantText({ alert: "等你拍板", harvest: signalBadge.inferred ? "准收菜（推测）" : "收菜", ruin: "烂尾" }[signalBadge.type], { alert: "Needs your decision", harvest: signalBadge.inferred ? "Almost ready (inferred)" : "Ready to review", ruin: "Unfinished" }[signalBadge.type]) : "";
+    const signalHtml = signalBadge ? `<span class="tycoon-signal-badge is-${signalBadge.type}${signalBadge.inferred ? " is-inferred" : ""}" data-signal-type="${signalBadge.type}" role="button" tabindex="0" aria-label="${escapeHtml(signalTitle)}" title="${escapeHtml(signalTitle)}">${escapeHtml(signalBadge.text)}</span>` : "";
+    const harvestBadgeHtml = !ws.assistantSignals && act.showHarvest ? `<span class="tycoon3d-mini-badge is-coin">$收菜</span>` : "";
     const kpiLineHtml = ws.kpis.length
       ? `<div class="tycoon3d-kpi-row">${ws.kpis.map((k) => `<span>${escapeHtml(k.label)} <strong>${escapeHtml(k.value)}</strong></span>`).join(" · ")}</div>`
       : "";
@@ -3545,10 +3839,20 @@ export function createTycoon3DWorld(containerEl, {
         <span class="tycoon3d-lv">Lv.${ws.stageIndex}</span>
         <strong class="tycoon3d-name">${escapeHtml(ws.name)}</strong>
         ${harvestBadgeHtml}
+        ${signalHtml}
       </div>
       ${kpiLineHtml}
       <div class="tycoon3d-pips">${pipsHtml}</div>
     `;
+    const signalEl = labelEl.querySelector(".tycoon-signal-badge");
+    const selectSignal = (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      onSignalBadgeClick?.(ws.topicId, signalBadge.type);
+    };
+    signalEl?.addEventListener("click", selectSignal);
+    signalEl?.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") selectSignal(ev);
+    });
     labelEl.addEventListener("click", (ev) => {
       ev.stopPropagation();
       panToPosition(ws.x, ws.z, 1.42);
@@ -3790,7 +4094,7 @@ export function createTycoon3DWorld(containerEl, {
     return JSON.stringify([
       w.topicId, w.name, w.x, w.z, w.stageIndex, w.readyToHarvest, w.liveCount, w.pendingCount,
       w.activeCount > 0, w.landmark, w.primaryProvider, w.cloneProviders,
-      w.kpis.map((k) => `${k.label}=${k.value}`),
+      w.kpis.map((k) => `${k.label}=${k.value}`), selectAssistantSignalBadge(w, assistantLocale()),
     ]);
   }
 
@@ -3811,6 +4115,7 @@ export function createTycoon3DWorld(containerEl, {
 
   function rebuildDynamicWorld() {
     if (!THREE || !dynamicGroup || !lastOverview) return;
+    spriteRecord?.group.userData.textures?.forEach((texture) => texture.dispose());
     disposeTree(dynamicGroup);
     interactiveMeshes.length = 0;
     animators.length = 0;
@@ -4071,6 +4376,8 @@ export function createTycoon3DWorld(containerEl, {
         estH = rec.ws.kpis.length ? 54 : 38;
       }
 
+      const badge = selectAssistantSignalBadge(rec.ws, assistantLocale());
+      if (badge) estW += badge.text.length * 8 + 18;
       let priority = 10;
       if (rec.isSelected || rec.isSearchHit) priority = 100;
       else if (rec.act.isPending) priority = 82;
@@ -4100,8 +4407,13 @@ export function createTycoon3DWorld(containerEl, {
 
     if (spriteRecord?.labelEl) {
       const { ax, ay, visible } = projectPoint(spriteRecord.anchor, 0);
+      // Reserve the butler's silhouette as well as its speech label. In narrow
+      // views a building card must not cover its face; use the same solver.
+      const feet = projectPoint(spriteRecord.group.position, 0);
+      items.push({ id: "sp:body", ax: feet.ax, ay: feet.ay + 8,
+        w: Math.max(64, 110 * zoom), h: Math.max(80, feet.ay - ay + 8), priority: 110, visible });
       const id = "sp:sprite";
-      items.push({ id, ax, ay, w: 102, h: 24, priority: 36, visible });
+      items.push({ id, ax, ay, w: spriteRecord.labelEl.offsetWidth || 102, h: spriteRecord.labelEl.offsetHeight || 24, priority: 36, visible });
       metaById.set(id, { kind: "sp", spriteRecord, ax, ay, visible, alpha: 1 });
     }
 
@@ -5202,18 +5514,16 @@ export function createTycoon3DWorld(containerEl, {
       }
     },
     jumpToNextPending: jumpToNextPendingWorkstation,
+    setSpriteMood,
+    spriteVisit,
+    spriteSay,
+    setUserBusy(busy) { spriteUserBusy = Boolean(busy); },
     syncSpriteState({ badgeCount = 0, mood = "idle" } = {}) {
-      if (!spriteRecord) return;
-      const hex = mood === "urgent" ? 0xfb7185 : mood === "coin" ? 0xfbbf24 : 0x38bdf8;
-      spriteRecord.bodyMat?.color?.setHex?.(hex);
-      if (spriteRecord.labelEl) {
-        spriteRecord.labelEl.classList.toggle("has-alert", badgeCount > 0);
-        const badgeEl = spriteRecord.labelEl.querySelector(".tycoon3d-sprite-badge");
-        if (badgeEl) {
-          badgeEl.hidden = !(badgeCount > 0);
-          badgeEl.textContent = badgeCount > 9 ? "9+" : String(badgeCount);
-        }
-      }
+      const mapped = { urgent: "waiting", coin: "good", busy: "thinking" }[mood] || mood;
+      // The legacy idle sync is frequent; it must not continually reset patrol.
+      if (mapped !== lastSpriteLegacyMood) setSpriteMood(mapped);
+      lastSpriteLegacyMood = mapped;
+      spriteRecord?.labelEl.classList.toggle("has-alert", badgeCount > 0);
     },
     resume() {
       if (disposed || running) return;
@@ -5235,6 +5545,9 @@ export function createTycoon3DWorld(containerEl, {
       cleanupFns.forEach((fn) => {
         try { fn(); } catch {}
       });
+      finishSpriteVisit();
+      spriteBrain.reset();
+      spriteRecord?.group.userData.textures?.forEach((texture) => texture.dispose());
       if (dynamicGroup) disposeTree(dynamicGroup);
       if (envGroup) disposeTree(envGroup);
       if (fxGroup) disposeTree(fxGroup);

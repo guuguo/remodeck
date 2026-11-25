@@ -599,12 +599,43 @@ function buildDemoOverview() {
   ];
 
   const allTopics = domains.flatMap((d) => d.topics);
+  // Fictional assistant examples: decision, evidenced delivery, unfinished, inference.
+  const assistantExamples = [
+    { name: "示例商城", type: "alert", days: 4, line: "登录回调方案等你选择 A/B" },
+    { name: "绘本工坊", type: "harvest", days: 1, line: "绘本导出文件已生成，等你验收" },
+    { name: "插件市场", type: "ruin", days: 8, line: "分类规则表做到一半，尚未继续" },
+    { name: "记账小程序", type: null, days: 0, inferred: true },
+  ];
+  allTopics.forEach((topic, index) => {
+    const example = assistantExamples[index];
+    const type = example?.type || null;
+    if (example) topic.name = example.name;
+    const since = new Date(NOW_MS - (example?.days || 0) * 86400000).toISOString();
+    const threadId = topic.activeThreads[0]?.id;
+    const cards = type ? [{
+      id: `${type}:${threadId || topic.id}`, topicId: topic.id, type,
+      title: example.line, line: example.line, since, threadId,
+      sources: [{ kind: "thread", label: "演示工位", threadId, topicId: topic.id, at: since }],
+      actions: type === "harvest" ? ["harvest", "continue", "snooze"] : ["continue", "snooze", "park"],
+    }] : [];
+    topic.assistantSignals = {
+      top: type,
+      counts: { alert: Number(type === "alert"), harvest: Number(type === "harvest"), ruin: Number(type === "ruin") },
+      ruinDays: type === "ruin" ? example.days : null,
+      cards,
+    };
+    topic.harvestInferred = Boolean(example?.inferred);
+    topic.harvestEvidence = type === "harvest" ? example.line : null;
+    topic.readyToHarvest = type === "harvest";
+    topic.pipeline.readyToHarvest = topic.readyToHarvest;
+  });
   const liveThreads = DEMO_THREADS.filter((t) => t.live);
   const pendingThreads = DEMO_THREADS.filter((t) => (t.pendingCount || 0) > 0);
 
   return {
     domains,
-    topics: allTopics.map((tp) => ({ id: tp.id, name: tp.name, domainId: tp.domainId, primaryCwd: tp.primaryCwd })),
+    assistantBadges: { alert: 1, harvest: 1, ruin: 1 },
+    topics: allTopics.map((tp) => ({ id: tp.id, name: tp.name, domainId: tp.domainId, primaryCwd: tp.primaryCwd, assistantSignals: tp.assistantSignals, harvestEvidence: tp.harvestEvidence, harvestInferred: tp.harvestInferred, readyToHarvest: tp.readyToHarvest })),
     bossFocus: allTopics
       .filter((tp) => tp.isBossPinned || tp.pipeline.readyToHarvest)
       .slice(0, 4)

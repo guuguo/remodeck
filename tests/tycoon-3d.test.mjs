@@ -8,6 +8,8 @@ import {
   resolveTycoonThemeTuning,
   resolveWorkstationLodMode,
   shortestAngleDelta,
+  selectAssistantSignalBadge,
+  buildTycoonWorldLayout,
   writeTycoonVisualPrefs,
 } from "../public/tycoon-3d.js";
 import { renderTycoonHudHtml } from "../public/mission-overview.js";
@@ -156,4 +158,33 @@ test("resolveTycoonThemeTuning preserves dark mode baseline and prevents light m
   for (const rgb of light.env.softboxes) {
     assert.ok(rgb.every((c) => c <= 1.5), `expected light softbox RGB <= 1.5, got ${rgb}`);
   }
+});
+
+
+test("assistant badge renders only the server-selected highest priority signal", () => {
+  const counts = { alert: 2, harvest: 3, ruin: 1 };
+  const topic = { assistantSignals: { top: "alert", counts, ruinDays: 8, cards: [] }, harvestInferred: true };
+  assert.deepEqual(selectAssistantSignalBadge(topic), { type: "alert", text: "!", inferred: false });
+  topic.assistantSignals.top = "harvest";
+  assert.deepEqual(selectAssistantSignalBadge(topic), { type: "harvest", text: "$3", inferred: false });
+  topic.assistantSignals.top = "ruin";
+  const ruin = selectAssistantSignalBadge(topic);
+  assert.equal(ruin.type, "ruin");
+  assert.match(ruin.text, /🚧8/);
+  assert.equal(ruin.inferred, false);
+});
+
+test("assistant inferred harvest is dashed only when there is no harvest card", () => {
+  const topic = { harvestInferred: true, assistantSignals: { top: null, counts: {}, cards: [] } };
+  assert.equal(selectAssistantSignalBadge(topic).inferred, true);
+  topic.assistantSignals.cards.push({ type: "harvest" });
+  assert.equal(selectAssistantSignalBadge(topic), null);
+  assert.equal(selectAssistantSignalBadge({}), null);
+});
+
+test("world layout carries assistant signals and inference into building records", () => {
+  const assistantSignals = { top: "alert", counts: { alert: 1, harvest: 0, ruin: 0 }, cards: [], ruinDays: null };
+  const layout = buildTycoonWorldLayout({ domains: [{ id: "indie-lab", topics: [{ id: "shop", name: "示例商城", assistantSignals, harvestInferred: true }] }] });
+  assert.equal(layout.workstations[0].assistantSignals, assistantSignals);
+  assert.equal(layout.workstations[0].harvestInferred, true);
 });
