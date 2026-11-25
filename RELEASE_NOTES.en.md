@@ -2,6 +2,30 @@
 
 > Plain-language English release notes for end users covering key additions, improvements, and fixes in each version. Keep this file in sync with `RELEASE_NOTES.md` whenever user-visible changes ship; the in-app "Version & Updates" modal loads it automatically for non-Chinese UI locales.
 
+## v0.2.7 (2026-11-25) — The Sprite Becomes Your Park Butler: Ask for Progress, Catch Stalled Work, Resume in One Tap
+
+Summary: The sprite in the 3D park is now a patrolling butler robot that answers "how far along is X", proactively flags work waiting on you, ready to harvest, or going stale, so you no longer have to dig through threads one by one.
+
+### Added
+
+- **Butler robot look**: A larger butler robot replaces the old sprite. Its face screen changes with its state (patrol, thinking, good news, worry, listening, and more), it patrols buildings that need attention, and tapping its speech bubble takes you straight there.
+- **Ask for progress in plain words**: Ask things like "how is the demo shop going" or "where is it stuck" in the sprite panel. It shows which threads, commits, and task cards it is checking, answers with where things stand first, then lists sources you can tap to open the thread or fly to the building. When a name is ambiguous it offers two candidates and remembers your pick.
+- **Building signal badges and work orders**: Each building label shows its most urgent mark: `!` waiting on you, `$` ready to harvest, a construction sign for stalled. Inferred-only cases show a faint dashed "$ likely harvest". Tap a mark to open a work-order card: resume (sent back to the original thread, never a new one), harvest, remind me later (8 AM tomorrow), park, or mark done.
+- **Park tour and catch-up**: On your first visit of the day, or after being away two hours or more, the sprite walks you through the buildings that need attention; if nothing does, it says one line and stays out of the way.
+- **HUD action counters**: New "waiting / harvest / stalled" counters in the HUD fly you to each building in turn. Lv, likely-harvest, running staff, overclock, and the rest of the game layer are all kept.
+- **Sprite memory**: Settings now list the line aliases the sprite has learned, with one-tap clear.
+
+### Improved
+
+- **Confirm-before-dispatch**: When you say "dispatch …", the sprite first restates who will do what on which line and only sends after you confirm; ordinary questions are no longer mistaken for dispatches.
+- **Stricter harvest signal**: Gold "harvest" lights up only when a thread contains a real delivery summary; stage-based guesses show "likely harvest" instead.
+- **An opening line with a point of view**: Opening the panel tells you which line deserves a look right now with one suggested action; quick prompts adapt to the selected building.
+- **Cleaner mobile layout**: The HUD fits on one row with quality, perspective, and stock-take tucked into "⋯"; the sprite opens as a bottom drawer that also holds the dispatch input.
+
+### Fixed
+
+- **No more stray background threads**: Internal threads used for automatic stock-takes and planning no longer show up in the thread list, search, or completion alerts, and don't count as running staff.
+
 ## v0.2.6 (2026-11-25) — Global Search, Human-Verify Panel, Codex Compatibility Mode, and Thread Polish
 
 Summary: Adds cross-thread global search and a "needs you in person" verification panel, a compatibility mode for Codex accounts restricted to the official client, and fixes a batch of thread-history, quota-display, and paste issues.

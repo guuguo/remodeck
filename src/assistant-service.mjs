@@ -7,17 +7,25 @@ export { computeTopicSignals } from "./assistant-signals.mjs";
 const topicsOf = (overview) => (overview.domains || []).flatMap((d) => d.topics || []);
 const error = (message, status = 400) => Object.assign(new Error(message), { status });
 const subjectOf = (text) => text.replace(/(?:做到哪.*|进度.*|卡在哪.*|怎么样.*|怎么解决.*|还有什么.*|呢[？?]?|[？?])$/g, "").replace(/^(?:请问|问一下|那个|这个)/, "").trim() || text;
+// Keep the verdict whole and shorten the line name instead (bubble ≤ 18 chars).
+const tourBubble = (name, verdict) => {
+  const room = 18 - Array.from(verdict).length - 1;
+  const chars = Array.from(String(name || ""));
+  return `${chars.length > room ? `${chars.slice(0, room - 1).join("")}…` : chars.join("")}：${verdict}`;
+};
 const normal = (s) => String(s || "").toLowerCase().replace(/[\p{P}\s]/gu, "");
 
 export class AssistantService {
   #tails = new Map();
-  constructor({ hub, getOverview, dataDir, env = process.env, now = () => Date.now(), vault = null, llm = null, llmOptions = {} } = {}) {
+  #reading = new Set();
+  constructor({ hub, getOverview, dataDir, env = process.env, now = () => Date.now(), vault = null, llm = null, llmOptions = {}, evidenceBudgetMs = 1500 } = {}) {
     this.hub = hub;
     this.getOverview = getOverview;
     this.dataDir = dataDir;
     this.env = env;
     this.now = now;
     this.vault = vault;
+    this.evidenceBudgetMs = evidenceBudgetMs;
     this.store = new AssistantStore(dataDir);
     this.llm = llm || new AssistantLLM({ dataDir, now, store: this.store, ...llmOptions });
   }
@@ -28,34 +36,43 @@ export class AssistantService {
     return root ? new MemoryVault(root, { now: () => new Date(this.now()) }) : null;
   }
 
+  // Reads each idle thread's last message once (cached by fingerprint). A cold
+  // start can mean hundreds of transcript reads, so the overview waits at most
+  // `evidenceBudgetMs`; unfinished reads keep going in the background and show
+  // up on the next overview refresh.
   async readThreadEvidence(threads = []) {
     const meta = this.hub?.listThreadsMeta?.() || {};
     const visible = threads.filter((t) => !t.internal && !meta[t.id]?.internal);
-    const out = new Array(visible.length);
-    let next = 0;
-    await Promise.all(Array.from({ length: Math.min(4, visible.length) }, async () => {
-      while (next < visible.length) {
-        const index = next++, t = visible[index];
-        if (t.live || t.pendingCount > 0 || t.turns || typeof this.hub?.readThread !== "function") {
-          this.#tails.delete(t.id);
-          out[index] = t;
-          continue;
-        }
-        const fingerprint = `${t.updatedAt}:${t.lastTurnStatus || ""}:${t.lastError || ""}`;
-        let cached = this.#tails.get(t.id);
-        if (cached?.fingerprint !== fingerprint) {
+    const canRead = typeof this.hub?.readThread === "function";
+    const fingerprintOf = (t) => `${t.updatedAt}:${t.lastTurnStatus || ""}:${t.lastError || ""}`;
+    const needsRead = (t) => canRead && !(t.live || t.pendingCount > 0 || t.turns);
+    const pending = visible.filter((t) => needsRead(t) && this.#tails.get(t.id)?.fingerprint !== fingerprintOf(t) && !this.#reading.has(t.id));
+    if (pending.length) {
+      for (const t of pending) this.#reading.add(t.id);
+      let next = 0;
+      const pool = Promise.all(Array.from({ length: Math.min(6, pending.length) }, async () => {
+        while (next < pending.length) {
+          const t = pending[next++];
           try {
             const result = await this.hub.readThread(t.id, { limit: 1, detail: "auto" });
-            cached = { fingerprint, tail: threadTail(result?.thread || {}), lastError: result?.thread?.lastError || "" };
-            this.#tails.set(t.id, cached);
-          } catch { cached = null; }
+            this.#tails.set(t.id, { fingerprint: fingerprintOf(t), tail: threadTail(result?.thread || {}), lastError: result?.thread?.lastError || "" });
+          } catch { /* unreadable transcript: no evidence */ } finally { this.#reading.delete(t.id); }
         }
-        out[index] = cached ? { ...t, assistantTail: cached.tail, lastError: t.lastError || cached.lastError } : t;
-      }
-    }));
+      }));
+      const budget = Number(this.evidenceBudgetMs);
+      if (Number.isFinite(budget) && budget >= 0) {
+        let timer;
+        await Promise.race([pool, new Promise((resolve) => { timer = setTimeout(resolve, budget); timer.unref?.(); })]);
+        clearTimeout(timer);
+      } else await pool;
+    }
     const ids = new Set(visible.map((t) => t.id));
     for (const id of this.#tails.keys()) if (!ids.has(id)) this.#tails.delete(id);
-    return out;
+    return visible.map((t) => {
+      if (!needsRead(t)) { this.#tails.delete(t.id); return t; }
+      const cached = this.#tails.get(t.id);
+      return cached?.fingerprint === fingerprintOf(t) ? { ...t, assistantTail: cached.tail, lastError: t.lastError || cached.lastError } : t;
+    });
   }
 
   async idleWip(topics) {
@@ -254,7 +271,7 @@ export class AssistantService {
       if (!cards.length) continue;
       const mark = SIGNAL_TYPES.find((type) => cards.some((c) => c.type === type));
       stops.push({ topicId: topic.id, topicTitle: topic.name, mark,
-        bubble: shortText(`${topic.name}：${mark === "alert" ? "等你拍板" : mark === "harvest" ? "有成品待验收" : "有任务久未推进"}`, 18), cards });
+        bubble: tourBubble(topic.name, mark === "alert" ? "等你拍板" : mark === "harvest" ? "有成品待验收" : "有任务久未推进"), cards });
     }
     stops.sort((a, b) => SIGNAL_TYPES.indexOf(a.mark) - SIGNAL_TYPES.indexOf(b.mark)
       || Math.min(...a.cards.filter((c) => c.type === a.mark).map((c) => timestamp(c.since))) - Math.min(...b.cards.filter((c) => c.type === b.mark).map((c) => timestamp(c.since))));

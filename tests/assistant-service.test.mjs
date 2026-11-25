@@ -259,3 +259,34 @@ test("历史问答模型只收到截断证据包，错误/超预算均回落", a
   assert.equal(exceeded.usedModel, false);
   assert.match(exceeded.text, /（未经模型整理）$/);
 });
+
+test("尾部只保留短摘录：工单句取交付句/末尾问句并去掉 Markdown", async () => {
+  const { threadTail } = await import("../src/assistant-signals.mjs");
+  const turn = (text) => ({ turns: [{ status: "completed", items: [{ type: "agentMessage", text }] }] });
+  const long = `是的，你感觉很准。\n\n### 本次已完成优化\n- 改为 **自定义下拉**\n- 测试全部通过\n${"补充说明。".repeat(200)}`;
+  const tail = threadTail(turn(long));
+  assert.ok(Array.from(tail.text).length <= 200, "摘录有上限，overview 不携带整段原文");
+  assert.equal(tail.evidence, "本次已完成优化");
+  assert.equal(harvestEvidenceForThread({ id: "codex:default:t1", assistantTail: tail }), "本次已完成优化");
+  const asking = threadTail(turn("先把结论放前面：示例商城已部署。\n\n需要我把改动推送到 main，还是等你确认？"));
+  assert.equal(asking.asking, true);
+  assert.equal(asking.question, "需要我把改动推送到 main，还是等你确认？");
+  assert.equal(threadTail(turn("评审结论：暂缓合入。已完成修复，测试全部通过。")).evidence, null);
+});
+
+test("冷启动读尾部受时间预算约束，未读完的在后台补齐", async () => {
+  const { AssistantService } = await import("../src/assistant-service.mjs");
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const hub = { async readThread(id) { await gate; return { thread: { id, turns: [{ status: "completed", items: [{ type: "agentMessage", text: "需要我继续吗？" }] }] } }; } };
+  const svc = new AssistantService({ hub, dataDir: "/tmp/unused-assistant-budget", evidenceBudgetMs: 20 });
+  const threads = [{ id: "codex:default:a", updatedAt: 1 }, { id: "codex:default:b", updatedAt: 1 }];
+  const started = Date.now();
+  const first = await svc.readThreadEvidence(threads);
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(first.some((t) => t.assistantTail), false);
+  release();
+  await new Promise((r) => setTimeout(r, 10));
+  const second = await svc.readThreadEvidence(threads);
+  assert.equal(second.every((t) => t.assistantTail?.asking), true);
+});

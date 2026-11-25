@@ -14,8 +14,48 @@ export function timestamp(value) {
 }
 export const isoTime = (value) => timestamp(value) ? new Date(timestamp(value)).toISOString() : undefined;
 
+// Strip the markdown syntax that leaks into one-line card text.
+export function plainText(value) {
+  return String(value || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s?)/gm, "")
+    .replace(/(\*\*|__|~~|`)/g, "")
+    .replace(/\s+/g, " ").trim();
+}
+
+const ASKING_RE = /[?？]\s*$|请选择|要不要|是否需要|请确认|which (?:one|option)|would you/i;
+const TAIL_TEXT_LIMIT = 200;
+const DELIVERY_RE = /已完成|已修复|已生成|已导出|已交付|已实现|已上线|已发布|产出|交付物|完成了|\b(?:implemented|delivered|exported|fixed|completed)\b/i;
+
+// Pick the sentence that carries the point (delivery claim / closing question)
+// instead of the message's opening pleasantries.
+function sentences(text) {
+  const parts = String(text || "").split(/\n+/).map(plainText).filter(Boolean)
+    .flatMap((line) => line.split(/(?<=[。！？!?；;])\s*/)).map((x) => x.trim()).filter(Boolean);
+  const out = [];
+  for (const part of parts) {
+    // "已上线并验证通过：" introduces the next line; keep them together.
+    if (out.length && /[:：]$/.test(out.at(-1))) out[out.length - 1] += part;
+    else out.push(part);
+  }
+  return out.filter((x) => x.length >= 4);
+}
+const sentenceWith = (text, re) => sentences(text).find((x) => re.test(x)) || "";
+const lastAsking = (text) => sentences(text).reverse().find((x) => ASKING_RE.test(x) || /[?？]$/.test(x)) || "";
+
+function harvestTextEvidence(raw) {
+  const text = String(raw || "").trim();
+  if (!text || /[?？]\s*$|请选择|要不要|是否需要|请确认|等你确认|等待确认|尚未|未(?:全部)?通过|未完成|未验收|未验证|暂缓|失败|报错|\b(?:failed|not completed|not passed|not verified)\b/i.test(text)) return null;
+  const delivery = DELIVERY_RE.test(text);
+  const review = /验收(?:已)?(?:通过|完成)|已验收|验证.*(?:通过|成功)|测试.*(?:通过|成功)|检查.*通过|全部通过|\b(?:tests? passed|verified|validation passed|reviewed)\b/i.test(text);
+  return delivery && review ? shortText(sentenceWith(text, DELIVERY_RE) || plainText(text), 160) : null;
+}
+
 // List previews often contain the first user request. Only transcript messages
 // establish who spoke last; tool output and reasoning never count as delivery.
+// The full message is classified once here and only a short excerpt is kept,
+// so overview payloads stay small.
 export function threadTail(thread = {}) {
   const turn = thread.turns?.at(-1);
   if (!turn) return thread.assistantTail || null;
@@ -23,20 +63,22 @@ export function threadTail(thread = {}) {
     ["agentMessage", "userMessage"].includes(item?.type) || ["assistant", "user"].includes(item?.role));
   if (!message) return null;
   const role = message.type === "agentMessage" ? "assistant" : message.type === "userMessage" ? "user" : message.role;
-  const text = message.text || (Array.isArray(message.content)
-    ? message.content.filter((p) => p.type === "text" || p.type === "input_text" || p.type === "output_text").map((p) => p.text || "").join("\n") : message.content) || "";
-  return { role, text: String(text), status: turn.status || "", error: Boolean(turn.error) };
+  const text = String(message.text || (Array.isArray(message.content)
+    ? message.content.filter((p) => p.type === "text" || p.type === "input_text" || p.type === "output_text").map((p) => p.text || "").join("\n") : message.content) || "");
+  return { role, text: shortText(plainText(text), TAIL_TEXT_LIMIT), status: turn.status || "", error: Boolean(turn.error),
+    asking: ASKING_RE.test(text.trim()), question: ASKING_RE.test(text.trim()) ? shortText(lastAsking(text), 80) : "",
+    evidence: harvestTextEvidence(text) };
+}
+
+export function isAskingTail(tail) {
+  return Boolean(tail && (typeof tail.asking === "boolean" ? tail.asking : ASKING_RE.test(String(tail.text || "").trim())));
 }
 
 export function harvestEvidenceForThread(thread = {}) {
   const tail = threadTail(thread);
   if (thread.internal || thread.live || thread.pendingCount > 0 || thread.queuedCount > 0 || thread.lastError || thread.lastTurnStatus === "failed"
     || !tail || tail.role !== "assistant" || tail.error || tail.status !== "completed") return null;
-  const text = tail.text.trim();
-  if (!text || /[?？]\s*$|请选择|要不要|是否需要|请确认|等你确认|等待确认|尚未|未(?:全部)?通过|未完成|未验收|未验证|失败|报错|\b(?:failed|not completed|not passed|not verified)\b/i.test(text)) return null;
-  const delivery = /已完成|已修复|已生成|已导出|已交付|已实现|已上线|已发布|产出|交付物|完成了|\b(?:implemented|delivered|exported|fixed|completed)\b/i.test(text);
-  const review = /验收(?:已)?(?:通过|完成)|已验收|验证.*(?:通过|成功)|测试.*(?:通过|成功)|检查.*通过|全部通过|\b(?:tests? passed|verified|validation passed|reviewed)\b/i.test(text);
-  return delivery && review ? shortText(text, 160) : null;
+  return tail.evidence !== undefined ? tail.evidence : harvestTextEvidence(tail.text);
 }
 
 export function threadSource(thread, topicId) {
@@ -80,8 +122,8 @@ export function computeTopicSignals(topic, { now = Date.now(), cardState = {}, i
     } else if (harvestEvidenceForThread(t)) {
       type = "harvest"; line = harvestEvidenceForThread(t);
     } else if (!t.live && at && now - at >= 3 * DAY && tail?.role === "assistant"
-      && /[?？]\s*$|请选择|要不要|是否需要|请确认|which (?:one|option)|would you/i.test(tail.text.trim())) {
-      type = "ruin"; line = tail.text;
+      && isAskingTail(tail)) {
+      type = "ruin"; line = tail.question || lastAsking(tail.text) || plainText(tail.text);
     }
     if (!type || !at) continue;
     candidates.push({ id: `${type}:${t.id}`, topicId: topic.id, type, title: shortText(t.title, 24), line: shortText(line, 40),

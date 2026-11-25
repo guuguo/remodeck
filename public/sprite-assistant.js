@@ -159,9 +159,14 @@ export function captureSpriteOverviewSnapshot(overview, threads = []) {
 export function buildSpriteOpeningBriefing(overview, threads = []) {
   const topics = overview?.domains?.flatMap((d) => d.topics || []) || [];
   const snap = captureSpriteOverviewSnapshot(overview, threads);
-  const alert = topics.find((tp) => tp.assistantSignals?.counts?.alert > 0);
-  const harvest = topics.find((tp) => tp.assistantSignals?.counts?.harvest > 0 || tp.pipeline?.readyToHarvest);
-  const ruin = topics.find((tp) => tp.assistantSignals?.counts?.ruin > 0);
+  // Same order as the park tour: oldest open work order of the type first.
+  const firstWith = (type) => {
+    const since = (tp) => Math.min(...(tp.assistantSignals?.cards || []).filter((c) => c.type === type).map((c) => Date.parse(c.since) || Infinity), Infinity);
+    return topics.filter((tp) => tp.assistantSignals?.counts?.[type] > 0).sort((a, b) => since(a) - since(b))[0];
+  };
+  const alert = firstWith("alert");
+  const harvest = firstWith("harvest") || topics.find((tp) => tp.pipeline?.readyToHarvest);
+  const ruin = firstWith("ruin");
   const oldest = [...topics].sort((a, b) => topicActivityAt(a) - topicActivityAt(b))[0];
   const pending = snap && [...snap.pendingByThread.values()][0];
   const topic = alert || (pending && topics.find((tp) => tp.activeThreads?.some((th) => th.id === pending.id))) || harvest || ruin || oldest;

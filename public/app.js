@@ -119,8 +119,8 @@ import {
   normalizeDraftCwdInput,
   renderNewThreadCwdListHtml,
 } from "./new-thread-cwd.js?v=20261125cwd1";
-import { renderMissionOverviewHtml, renderTycoonHudHtml } from "./mission-overview.js?v=20261119preserve";
-import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261123daylight";
+import { renderMissionOverviewHtml, renderTycoonHudHtml } from "./mission-overview.js?v=20261125sa1";
+import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261125sa1";
 import {
   buildSpriteOpeningBriefing,
   buildSpriteQueryReply,
@@ -136,7 +136,7 @@ import {
   spriteTomorrowAtEight,
   renderSpriteAssistantHtml,
   saveSpritePrefs,
-} from "./sprite-assistant.js?v=20261119spritevoice";
+} from "./sprite-assistant.js?v=20261125sa2";
 import {
   captureSubtreeUiState,
   replaceHtmlPreservingUiState,
