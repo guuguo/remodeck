@@ -284,7 +284,9 @@ test("MissionOverviewService reflects cross-workspace threads, reverse-slices mu
 
     assert.equal(byId["translator-app"].activeThreads.some((t) => t.id === "antigravity:desktop:t1"), true);
     assert.equal(byId["translator-app"].pipeline.stageIndex >= 4, true);
-    assert.equal(byId["translator-app"].pipeline.readyToHarvest, true);
+    assert.equal(byId["translator-app"].pipeline.readyToHarvest, false);
+    assert.equal(byId["translator-app"].pipeline.harvestInferred, true);
+    assert.equal(byId["translator-app"].pipeline.harvestEvidence, null);
     assert.equal(byId["translator-app"].valueLedger.status, "active");
     assert.equal(byId["translator-app"].valueLedger.nextReview, "2026-11-28");
 

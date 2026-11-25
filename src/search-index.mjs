@@ -6,6 +6,7 @@ import { Worker } from "node:worker_threads";
 import { parseCompositeThreadId } from "./composite-id.mjs";
 import { extractMatchSnippet } from "./search-extractors.mjs";
 import { normalizeProjectCwd } from "./thread-meta-store.mjs";
+import { isInternalAssistantThread } from "./assistant-signals.mjs";
 
 const WORKER_FILE = fileURLToPath(new URL("./search-index-worker.mjs", import.meta.url));
 const MAX_SEARCH_TERMS = 6;
@@ -565,6 +566,7 @@ export class SearchIndexService {
         aliasCwdsByTerm,
         this.#metaStore,
       );
+      if (isInternalAssistantThread(applied)) continue;
       if (archived === "0" && applied.archived) continue;
       if (archived === "1" && !applied.archived) continue;
 

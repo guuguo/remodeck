@@ -14,6 +14,8 @@ import {
 } from "./platform.mjs";
 import { claudeEnvironment, claudeExecutable, readClaudeCliAuthStatus } from "./providers/claude-runner.mjs";
 import { resolveProviderExecutables } from "./providers/profile-discovery.mjs";
+import { AssistantService } from "./assistant-service.mjs";
+import { harvestEvidenceForThread, isInternalAssistantThread, threadTail } from "./assistant-signals.mjs";
 
 export const DOMAINS_SCHEMA_VERSION = 3;
 export const DEFAULT_OVERVIEW_COOLDOWN_MS = 30 * 60 * 1000;
@@ -227,9 +229,7 @@ export function isScratchNoiseCwd(cwd = "") {
 }
 
 export function isInternalOverviewThread(thread = {}) {
-  const cwd = String(thread?.cwd || "").replace(/\\/g, "/");
-  const title = String(thread?.title || "");
-  return /\/overview-worker(?:\/|$)/i.test(cwd) || /^\[MISSION_OVERVIEW_WORKER\]/i.test(title);
+  return isInternalAssistantThread(thread);
 }
 
 export function inferStageTag(thread = {}, topic = null) {
@@ -371,16 +371,17 @@ export function classifyThreadRuleBased(thread = {}, topics = DEFAULT_MISSION_TO
 }
 
 export function inferPipelineStage(topic, activeThreads = [], gitSnap = null, cachedSummary = null) {
+  const harvestEvidence = activeThreads.map(harvestEvidenceForThread).find(Boolean) || null;
   const aiStage = Number(cachedSummary?.stageIndex);
   if (Number.isInteger(aiStage) && aiStage >= 1 && aiStage <= 5) {
     const stageMeta = PIPELINE_STAGES.find((s) => s.index === aiStage) || PIPELINE_STAGES[1];
-    const readyToHarvest = typeof cachedSummary?.readyToHarvest === "boolean"
-      ? cachedSummary.readyToHarvest
-      : (aiStage >= 4 || (topic.yieldType === "coin" && aiStage >= 3 && activeThreads.length > 0));
+    const readyToHarvest = aiStage >= 4 || (topic.yieldType === "coin" && aiStage >= 3 && activeThreads.length > 0);
     return {
       stageIndex: aiStage,
       stageLabel: stageMeta.label,
-      readyToHarvest,
+      readyToHarvest: Boolean(harvestEvidence),
+      harvestEvidence,
+      harvestInferred: !harvestEvidence && readyToHarvest,
       bottleneck: cachedSummary?.bottleneck || "",
     };
   }
@@ -418,7 +419,9 @@ export function inferPipelineStage(topic, activeThreads = [], gitSnap = null, ca
   return {
     stageIndex,
     stageLabel: stageMeta.label,
-    readyToHarvest,
+    readyToHarvest: Boolean(harvestEvidence),
+    harvestEvidence,
+    harvestInferred: !harvestEvidence && readyToHarvest,
     bottleneck,
   };
 }
@@ -868,6 +871,7 @@ export class MissionOverviewService {
     runAiImpl = null,
     collectGitImpl = null,
     env = process.env,
+    assistantOptions = {},
   } = {}) {
     this.#hub = hub;
     this.#dataDir = dataDir;
@@ -883,6 +887,7 @@ export class MissionOverviewService {
     this.#runAiImpl = typeof runAiImpl === "function" ? runAiImpl : null;
     this.#collectGitImpl = typeof collectGitImpl === "function" ? collectGitImpl : collectRepoGitSnapshot;
     this.#env = env;
+    this.assistant = new AssistantService({ hub, dataDir, env, getOverview: () => this.getOverview({ trigger: "assistant" }), ...assistantOptions });
   }
 
   async #ensureLoaded() {
@@ -1294,7 +1299,7 @@ export class MissionOverviewService {
     const topicById = new Map(this.#topics.map((t) => [t.id, t]));
 
     const cleanThreads = (Array.isArray(rawThreads) ? rawThreads : [])
-      .filter((t) => t && t.id && !t.archived && !isInternalOverviewThread(t));
+      .filter((t) => t && t.id && !t.archived && !metaMap[t.id]?.internal && !isInternalOverviewThread(t));
 
     const topicBuckets = new Map();
     for (const topic of this.#topics) {
@@ -1346,6 +1351,9 @@ export class MissionOverviewService {
         pendingCount: Number(t.pendingCount) || 0,
         queuedCount: Number(t.queuedCount) || 0,
         goalState: t.goalState || null,
+        assistantTail: threadTail(t),
+        lastError: t.lastError || "",
+        lastTurnStatus: t.lastTurnStatus || "",
         topicId: assignment.topicId,
         stage: assignment.stage,
         assignmentSource: assignment.source,
@@ -1471,6 +1479,9 @@ export class MissionOverviewService {
               agentAffinity: computeAgentAffinity(primaryOnly, bucket.archived).slice(0, 3),
               agentPref: String(this.#cache.topicAgentPrefs?.[topic.id]?.agentKey || ""),
               pipeline,
+              readyToHarvest: pipeline.readyToHarvest,
+              harvestEvidence: pipeline.harvestEvidence,
+              harvestInferred: pipeline.harvestInferred,
               valueLedger: valueEntry,
               metrics,
               archiveDigest: this.#contextsStore.topics?.[topic.id] || null,
@@ -1647,7 +1658,7 @@ export class MissionOverviewService {
     const listRes = typeof this.#hub?.listThreads === "function"
       ? await this.#hub.listThreads({ includeArchived: false })
       : { threads: [] };
-    const rawThreads = listRes?.threads || [];
+    const rawThreads = await this.assistant.readThreadEvidence((listRes?.threads || []).filter((t) => !isInternalOverviewThread(t)));
     if (this.#topics.length === 0 && rawThreads.length > 0) {
       await this.#discoverTopicsFromThreads(rawThreads);
     }
@@ -1670,7 +1681,7 @@ export class MissionOverviewService {
       snapshot.meta.summarizing = true;
     }
 
-    return snapshot;
+    return this.assistant.decorateOverview(snapshot);
   }
 
   async triggerRefresh({
@@ -2871,6 +2882,8 @@ export class MissionOverviewService {
       effort: "low",
       text: `[MISSION_OVERVIEW_WORKER]\n${prompt}`,
       permissionMode: "plan",
+      internal: true,
+      memoryBrief: false,
     });
     const tid = String(started?.thread?.id || "").trim();
     if (!tid) throw new Error("Antigravity 未返回会话 ID");

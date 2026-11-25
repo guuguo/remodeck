@@ -606,6 +606,51 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/assistant/ask" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const streaming = String(request.headers.accept || "").includes("application/x-ndjson");
+        const writeLine = (value) => {
+          if (!response.headersSent) {
+            response.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
+          }
+          response.write(`${JSON.stringify(value)}\n`);
+        };
+        try {
+          const result = await overviewService.assistant.ask(body, {
+            onTrace: streaming ? (item) => writeLine({ type: "trace", ...item }) : undefined,
+          });
+          if (streaming) {
+            const { trace: _trace, ...answer } = result;
+            writeLine({ type: "answer", ...answer });
+            response.end();
+          } else sendJson(response, 200, result, { requestId });
+        } catch (error) {
+          if (!response.headersSent) throw error;
+          writeLine({ type: "error", message: error.message || "检索失败" });
+          response.end();
+        }
+        return;
+      }
+
+      if (pathname === "/api/assistant/tour" && request.method === "GET") {
+        sendJson(response, 200, await overviewService.assistant.tour({ since: url.searchParams.get("since") || "" }), { requestId });
+        return;
+      }
+      if (pathname === "/api/assistant/profile" && ["GET", "DELETE"].includes(request.method)) {
+        const result = request.method === "DELETE" ? await overviewService.assistant.clearProfile() : await overviewService.assistant.profile();
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+      if (pathname === "/api/assistant/profile/aliases" && request.method === "POST") {
+        sendJson(response, 200, await overviewService.assistant.addAlias(await readJsonBody(request)), { requestId });
+        return;
+      }
+      const assistantCardAction = pathname.match(/^\/api\/assistant\/cards\/([^/]+)\/action$/);
+      if (assistantCardAction && request.method === "POST") {
+        sendJson(response, 200, await overviewService.assistant.cardAction(decodeURIComponent(assistantCardAction[1]), await readJsonBody(request)), { requestId });
+        return;
+      }
+
       if (pathname === "/api/overview/refresh" && request.method === "POST") {
         const body = await readJsonBody(request);
         await overviewService.triggerRefresh({

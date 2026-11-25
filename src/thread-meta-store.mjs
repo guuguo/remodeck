@@ -431,6 +431,7 @@ export function createThreadMetaStore({
       if (!compositeId) return null;
       const prev = state.threads[compositeId] || {};
       const next = { ...prev, updatedAt: Math.floor(Date.now() / 1000) };
+      if (typeof patch.internal === "boolean") next.internal = patch.internal;
       if (typeof patch.model === "string" && patch.model.trim()) {
         next.model = patch.model.trim();
       }
@@ -513,6 +514,7 @@ export function createThreadMetaStore({
         titleSchemaVersion: Number(meta.titleSchemaVersion) || 0,
         archived: Boolean(meta.archived ?? thread.archived),
         pinned: Boolean(meta.pinned),
+        ...(meta.internal ? { internal: true } : {}),
         ...(meta.cwd ? { cwd: meta.cwd } : {}),
         ...(meta.model ? { model: meta.model } : {}),
         ...(meta.reasoningEffort ? { reasoningEffort: meta.reasoningEffort } : {}),

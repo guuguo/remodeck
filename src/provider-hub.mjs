@@ -60,6 +60,7 @@ import { GrokProvider } from "./providers/grok-provider.mjs";
 import { QuotaService } from "./quota-service.mjs";
 import { AgentTelemetryService } from "./telemetry-service.mjs";
 import { isRecoverableToolExecutionError } from "./tool-errors.mjs";
+import { isInternalAssistantThread } from "./assistant-signals.mjs";
 
 function extractLastAgentMessageFromCodexParams(params) {
   if (typeof params?.turn?.lastAgentMessage === "string") return params.turn.lastAgentMessage;
@@ -943,6 +944,8 @@ export class ProviderHub {
   }
 
   #broadcast(event, data) {
+    const threadId = data?.threadId || data?.thread?.id || data?.request?.threadId;
+    if ((threadId && this.#metaStore.get(threadId)?.internal) || isInternalAssistantThread(data?.thread || {})) return;
     const safePayload = sanitizeEventForSse(event, data);
     for (const listener of this.#sseListeners) {
       try {
@@ -1994,6 +1997,7 @@ export class ProviderHub {
     });
 
     const filtered = allThreads.filter((t) => {
+      if (isInternalAssistantThread(t)) return false;
       if (archived === "all") return true;
       if (archived === "1") return Boolean(t.archived);
       return !t.archived;
@@ -2099,6 +2103,7 @@ export class ProviderHub {
       if (isInternalSubagentThread(base) || isInternalVoiceCallThread(base)) continue;
       seenIds.add(base.id);
       const enriched = this.#enrichThread(base);
+      if (isInternalAssistantThread(enriched)) continue;
       if (archived === "0" && enriched.archived) continue;
       if (archived === "1" && !enriched.archived) continue;
       threads.push({
@@ -2116,6 +2121,7 @@ export class ProviderHub {
         if (provider && provider !== "all" && forkEntry.provider !== provider) continue;
         if (profileId && profileId !== "all" && forkEntry.profileId !== profileId) continue;
         const enriched = this.#enrichThread(forkEntry);
+        if (isInternalAssistantThread(enriched)) continue;
         if (archived === "0" && enriched.archived) continue;
         if (archived === "1" && !enriched.archived) continue;
         const normCwd = normalizeProjectCwd(enriched.cwd) || enriched.cwd;
@@ -2593,6 +2599,7 @@ export class ProviderHub {
     goalMode = false,
     memoryBrief = true,
     memoryTopic = "",
+    internal = false,
   } = {}) {
     const impl = this.getProvider(provider);
     const cleanPerm = normalizePermissionMode(permissionMode);
@@ -2604,8 +2611,10 @@ export class ProviderHub {
       res = await impl.startThread({
         profileId,
         cwd,
-        text: brief ? `${text}\n\n---\n${brief}` : text,
-        images,
+        // Internal workers are created idle, labelled, and only then sent a
+        // turn. Even a synchronous completion cannot escape the SSE filter.
+        text: internal ? "" : brief ? `${text}\n\n---\n${brief}` : text,
+        images: internal ? [] : images,
         model,
         effort,
         permissionMode: cleanPerm,
@@ -2622,14 +2631,19 @@ export class ProviderHub {
     }
     const explicitCwd = String(cwd || "").trim() ? (res.thread.cwd || cwd) : "";
     await this.#metaStore.setThreadPrefs(res.thread.id, {
+      ...(internal ? { internal: true } : {}),
       ...(explicitCwd ? { cwd: explicitCwd } : {}),
       ...(model || res.thread.model ? { model: model || res.thread.model } : {}),
       ...(effort ? { reasoningEffort: effort } : {}),
       permissionMode: cleanPerm,
     });
+    if (internal && (cleanText || images.length)) {
+      const sent = await this.sendTurn({ threadId: res.thread.id, cwd, text: cleanText, images, model, effort, permissionMode: cleanPerm });
+      return { ...sent, thread: this.#enrichThread({ ...res.thread, ...sent.thread }) };
+    }
     this.#executionStats.context(res.thread.id, res.turn?.id || "", {
       model: model || res.thread.model || "", effort: effort || res.thread.reasoningEffort || "",
-      internal: isInternalVoiceCallThread({ cwd: explicitCwd || res.thread.cwd || cwd, preview: cleanText }), goalMode: useGoal,
+      internal: internal || isInternalVoiceCallThread({ cwd: explicitCwd || res.thread.cwd || cwd, preview: cleanText }), goalMode: useGoal,
     });
     const appliedStart = this.#metaStore.applyToThread({
       ...res.thread,
@@ -2991,7 +3005,7 @@ export class ProviderHub {
     this.#clearFollowUpUserInputRequestsForThread(threadId);
     if (!res.steered) this.#executionStats.context(threadId, res.turn?.id || "", {
       model: effectiveModel || res.thread?.model || "", effort: effectiveEffort || res.thread?.reasoningEffort || "",
-      internal: isInternalVoiceCallThread({ cwd: res.thread?.cwd || effectiveCwd, preview: cleanText }),
+      internal: Boolean(savedPrefs?.internal) || isInternalVoiceCallThread({ cwd: res.thread?.cwd || effectiveCwd, preview: cleanText }),
       goalMode: useGoal || this.#goalController.get(threadId)?.active,
     });
     if (res.turn?.id) {
