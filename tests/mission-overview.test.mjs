@@ -342,7 +342,7 @@ test("MissionOverviewService reflects cross-workspace threads, reverse-slices mu
     assert.match(hudHtml, /左键按住拖拽平移地图/);
     assert.match(hudHtml, /YT 粉丝数/);
     assert.match(hudHtml, /\$428/);
-    assert.equal(/\p{Extended_Pictographic}/u.test(hudHtml), false);
+    assert.equal(/\p{Extended_Pictographic}/u.test(hudHtml.replaceAll("🚧", "")), false);
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
   }
@@ -1255,4 +1255,13 @@ test("AI-assisted sprite dispatch plans semantic splits, chat-only replies, appr
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
   }
+});
+
+test("HUD assistant badges render counts and dim zero badges while preserving original controls", () => {
+  const overview = { domains: [], topics: [], assistantBadges: { alert: 2, harvest: 3, ruin: 0 } };
+  const html = renderTycoonHudHtml(overview);
+  assert.match(html, /data-assistant-badge="alert"[^>]*>[\s\S]*?<strong>2<\/strong>/);
+  assert.match(html, /data-assistant-badge="harvest"[^>]*>[\s\S]*?<strong>3<\/strong>/);
+  assert.match(html, /is-ruin is-empty/);
+  for (const selector of ["tycoon-lv-crest", "data-tycoon-fly-harvest", "data-tycoon-fly-live", "data-tycoon-open-incubator", "data-tycoon-toggle-vis", "tycoonHudMore"]) assert.ok(html.includes(selector), selector);
 });

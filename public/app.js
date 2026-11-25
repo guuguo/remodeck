@@ -1,4 +1,5 @@
-import { apiGet, apiPost, apiUrl, isDemoMode } from "./api-client.js?v=20261118demo";
+import { t } from "./i18n.js";
+import { apiGet, apiPost, apiRequest, apiUrl, isDemoMode } from "./api-client.js?v=20261118demo";
 import { initHumanVerifyOverlay } from "./human-verify.js?v=20261125hv1";
 import {
   autoPreviewThreadImages,
@@ -128,6 +129,11 @@ import {
   classifySpriteUserInput,
   diffSpriteOverviewEvents,
   loadSpritePrefs,
+  askSpriteAssistant,
+  appendSpriteTurn,
+  buildSpriteContext,
+  submitSpriteDispatch,
+  spriteTomorrowAtEight,
   renderSpriteAssistantHtml,
   saveSpritePrefs,
 } from "./sprite-assistant.js?v=20261119spritevoice";
@@ -637,6 +643,11 @@ const state = {
     prevTtsPref: null,
     transcribing: false,
     draft: "",
+    turns: [],
+    focusStack: [],
+    cards: [],
+    tour: null,
+    continueDrafts: {},
     greetedSession: false,
     prevSnapshot: null,
     mic: {
@@ -3012,6 +3023,8 @@ function ensureTycoon3DMounted(boardEl) {
     spriteMountEl = $("spriteAssistantMount");
     tycoon3dInstance = createTycoon3DWorld(viewportEl, {
       onSelectTopic: (topicId) => {
+        state.sprite.scopedTopicId = topicId;
+        state.sprite.scopedTopicName = findOverviewTopicById(topicId)?.name || topicId;
         state.tycoonSelectedTopicId = topicId;
         state.tycoonInspectorMode = "topic";
         renderProjectBoard();
@@ -3027,6 +3040,8 @@ function ensureTycoon3DMounted(boardEl) {
         state.tycoonSelectedTopicId = "";
         renderProjectBoard();
       },
+      onSignalBadgeClick: (topicId, type) => openSpriteCards(topicId, type),
+      onSpriteBubbleClick: (topicId) => openSpriteCards(topicId),
       onSelectSprite: () => {
         toggleSpriteAssistant({ open: true });
       },
@@ -3062,6 +3077,7 @@ function renderProjectBoard() {
   if (!boardEl) return;
   const shouldShowBoard = isBoardViewActive();
   syncImmersiveDeckBodyClass();
+  if (!shouldShowBoard || state.boardViewMode !== "tycoon3d" || state.scopedProjectCwd) noteSpriteParkLeave();
   if (!shouldShowBoard) {
     tycoon3dInstance?.pause?.();
     if (state.sprite.recording || state.sprite.handsFree) {
@@ -3136,6 +3152,7 @@ function renderProjectBoard() {
       $("moSparkInput").value = savedSparkVal;
     }
     syncSpriteWithOverview(state.missionOverview);
+    void maybeStartSpriteTour();
     renderSpriteAssistantMount();
   } else if (state.boardViewMode === "overview" && !state.scopedProjectCwd) {
     if (tycoon3dInstance) {
@@ -9406,8 +9423,11 @@ function renderSpriteAssistantMount() {
     || state.sprite.pendingReorg,
   );
   const badgeCount = state.sprite.unreadCount + (hasPendingCard ? 1 : 0);
+  state.sprite.context = buildSpriteContext(findOverviewTopicById(state.sprite.scopedTopicId || state.tycoonSelectedTopicId), state.missionOverview);
+  tycoon3dInstance?.setUserBusy?.(is3d && (state.sprite.open || state.sprite.busy || state.sprite.recording));
+  if (state.sprite.recording) tycoon3dInstance?.setSpriteMood?.("listening");
   const effMood = hasPendingCard ? "coin" : state.sprite.mood;
-  tycoon3dInstance?.syncSpriteState?.({ badgeCount: state.sprite.open ? 0 : badgeCount, mood: effMood });
+  if (!tycoon3dInstance?.setSpriteMood) tycoon3dInstance?.syncSpriteState?.({ badgeCount: state.sprite.open ? 0 : badgeCount, mood: effMood });
   if (!mount || !is3d) {
     if (mount) {
       mount.hidden = true;
@@ -9436,6 +9456,10 @@ function renderSpriteAssistantMount() {
     state.sprite.draft = liveInput.value;
   }
 
+  for (const input of mount.querySelectorAll("[data-sprite-continue-message]")) {
+    state.sprite.continueDrafts ||= {};
+    state.sprite.continueDrafts[input.dataset.spriteContinueMessage] = input.value;
+  }
   const wasOpen = Boolean(mount._acSpriteWasOpen);
   const prevToastText = mount._acPrevToastText || "";
   const curToastText = !state.sprite.open && state.sprite.toastBubble?.text ? String(state.sprite.toastBubble.text) : "";
@@ -9509,6 +9533,7 @@ function pushSpriteMessage({
   spokenText = "",
   chips = [],
   popToast = false,
+  sources = [], actions = [], candidates = [], originalText = "", trace = null,
 } = {}) {
   const cleanText = String(text || "").trim();
   if (!cleanText) return;
@@ -9518,6 +9543,7 @@ function pushSpriteMessage({
     tone,
     text: cleanText,
     chips: Array.isArray(chips) ? chips : [],
+    sources, actions, candidates, originalText, trace,
   });
   if (state.sprite.messages.length > 24) {
     state.sprite.messages = state.sprite.messages.slice(-24);
@@ -9536,7 +9562,7 @@ function pushSpriteMessage({
     }
   }
   renderSpriteAssistantMount();
-  if (role === "sprite" && state.sprite.ttsEnabled) {
+  if (role === "sprite" && !trace && state.sprite.ttsEnabled) {
     void speakSpriteText(spokenText || cleanText);
   }
 }
@@ -9788,11 +9814,7 @@ async function requestSpriteDispatchPreview({ instruction = "", topicId = "", ag
       model: effectiveModel,
       inheritContext: state.dispatchInheritContext !== false,
     };
-    const res = await apiPost("/api/overview/dispatch", {
-      ...payload,
-      confirmOnly: true,
-      useAiPlanner: true,
-    });
+    const res = await submitSpriteDispatch(payload);
     if (res?.chatOnly) {
       const replyText = String(res.reply || "我在听，请告诉我你想安排的具体任务或项目。").trim();
       pushSpriteMessage({
@@ -9819,22 +9841,8 @@ async function requestSpriteDispatchPreview({ instruction = "", topicId = "", ag
       aiModel: String(res?.aiModel || "").trim(),
       reply: String(res?.reply || "").trim(),
     };
-    const first = routes[0];
-    const agentDesc = first.agentLabel || first.providerLabel || first.provider || "自动匹配账号";
-    const actDesc = first.action === "reuse_clean" ? "复用干净工位" : "新开并发分身";
-    const aiReply = String(res?.reply || "").trim();
-    const fallbackSummary = routes.length === 1
-      ? `已生成派工预览：将派往「${first.topicName}」（${agentDesc} · ${actDesc}）。请点下方「确认派出」或直接说「确认」。`
-      : `已拆分为 ${routes.length} 条并发派工预览（首单「${first.topicName}」· ${agentDesc}）。请确认后派出。`;
-    const summaryText = aiReply || fallbackSummary;
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "coin",
-      text: summaryText,
-      spokenText: aiReply || (routes.length === 1
-        ? `已生成派工预览，将派往${first.topicName}，使用${agentDesc}。请确认是否派出。`
-        : `已生成 ${routes.length} 条派工预览，请确认是否派出。`),
-    });
+    // The concrete confirmation sentence is rendered for every planned route.
+    renderSpriteAssistantMount();
   } catch (error) {
     pushSpriteMessage({
       role: "sprite",
@@ -9868,11 +9876,7 @@ async function confirmSpriteDispatchPreview() {
   state.sprite.busy = true;
   renderSpriteAssistantMount();
   try {
-    const res = await apiPost("/api/overview/dispatch", {
-      ...payload,
-      confirmOnly: false,
-      approvedRoutes: routes,
-    });
+    const res = await submitSpriteDispatch(payload, { confirmed: true, routes });
     state.sprite.pendingPreview = null;
     state.lastDispatchReceipt = res;
     if (res?.overview) {
@@ -9987,6 +9991,136 @@ async function confirmSpriteReorgPreview() {
   }
 }
 
+async function requestSpriteAnswer(text) {
+  state.sprite.busy = true;
+  tycoon3dInstance?.setSpriteMood?.("thinking");
+  renderSpriteAssistantMount();
+  const traceMessages = [];
+  try {
+    const answer = await askSpriteAssistant({ text,
+      contextTopicId: state.sprite.scopedTopicId || state.tycoonSelectedTopicId || undefined,
+      history: state.sprite.turns.slice(-6), focus: state.sprite.focusStack,
+    }, (trace) => {
+      const icons = { resolve: "🔎", threads: "📂", commits: "🔀", wip: "📌", memory: "📌", compose: "✍️" };
+      tycoon3dInstance?.setSpriteMood?.("thinking", { bubble: trace.label });
+      pushSpriteMessage({ text: `${icons[trace.step] || "🔎"} ${trace.label}`, trace });
+      traceMessages.push(state.sprite.messages.at(-1));
+    });
+    const kinds = { threads: "thread", commits: "commit", wip: "wip", memory: "memory" };
+    for (const message of traceMessages) message.sources = (answer.sources || []).filter((source) => source.kind === kinds[message.trace.step]);
+    if (answer.kind !== "clarify") Object.assign(state.sprite, appendSpriteTurn(state.sprite, text, answer));
+    pushSpriteMessage({ text: answer.text, sources: answer.sources, actions: (answer.actions || []).filter((action) => answer.kind !== "clarify" || action.type !== "clarify_pick"),
+      candidates: answer.kind === "clarify" ? answer.candidates : [], originalText: text,
+      tone: answer.mood || "report" });
+    // Keep the alias supplied by the server alongside the displayed candidates.
+    state.sprite.messages.at(-1).clarifyAlias = answer.actions?.find((action) => action.type === "clarify_pick")?.payload?.alias || text;
+    if (answer.focusTopicId) await tycoon3dInstance?.spriteVisit?.(answer.focusTopicId);
+    tycoon3dInstance?.setSpriteMood?.(answer.mood || "report");
+  } catch (error) {
+    pushSpriteMessage({ text: t("问答暂时不可用：{error}", { error: formatActionError(error) }), tone: "worry" });
+    tycoon3dInstance?.setSpriteMood?.("worry");
+  } finally { state.sprite.busy = false; renderSpriteAssistantMount(); }
+}
+
+function openSpriteCards(topicId, type) {
+  const topic = findOverviewTopicById(topicId);
+  state.sprite.cards = (topic?.assistantSignals?.cards || []).filter((card) => !type || card.type === type);
+  state.sprite.continueDrafts = {};
+  state.sprite.scopedTopicId = topicId || "";
+  state.sprite.scopedTopicName = topic?.name || "";
+  toggleSpriteAssistant({ open: true });
+}
+
+async function actOnSpriteCard(cardId, type) {
+  if (state.sprite.busy) return;
+  const card = state.sprite.cards.find((entry) => entry.id === cardId)
+    || state.missionOverview?.domains?.flatMap((d) => d.topics || []).flatMap((tp) => tp.assistantSignals?.cards || []).find((entry) => entry.id === cardId);
+  if (!card) return;
+  if (type === "continue") {
+    if (!state.sprite.cards.some((entry) => entry.id === cardId)) state.sprite.cards = [card];
+    renderSpriteAssistantMount();
+    return;
+  }
+  const input = [...document.querySelectorAll("[data-sprite-continue-message]")].find((entry) => entry.dataset.spriteContinueMessage === cardId);
+  const message = type === "send_continue" ? (input?.value ?? state.sprite.continueDrafts?.[cardId] ?? "").trim() : undefined;
+  if (type === "send_continue" && !message) return;
+  state.sprite.busy = true;
+  renderSpriteAssistantMount();
+  try {
+    const result = await apiPost(`/api/assistant/cards/${encodeURIComponent(cardId)}/action`, {
+      type: type === "send_continue" ? "continue" : type,
+      ...(type === "snooze" ? { until: spriteTomorrowAtEight() } : {}), ...(message ? { message } : {}),
+    });
+    state.sprite.cards = state.sprite.cards.filter((entry) => entry.id !== cardId);
+    if (type === "harvest" && result.threadId) await selectThread(result.threadId);
+    void loadMissionOverview({ trigger: "assistant-action" });
+  } catch (error) { pushSpriteMessage({ text: formatActionError(error), tone: "worry" }); }
+  finally { state.sprite.busy = false; renderSpriteAssistantMount(); }
+}
+
+let spriteTourPending = false;
+let spriteParkVisible = false;
+const SPRITE_LAST_SEEN_KEY = "agentControl.sprite.lastSeenAt";
+async function maybeStartSpriteTour() {
+  if (!state.missionOverview || spriteTourPending || spriteParkVisible || document.hidden) return;
+  spriteParkVisible = true;
+  const now = new Date();
+  let previous = null;
+  try { previous = localStorage.getItem(SPRITE_LAST_SEEN_KEY); localStorage.setItem(SPRITE_LAST_SEEN_KEY, now.toISOString()); } catch {}
+  const previousAt = new Date(previous || 0);
+  const firstToday = previousAt.toDateString() !== now.toDateString();
+  if (!firstToday && now - previousAt < 2 * 3600_000) return;
+  spriteTourPending = true;
+  try {
+    const tour = await apiGet(`/api/assistant/tour${previous && now - previousAt >= 2 * 3600_000 ? `?since=${encodeURIComponent(previous)}` : ""}`);
+    if (!spriteParkVisible) return;
+    if (!tour.stops?.length) {
+      const brief = buildSpriteOpeningBriefing(state.missionOverview, state.threads);
+      tycoon3dInstance?.spriteSay?.(brief.text, { proactive: true });
+      return;
+    }
+    state.sprite.tour = { stops: tour.stops, index: 0 };
+    await showSpriteTourStop();
+  } catch (error) {
+    // Older hosts and demo fixtures have no tour endpoint; keep the existing opening briefing.
+    if (!isDemoMode()) pushSpriteMessage({ text: t("巡园暂时不可用：{error}", { error: formatActionError(error) }) });
+  } finally { spriteTourPending = false; }
+}
+
+async function showSpriteTourStop() {
+  const tour = state.sprite.tour;
+  const stop = tour?.stops[tour.index];
+  if (!stop) { endSpriteTour(); return; }
+  openSpriteCards(stop.topicId);
+  state.sprite.cards = stop.cards || [];
+  renderSpriteAssistantMount();
+  await tycoon3dInstance?.spriteVisit?.(stop.topicId, { bubble: stop.bubble });
+}
+
+function endSpriteTour() {
+  state.sprite.tour = null;
+  state.sprite.cards = [];
+  renderSpriteAssistantMount();
+}
+
+function noteSpriteParkLeave() {
+  if (!spriteParkVisible) return;
+  spriteParkVisible = false;
+  try { localStorage.setItem(SPRITE_LAST_SEEN_KEY, new Date().toISOString()); } catch {}
+  tycoon3dInstance?.setUserBusy?.(false);
+}
+
+async function runSpriteAnswerAction(action, message) {
+  const payload = action.payload || {};
+  if (action.type === "focus") { await tycoon3dInstance?.spriteVisit?.(payload.topicId); return; }
+  if (action.type === "open_thread") { await selectThread(payload.threadId); return; }
+  if (action.type === "card_action") { await actOnSpriteCard(payload.cardId, payload.action); return; }
+  if (action.type === "clarify_pick") {
+    await apiPost("/api/assistant/profile/aliases", { alias: payload.alias, topicId: payload.topicId });
+    await requestSpriteAnswer(message.originalText);
+  }
+}
+
 async function handleSpriteCommand(rawInput = "") {
   const text = String(rawInput || "").trim();
   if (!text || state.sprite.busy) return;
@@ -10071,6 +10205,10 @@ async function handleSpriteCommand(rawInput = "") {
       spokenText: reply.spokenText,
       chips: reply.chips,
     });
+    return;
+  }
+  if (parsed.intent === "ask") {
+    await requestSpriteAnswer(text);
     return;
   }
   if (parsed.intent === "dispatch_preview") {
@@ -13627,6 +13765,7 @@ function bindEvents() {
     }
     if (e.target.id === "spriteCommandInput") {
       state.sprite.draft = e.target.value;
+      tycoon3dInstance?.setUserBusy?.(true);
       return;
     }
     if (e.target.id === "moDispatchInput") {
@@ -13745,11 +13884,54 @@ function bindEvents() {
       if (!openMenu.contains(e.target)) openMenu.removeAttribute("open");
     }
 
+    const assistantBadge = e.target.closest("[data-assistant-badge]");
+    if (assistantBadge) {
+      const type = assistantBadge.dataset.assistantBadge;
+      const topics = state.missionOverview?.domains?.flatMap((d) => d.topics || []).filter((tp) => tp.assistantSignals?.counts?.[type] > 0) || [];
+      const previous = state.sprite.badgeCursor?.[type] || 0;
+      const topic = topics[previous % topics.length];
+      if (topic) {
+        state.sprite.badgeCursor = { ...state.sprite.badgeCursor, [type]: previous + 1 };
+        tycoon3dInstance?.flyToTopic?.(topic.id);
+        openSpriteCards(topic.id, type);
+      }
+      return;
+    }
+    const cardAction = e.target.closest("[data-sprite-card-action]");
+    if (cardAction) { void actOnSpriteCard(cardAction.dataset.spriteCardId, cardAction.dataset.spriteCardAction); return; }
+    const answerAction = e.target.closest("[data-sprite-answer-action], [data-sprite-clarify-topic]");
+    if (answerAction && !state.sprite.busy) {
+      const message = state.sprite.messages.find((entry) => entry.id === (answerAction.dataset.spriteAnswerId || answerAction.dataset.spriteClarifyId));
+      if (!message) return;
+      const action = answerAction.dataset.spriteClarifyTopic
+        ? { type: "clarify_pick", payload: { alias: message.clarifyAlias, topicId: answerAction.dataset.spriteClarifyTopic } }
+        : message.actions[Number(answerAction.dataset.spriteAnswerAction)];
+      if (action) void runSpriteAnswerAction(action, message).catch((error) => pushSpriteMessage({ text: formatActionError(error), tone: "worry" }));
+      return;
+    }
     const spriteActionBtn = e.target.closest("[data-sprite-action]");
     if (spriteActionBtn) {
       e.stopPropagation();
       const sAct = spriteActionBtn.dataset.spriteAction;
-      if (sAct === "toggle") {
+      if (sAct === "hud-more") {
+        const panel = $("tycoonHudMore");
+        panel?.classList.toggle("is-expanded");
+        spriteActionBtn.setAttribute("aria-expanded", String(panel?.classList.contains("is-expanded")));
+      } else if (sAct === "edit-dispatch") {
+        state.sprite.draft = state.sprite.pendingPreview?.payload?.text || "";
+        state.sprite.pendingPreview = null;
+        renderSpriteAssistantMount();
+        $("spriteCommandInput")?.focus();
+      } else if (sAct === "load-memory" || sAct === "clear-memory") {
+        void apiRequest("/api/assistant/profile", { method: sAct === "clear-memory" ? "DELETE" : "GET" }).then((profile) => {
+          state.sprite.profile = sAct === "clear-memory" ? { aliases: {} } : profile;
+          renderSpriteAssistantMount();
+        }).catch((error) => pushSpriteMessage({ text: formatActionError(error), tone: "worry" }));
+      } else if (sAct === "tour-next" || sAct === "tour-skip") {
+        if (state.sprite.tour) { state.sprite.tour.index += 1; void showSpriteTourStop(); }
+      } else if (sAct === "tour-end") {
+        endSpriteTour();
+      } else if (sAct === "toggle") {
         toggleSpriteAssistant();
       } else if (sAct === "open") {
         toggleSpriteAssistant({ open: true });
@@ -13869,6 +14051,7 @@ function bindEvents() {
       if (state.boardViewMode === "tycoon3d") {
         state.tycoonSelectedTopicId = tid;
         state.tycoonInspectorMode = "topic";
+        void tycoon3dInstance?.spriteVisit?.(tid);
         tycoon3dInstance?.flyToTopic?.(tid);
         renderProjectBoard();
       } else {
@@ -17041,3 +17224,24 @@ async function init() {
 }
 
 void init();
+
+// Delegation survives SSE updates that replace the assistant markup.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) noteSpriteParkLeave();
+  else if (isBoardViewActive() && state.boardViewMode === "tycoon3d") void maybeStartSpriteTour();
+});
+window.addEventListener("pagehide", noteSpriteParkLeave);
+document.addEventListener("focusin", (event) => {
+  if (event.target.id === "spriteCommandInput") tycoon3dInstance?.setUserBusy?.(true);
+});
+document.addEventListener("focusout", (event) => {
+  if (event.target.id === "spriteCommandInput") tycoon3dInstance?.setUserBusy?.(Boolean(state.sprite.open));
+});
+let spriteDrawerTouchY = null;
+document.addEventListener("touchstart", (event) => {
+  if (event.target.closest("[data-sprite-drawer-handle], .sprite-pop-head")) spriteDrawerTouchY = event.touches[0].clientY;
+}, { passive: true });
+document.addEventListener("touchend", (event) => {
+  if (spriteDrawerTouchY !== null && event.changedTouches[0].clientY - spriteDrawerTouchY > 60) toggleSpriteAssistant({ open: false });
+  spriteDrawerTouchY = null;
+}, { passive: true });
