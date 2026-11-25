@@ -24,3 +24,8 @@ cloudflared/
 *.pem
 *.key
 *.p12
+
+# Personal metrics & promo assets (keep local, never commit)
+.agent-metrics.json
+.agent-metrics.*.json
+docs/tech-article-assets/

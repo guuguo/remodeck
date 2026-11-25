@@ -23,7 +23,7 @@ rl.on("line", (line) => {
     }
     const text = process.env.MOCK_VOICE_ASR_ECHO_PROMPT === "1"
       ? `PROMPT:${String(req?.prompt || "")}`
-      : String(process.env.MOCK_VOICE_ASR_TEXT || "让 粉丝站小屋 跑一下测试").trim();
+      : String(process.env.MOCK_VOICE_ASR_TEXT || "让 示例商城后台 跑一下测试").trim();
     process.stdout.write(`${JSON.stringify({
       id,
       ok: true,

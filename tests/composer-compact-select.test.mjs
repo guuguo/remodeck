@@ -42,11 +42,11 @@ test("composer profile trigger uses account label while menu retains health and 
   const descriptor = extractSelectDescriptor({
     id: "composerProfileSelect",
     value: "work",
-    options: [{ value: "work", textContent: "Codex · guuguo自用 · guuguo@qq.com · 可用 · 周95%", dataset: { compactLabel: "guuguo自用" } }],
+    options: [{ value: "work", textContent: "Codex · guuguo自用 · alice@qq.com · 可用 · 周95%", dataset: { compactLabel: "guuguo自用" } }],
   });
   assert.equal(descriptor.triggerLabel, "guuguo自用");
   const trigger = renderCustomSelectTriggerInnerHtml(descriptor);
   assert.match(trigger, /guuguo自用/);
   assert.doesNotMatch(trigger, /Codex|qq.com|周95%/);
-  assert.match(renderCustomSelectMenuHtml(descriptor), /Codex · guuguo自用 · guuguo@qq.com · 可用 · 周95%/);
+  assert.match(renderCustomSelectMenuHtml(descriptor), /Codex · guuguo自用 · alice@qq.com · 可用 · 周95%/);
 });

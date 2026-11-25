@@ -851,7 +851,7 @@ test("claude-history keeps structured <task-notification>/<cross-session-message
       timestamp: "2026-11-16T01:00:08Z",
       message: {
         role: "user",
-        content: 'Another Claude session sent a message:\n<cross-session-message from="local_abc" from-name="粉丝站评估">\n已上线\n</cross-session-message>',
+        content: 'Another Claude session sent a message:\n<cross-session-message from="local_abc" from-name="示例商城评估">\n已上线\n</cross-session-message>',
       },
     }),
     JSON.stringify({

@@ -44,10 +44,10 @@ const EMOJI_RE = /\p{Extended_Pictographic}/u;
 
 test("speech duration estimation and min audible threshold", () => {
   assert.ok(estimateSpeechDurationMs("你好") >= 600);
-  assert.equal(estimateVoiceDurationMs("正在为你查询粉丝站小屋进度"), estimateSpeechDurationMs("正在为你查询粉丝站小屋进度"));
+  assert.equal(estimateVoiceDurationMs("正在为你查询示例商城后台进度"), estimateSpeechDurationMs("正在为你查询示例商城后台进度"));
   assert.equal(minAudibleDurationMs(""), 0);
   assert.equal(minVoiceAudibleMs(""), 0);
-  assert.ok(minAudibleDurationMs("粉丝站小屋已经完成构建。") >= 180);
+  assert.ok(minAudibleDurationMs("示例商城后台已经完成构建。") >= 180);
 
 
 });
@@ -113,7 +113,7 @@ test("broadcast priority queue, unheard banner HTML, and transcript delivery chi
 
   assert.equal(renderVoiceUnheardBannerHtml([]), "");
   const bannerHtml = renderVoiceUnheardBannerHtml([
-    { id: "u1", text: "粉丝站小屋已经完成测试。", reason: "autoplay_blocked" },
+    { id: "u1", text: "示例商城后台已经完成测试。", reason: "autoplay_blocked" },
   ]);
   assert.match(bannerHtml, /data-voice-replay-all="1"/);
   assert.match(bannerHtml, /data-voice-dismiss-unheard="1"/);
@@ -195,7 +195,7 @@ test("Voice delivery ack, status ledger, repeat_last, fake-short-end downgrade, 
   const agyCli = resolve(root, "agy-cli");
   const dataDir = resolve(root, "data");
   const appsDir = resolve(root, "apps");
-  const projectDir = resolve(root, "粉丝站小屋");
+  const projectDir = resolve(root, "示例商城后台");
   await Promise.all([
     mkdir(codexHome, { recursive: true }),
     mkdir(claudeHome, { recursive: true }),
@@ -243,7 +243,7 @@ test("Voice delivery ack, status ledger, repeat_last, fake-short-end downgrade, 
     JSON.stringify({ id: "ac-hot", name: "Agent Control Hot API", origin: hot.url }),
   );
 
-  // Create target thread for 粉丝站小屋.
+  // Create target thread for 示例商城后台.
   const createdRes = await fetch(`${srv.url}/api/thread/new`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -251,7 +251,7 @@ test("Voice delivery ack, status ledger, repeat_last, fake-short-end downgrade, 
       provider: "antigravity",
       profileId: "cli",
       cwd: projectDir,
-      text: "粉丝站小屋 初始化 [COMPLETE_NOW]",
+      text: "示例商城后台 初始化 [COMPLETE_NOW]",
       permissionMode: "turbo",
     }),
   });
@@ -269,7 +269,7 @@ test("Voice delivery ack, status ledger, repeat_last, fake-short-end downgrade, 
   const turn1Res = await fetch(`${srv.url}/apps/ac-hot/api/voice/call`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ callId, transcriptText: "粉丝站小屋现在什么进度", mode: "turn", tts: false }),
+    body: JSON.stringify({ callId, transcriptText: "示例商城后台现在什么进度", mode: "turn", tts: false }),
   });
   assert.equal(turn1Res.status, 200);
   const turn1 = await turn1Res.json();
@@ -366,7 +366,7 @@ test("Voice delivery ack, status ledger, repeat_last, fake-short-end downgrade, 
   const turn4Res = await fetch(`${srv.url}/apps/ac-hot/api/voice/call`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ callId, transcriptText: "让 粉丝站小屋 跑一下检查 [COMPLETE_NOW]", mode: "turn", tts: false }),
+    body: JSON.stringify({ callId, transcriptText: "让 示例商城后台 跑一下检查 [COMPLETE_NOW]", mode: "turn", tts: false }),
   });
   assert.equal(turn4Res.status, 200);
   const turn4 = await turn4Res.json();
@@ -391,7 +391,7 @@ test("Voice delivery ack, status ledger, repeat_last, fake-short-end downgrade, 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       callId,
-      transcriptText: "让 粉丝站小屋 再跑一轮测试 [COMPLETE_NOW]",
+      transcriptText: "让 示例商城后台 再跑一轮测试 [COMPLETE_NOW]",
       mode: "turn",
       autoExecute: true,
       asyncDispatch: true,
@@ -403,7 +403,7 @@ test("Voice delivery ack, status ledger, repeat_last, fake-short-end downgrade, 
   assert.equal(asyncTurn.dispatchPending, true);
   assert.ok(asyncTurn.batchId);
   assert.equal(asyncTurn.executed?.pending, true);
-  assert.match(asyncTurn.spokenReply, /正在转达给|粉丝站小屋/);
+  assert.match(asyncTurn.spokenReply, /正在转达给|示例商城后台/);
 
   let settledBatch = null;
   for (let i = 0; i < 40; i += 1) {
@@ -437,14 +437,14 @@ test("asyncDispatch splits fast oral ACK from slow background dispatch, handles 
             id: "antigravity:cli:t-fans",
             provider: "antigravity",
             profileId: "cli",
-            cwd: "/dev/粉丝站小屋",
-            title: "粉丝站小屋 联调",
+            cwd: "/dev/示例商城后台",
+            title: "示例商城后台 联调",
             live: false,
             updatedAt: Date.now(),
           },
         ],
         projectsMeta: {
-          "/dev/粉丝站小屋": { alias: "粉丝站小屋" },
+          "/dev/示例商城后台": { alias: "示例商城后台" },
         },
       };
     },
@@ -503,7 +503,7 @@ test("asyncDispatch splits fast oral ACK from slow background dispatch, handles 
   const t0 = Date.now();
   const res1 = await svc.handleTurn({
     callId,
-    transcriptText: "让 粉丝站小屋 跑一下构建",
+    transcriptText: "让 示例商城后台 跑一下构建",
     autoExecute: true,
     asyncDispatch: true,
     tts: false,
@@ -528,7 +528,7 @@ test("asyncDispatch splits fast oral ACK from slow background dispatch, handles 
   mode = "conflict";
   const res2 = await svc.handleTurn({
     callId,
-    transcriptText: "让 粉丝站小屋 再检查日志",
+    transcriptText: "让 示例商城后台 再检查日志",
     autoExecute: true,
     asyncDispatch: true,
     tts: false,
@@ -548,7 +548,7 @@ test("asyncDispatch splits fast oral ACK from slow background dispatch, handles 
   mode = "error";
   const res3 = await svc.handleTurn({
     callId,
-    transcriptText: "让 粉丝站小屋 部署测试",
+    transcriptText: "让 示例商城后台 部署测试",
     autoExecute: true,
     asyncDispatch: true,
     tts: false,
@@ -609,15 +609,15 @@ test("Voice model routing prioritizes fast Hydrogen over slower Carbon/Orchestra
             id: "antigravity:cli:t-existing",
             provider: "antigravity",
             profileId: "cli",
-            cwd: "/dev/fans-home",
-            title: "粉丝站小屋 旧会话",
+            cwd: "/dev/demo-shop",
+            title: "示例商城后台 旧会话",
             model: "gemini-4-carbon-medium",
             live: false,
             updatedAt: Date.now(),
           },
         ],
         projectsMeta: {
-          "/dev/fans-home": { alias: "粉丝站小屋" },
+          "/dev/demo-shop": { alias: "示例商城后台" },
         },
       };
     },
@@ -673,7 +673,7 @@ test("Voice model routing prioritizes fast Hydrogen over slower Carbon/Orchestra
   // Default create_thread assigns fast gemini-4-hydrogen-low (effort: low), not gemini-pro-orchestrator.
   const createRes = await svc.handleTurn({
     callId: "call-model-route",
-    transcriptText: "在粉丝站小屋新开一个任务排查连接",
+    transcriptText: "在示例商城后台新开一个任务排查连接",
     autoExecute: true,
     tts: false,
   });
@@ -686,7 +686,7 @@ test("Voice model routing prioritizes fast Hydrogen over slower Carbon/Orchestra
   // Explicit "用 hydrogen" on existing project thread overrides slow Carbon model on sendTurn with fast Hydrogen.
   const hydrogenTurnRes = await svc.handleTurn({
     callId: "call-model-route",
-    transcriptText: "用 hydrogen 让粉丝站小屋跑一下检查",
+    transcriptText: "用 hydrogen 让示例商城后台跑一下检查",
     autoExecute: true,
     tts: false,
   });
@@ -697,7 +697,7 @@ test("Voice model routing prioritizes fast Hydrogen over slower Carbon/Orchestra
   // Explicit heavy orchestrator request still honored when asked directly.
   await svc.handleTurn({
     callId: "call-model-route",
-    transcriptText: "在粉丝站小屋新开一个协调者 carbon 任务做深度审计",
+    transcriptText: "在示例商城后台新开一个协调者 carbon 任务做深度审计",
     autoExecute: true,
     tts: false,
   });
@@ -944,8 +944,8 @@ test("Voice dispatch distinguishes queued follow-ups vs immediate direct-result 
   const snapshot = {
     projects: [
       {
-        cwd: "/dev/fans-home",
-        name: "粉丝站小屋",
+        cwd: "/dev/demo-shop",
+        name: "示例商城后台",
         pinned: true,
         liveCount: 1,
         threads: [
@@ -953,8 +953,8 @@ test("Voice dispatch distinguishes queued follow-ups vs immediate direct-result 
             id: "antigravity:cli:t-fans",
             provider: "antigravity",
             profileId: "cli",
-            cwd: "/dev/fans-home",
-            title: "粉丝站小屋 运行中",
+            cwd: "/dev/demo-shop",
+            title: "示例商城后台 运行中",
             model: "gemini-4-hydrogen-low",
             live: true,
             updatedAt: Date.now(),
@@ -967,8 +967,8 @@ test("Voice dispatch distinguishes queued follow-ups vs immediate direct-result 
         id: "antigravity:cli:t-fans",
         provider: "antigravity",
         profileId: "cli",
-        cwd: "/dev/fans-home",
-        title: "粉丝站小屋 运行中",
+        cwd: "/dev/demo-shop",
+        title: "示例商城后台 运行中",
         model: "gemini-4-hydrogen-low",
         live: true,
         updatedAt: Date.now(),
@@ -992,7 +992,7 @@ test("Voice dispatch distinguishes queued follow-ups vs immediate direct-result 
       async listThreads() {
         return {
           threads: snapshot.threads,
-          projectsMeta: { "/dev/fans-home": { alias: "粉丝站小屋", pinned: true } },
+          projectsMeta: { "/dev/demo-shop": { alias: "示例商城后台", pinned: true } },
         };
       },
       async listProvidersAndProfiles() {
@@ -1034,7 +1034,7 @@ test("Voice dispatch distinguishes queued follow-ups vs immediate direct-result 
   // 1. Regular follow-up while busy -> queued cleanly via queueTurn.
   const normalRes = await svc.handleTurn({
     callId: "call-dispatch-mode",
-    transcriptText: "让 粉丝站小屋 顺便把单测补全",
+    transcriptText: "让 示例商城后台 顺便把单测补全",
     autoExecute: true,
     tts: false,
   });
@@ -1064,7 +1064,7 @@ test("Voice dispatch distinguishes queued follow-ups vs immediate direct-result 
   busy = false;
   const steerDirectRes = await svc.handleTurn({
     callId: "call-dispatch-mode",
-    transcriptText: "让 粉丝站小屋 停止等待，直接汇报结论",
+    transcriptText: "让 示例商城后台 停止等待，直接汇报结论",
     autoExecute: true,
     asyncDispatch: true,
     tts: false,
@@ -1091,15 +1091,15 @@ test("voice execution tiers: self_simple vs subagent_hydrogen progress vs extern
   const snapshot = {
     summary: { runningCount: 2, waitingCount: 0, pendingApprovalCount: 0, idleCount: 1 },
     projects: [
-      { cwd: "/dev/fans-home", name: "粉丝站小屋", threadCount: 1, runningCount: 1, waitingCount: 0, pendingApprovalCount: 0 },
+      { cwd: "/dev/demo-shop", name: "示例商城后台", threadCount: 1, runningCount: 1, waitingCount: 0, pendingApprovalCount: 0 },
       { cwd: "/dev/agent-control", name: "Agent Control", threadCount: 1, runningCount: 1, waitingCount: 0, pendingApprovalCount: 0 },
     ],
     threads: [
       {
         id: "antigravity:cli:t-fans",
         provider: "antigravity",
-        cwd: "/dev/fans-home",
-        projectName: "粉丝站小屋",
+        cwd: "/dev/demo-shop",
+        projectName: "示例商城后台",
         title: "小屋 构建与验收",
         status: "running",
         activeTurnId: "turn-fans-0",
@@ -1134,7 +1134,7 @@ test("voice execution tiers: self_simple vs subagent_hydrogen progress vs extern
         return {
           threads: snapshot.threads,
           projectsMeta: {
-            "/dev/fans-home": { alias: "粉丝站小屋", pinned: true },
+            "/dev/demo-shop": { alias: "示例商城后台", pinned: true },
             "/dev/agent-control": { alias: "Agent Control", pinned: true },
           },
         };
@@ -1265,7 +1265,7 @@ test("voice execution tiers: self_simple vs subagent_hydrogen progress vs extern
   // 2c. External multi-task delegation -> handoff ACK, silent completion capture, milestone notifications, and on-demand query.
   const ext1 = await svc.handleTurn({
     callId: "call-tiers",
-    transcriptText: "让 粉丝站小屋 检查一下首页样式",
+    transcriptText: "让 示例商城后台 检查一下首页样式",
     autoExecute: true,
     asyncDispatch: false,
     tts: false,
@@ -1279,7 +1279,7 @@ test("voice execution tiers: self_simple vs subagent_hydrogen progress vs extern
   });
   assert.equal(ext1.executionTier, "external_thread");
   assert.equal(ext2.executionTier, "external_thread");
-  assert.match(ext1.spokenReply, /粉丝站小屋/);
+  assert.match(ext1.spokenReply, /示例商城后台/);
   assert.match(ext2.spokenReply, /Agent Control/);
 
   const secretResult1 = "绝密结果AlphaCSS网格已对齐";
@@ -1297,7 +1297,7 @@ test("voice execution tiers: self_simple vs subagent_hydrogen progress vs extern
   assert.equal(milestonesAfterOne[0].payload.remainingCount, 1);
   assert.equal(milestonesAfterOne[0].payload.allDone, false);
   assert.equal(milestonesAfterOne[0].payload.shouldSpeak, true);
-  assert.match(milestonesAfterOne[0].payload.spokenFeedback, /粉丝站小屋.*已完成.*还有 1 个/);
+  assert.match(milestonesAfterOne[0].payload.spokenFeedback, /示例商城后台.*已完成.*还有 1 个/);
   assert.equal(milestonesAfterOne[0].payload.spokenFeedback.includes(secretResult1), false);
 
   await svc.handleHubEvent("provider_event", {
@@ -1334,7 +1334,7 @@ test("Voice model-planned real-cwd subagent, unrelated milestone isolation, and 
   //    unrelated threads do not trigger voice_external_milestone, and notice/pending do not snowball.
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-voice-regressions-"));
   const dataDir = resolve(root, "data");
-  const realProjDir = resolve(root, "粉丝站小屋");
+  const realProjDir = resolve(root, "示例商城后台");
   await Promise.all([
     mkdir(dataDir, { recursive: true }),
     mkdir(realProjDir, { recursive: true }),
@@ -1364,7 +1364,7 @@ test("Voice model-planned real-cwd subagent, unrelated milestone isolation, and 
             },
           ],
           projectsMeta: {
-            [realProjDir]: { alias: "粉丝站小屋", pinned: true },
+            [realProjDir]: { alias: "示例商城后台", pinned: true },
           },
         };
       },
@@ -1396,7 +1396,7 @@ test("Voice model-planned real-cwd subagent, unrelated milestone isolation, and 
   // Subagent targeting real existing projectCwd succeeds without existsSync ReferenceError.
   const subRes = await svc.handleTurn({
     callId,
-    transcriptText: "帮我深入分析一下粉丝站小屋最近的报错原因",
+    transcriptText: "帮我深入分析一下示例商城后台最近的报错原因",
     autoExecute: true,
     asyncDispatch: true,
     tts: false,
@@ -1428,7 +1428,7 @@ test("Voice model-planned real-cwd subagent, unrelated milestone isolation, and 
   // Delegated thread DOES emit voice_external_milestone with matching callId.
   await svc.handleTurn({
     callId,
-    transcriptText: "让粉丝站跑一下检查",
+    transcriptText: "让示例商城跑一下检查",
     autoExecute: true,
     asyncDispatch: false,
     tts: false,

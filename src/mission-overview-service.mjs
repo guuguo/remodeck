@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -387,11 +387,11 @@ export function inferPipelineStage(topic, activeThreads = [], gitSnap = null, ca
 
   const corpus = activeThreads.map((t) => `${t.title || ""} ${t.preview || ""} ${t.stage || ""}`).join(" ").toLowerCase();
   let stageIndex = 1;
-  if (/收款|已上线|成片发布|创收通过|赞助回调|订阅开通/.test(corpus)) {
+  if (/收款|已上线|已发布|上线完成|付费开通|订阅开通/.test(corpus)) {
     stageIndex = 5;
-  } else if (/爱发电|商业化|seo|推广|宣传片|动效|awesome-ai|申诉视频|youtube|tiktok|上架/.test(corpus)) {
+  } else if (/商业化|变现|定价|seo|推广|宣传|营销|上架|youtube|tiktok/.test(corpus)) {
     stageIndex = 4;
-  } else if (/修复|优化|打磨|日间模式|测试|重构|透视|排查/.test(corpus) || activeThreads.length >= 4 || (gitSnap?.dirtyCount || 0) > 0) {
+  } else if (/修复|优化|打磨|测试|重构|排查/.test(corpus) || activeThreads.length >= 4 || (gitSnap?.dirtyCount || 0) > 0) {
     stageIndex = 3;
   } else if (activeThreads.length > 0 || (gitSnap?.commits?.length || 0) > 0) {
     stageIndex = 2;
@@ -815,7 +815,6 @@ export class MissionOverviewService {
   #metricsPath;
   #contextsPath;
   #projectValuePath;
-  #evidenceRootPath;
   #cooldownMs;
   #activeWindowSec;
   #broadcast;
@@ -863,7 +862,6 @@ export class MissionOverviewService {
     hub,
     dataDir = defaultDataDir(),
     projectValuePath = "",
-    evidenceRootPath = "",
     cooldownMs = DEFAULT_OVERVIEW_COOLDOWN_MS,
     activeWindowSec = DEFAULT_ACTIVE_WINDOW_SEC,
     broadcast = null,
@@ -879,7 +877,6 @@ export class MissionOverviewService {
     this.#metricsPath = resolve(dataDir, "mission-metrics.json");
     this.#contextsPath = resolve(dataDir, "mission-contexts.json");
     this.#projectValuePath = projectValuePath;
-    this.#evidenceRootPath = evidenceRootPath;
     this.#cooldownMs = Math.max(60_000, Number(cooldownMs) || DEFAULT_OVERVIEW_COOLDOWN_MS);
     this.#activeWindowSec = Math.max(3600, Number(activeWindowSec) || DEFAULT_ACTIVE_WINDOW_SEC);
     this.#broadcast = typeof broadcast === "function" ? broadcast : null;
@@ -984,102 +981,7 @@ export class MissionOverviewService {
     }
     const byTopicId = new Map();
 
-    // 1. Built-in read-only local evidence extractors (YouTube / B站 / 抖音极客号)
-    try {
-      if (this.#evidenceRootPath) {
-        const ytRaw = await readFile(resolve(this.#evidenceRootPath, "2026-10-04-youtube-originality-preparation-raw.md"), "utf8").catch(() => "");
-        if (ytRaw) {
-          const viewsMatch = ytRaw.match(/合计观看\s*([\d,]+)/);
-          const hoursMatch = ytRaw.match(/观看时长\s*([\d,.]+)/);
-          const kpis = [];
-          if (viewsMatch) {
-            const num = Number(viewsMatch[1].replace(/,/g, "")) || 0;
-            kpis.push({
-              key: "yt_views",
-              label: "YT 累计观看",
-              value: num >= 10000 ? `${(num / 10000).toFixed(1)}万` : viewsMatch[1],
-              delta: "频道基线",
-              tone: "growth",
-            });
-          }
-          if (hoursMatch) {
-            kpis.push({
-              key: "yt_hours",
-              label: "观看时长",
-              value: `${hoursMatch[1]}h`,
-              delta: ">4000h达标",
-              tone: "coin",
-            });
-          }
-          kpis.push({
-            key: "ypp_status",
-            label: "YPP 创收",
-            value: "申诉冲刺",
-            delta: "$0 待解锁",
-            tone: "coin",
-          });
-          byTopicId.set("overseas-media", {
-            source: "evidence-ledger",
-            updatedAt: "2026-10-04",
-            kpis,
-          });
-        }
-
-        const biliRaw = await readFile(resolve(this.#evidenceRootPath, "runs/2026-10-27-1209-下乡封标点击率/summary.json"), "utf8").catch(() => "");
-        if (biliRaw) {
-          const bili = JSON.parse(biliRaw);
-          const items = Array.isArray(bili?.items) ? bili.items : [];
-          if (items.length) {
-            const totalViews = items.reduce((s, it) => s + (Number(it?.stat?.view) || 0), 0);
-            const totalLikes = items.reduce((s, it) => s + (Number(it?.stat?.like) || 0), 0);
-            const totalFavs = items.reduce((s, it) => s + (Number(it?.stat?.favorite) || 0), 0);
-            byTopicId.set("domestic-drama", {
-              source: "evidence-ledger",
-              updatedAt: String(bili.captured_end || "").slice(0, 10),
-              kpis: [
-                { key: "bili_eps", label: "B站剧集", value: `${items.length}集`, delta: compactHeadline(items[0]?.title || "合集", 14), tone: "growth" },
-                ...(totalViews > 0 ? [{
-                  key: "bili_views",
-                  label: "累计播放",
-                  value: totalViews >= 10000 ? `${(totalViews / 10000).toFixed(1)}万` : String(totalViews),
-                  delta: "",
-                  tone: "growth",
-                }] : []),
-                { key: "bili_engage", label: "赞藏互动", value: `${totalLikes + totalFavs}`, delta: `赞${totalLikes}/藏${totalFavs}`, tone: "coin" },
-              ],
-            });
-          }
-        }
-
-        const evDirs = await readdir(this.#evidenceRootPath, { withFileTypes: true }).catch(() => []);
-        const acctDirs = evDirs
-          .filter((d) => d.isDirectory() && /^\d{4}-\d{2}-\d{2}-account-data$/.test(d.name))
-          .map((d) => d.name)
-          .sort()
-          .reverse();
-        if (acctDirs[0]) {
-          const dyInfoRaw = await readFile(resolve(this.#evidenceRootPath, acctDirs[0], "douyin/account-info.json"), "utf8").catch(() => "");
-          if (dyInfoRaw) {
-            const dy = JSON.parse(dyInfoRaw);
-            const info = dy?.data?.douyin_user_verify_info;
-            if (info) {
-              const favs = Number(info.total_favorited) || 0;
-              const fans = Number(info.follower_count) || 0;
-              byTopicId.set("agent-control", {
-                source: "evidence-ledger",
-                updatedAt: String(dy.captured_at || "").slice(0, 16).replace("T", " "),
-                kpis: [
-                  { key: "dy_likes", label: "抖音极客赞", value: favs >= 10000 ? `${(favs / 10000).toFixed(1)}万` : String(favs), delta: info.nick_name || "", tone: "growth" },
-                  { key: "dy_fans", label: "极客号粉丝", value: String(fans), delta: "持续引流", tone: "growth" },
-                ],
-              });
-            }
-          }
-        }
-      }
-    } catch {}
-
-    // 2. Per-repo standard `.agent-metrics.<topicId>.json` / `.agent-metrics.json` & package.json version
+    // Per-repo standard `.agent-metrics.<topicId>.json` / `.agent-metrics.json` & package.json version
     const cwdTopicCounts = new Map();
     for (const topic of this.#topics) {
       const cwd = normPath(topic.primaryCwd);

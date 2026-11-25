@@ -551,7 +551,7 @@ function renderSmartDispatcherBarHtml({
               type="text"
               class="mo-dispatch-input"
               value="${escapeHtml(dispatchDraft)}"
-              placeholder="直接输入要做的事（例如：给漫画翻译补爱发电回调日志；帮个人Hub检查SEO收录）…"
+              placeholder="直接输入要做的事（例如：给登录页补错误提示；检查官网 SEO 收录）…"
               ${dispatchBusy ? "disabled" : ""}
             />
           </div>
@@ -1362,7 +1362,7 @@ export function renderMissionOverviewHtml(overview, {
               type="search"
               class="board-search-input mo-search-input"
               value="${escapeHtml(searchText)}"
-              placeholder="搜模块（如：语音助手 / SEO / 爱发电）自动揪出被改名的混杂会话…"
+              placeholder="搜模块（如：语音助手 / SEO / 支付）自动揪出被改名的混杂会话…"
             />
             ${searchText ? `<button type="button" class="mo-clear-search-btn" data-board-action="clear-search">${iconSvg("close", { size: 12 })}</button>` : ""}
           </div>

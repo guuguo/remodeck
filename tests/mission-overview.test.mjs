@@ -623,7 +623,6 @@ test("Shared primaryCwd topics isolate per-topic .agent-metrics.<topicId>.json f
       hub,
       dataDir,
       projectValuePath: join(dir, "none.json"),
-      evidenceRootPath: join(dir, "no-evidence"),
       collectGitImpl: async () => null,
       runAiImpl: async () => null,
     });
@@ -673,7 +672,6 @@ test("archiveAndSummarizeTopic previews stale threads, archives with dual-stored
       hub,
       dataDir,
       projectValuePath: join(dir, "none.json"),
-      evidenceRootPath: join(dir, "no-evidence"),
       collectGitImpl: async () => null,
       runAiImpl: async () => "已完成 JWT 双令牌登录鉴权重构，接口契约与测试已冻结。",
     });
@@ -1150,10 +1148,10 @@ test("AI-assisted sprite dispatch plans semantic splits, chat-only replies, appr
       {
         id: "manga-trans",
         domainId: "indie-lab",
-        name: "漫画翻译",
+        name: "图片翻译",
         primaryCwd: "/repo/manga",
         cwdPrefixes: ["/repo/manga"],
-        keywords: ["漫画翻译"],
+        keywords: ["图片翻译"],
         order: 2,
       },
     ]);
@@ -1165,7 +1163,7 @@ test("AI-assisted sprite dispatch plans semantic splits, chat-only replies, appr
         if (aiBehavior === "chat") {
           return {
             intent: "chat",
-            reply: "当前建议先处理控制台登录态问题，再推进漫画翻译上线。",
+            reply: "当前建议先处理控制台登录态问题，再推进图片翻译上线。",
             tasks: [],
           };
         }
@@ -1245,7 +1243,7 @@ test("AI-assisted sprite dispatch plans semantic splits, chat-only replies, appr
     // 4. Seamless fallback to deterministic rule engine when AI fails
     aiBehavior = "broken";
     const fallbackRes = await service.dispatchTask({
-      text: "帮漫画翻译补一个单测",
+      text: "帮图片翻译补一个单测",
       confirmOnly: true,
       useAiPlanner: true,
     });

@@ -114,8 +114,8 @@ test("a sentence with a mid-sentence pause over road noise stays one utterance i
 });
 
 test("ASR prompt carries project hotwords and stays within whisper's prompt budget", () => {
-  const prompt = buildVoiceAsrPrompt(["agent-control", "粉丝站小屋", "agent-control", "x".repeat(60)]);
-  assert.match(prompt, /agent-control、粉丝站小屋/);
+  const prompt = buildVoiceAsrPrompt(["agent-control", "示例商城后台", "agent-control", "x".repeat(60)]);
+  assert.match(prompt, /agent-control、示例商城后台/);
   assert.equal(prompt.match(/agent-control/g).length, 1);
   assert.doesNotMatch(prompt, /xxxxx/);
   assert.match(prompt, /Codex/);
@@ -124,9 +124,9 @@ test("ASR prompt carries project hotwords and stays within whisper's prompt budg
 });
 
 test("spoken replies are clamped to about two short sentences", () => {
-  const long = "已经派给粉丝站小屋了，它正在跑测试。目前有三个任务在运行，其中两个已经完成，还有一个等你确认。另外昨天的部署也结束了。";
+  const long = "已经派给示例商城后台了，它正在跑测试。目前有三个任务在运行，其中两个已经完成，还有一个等你确认。另外昨天的部署也结束了。";
   const out = clampVoiceSpokenReply(long, { maxChars: 40 });
-  assert.equal(out, "已经派给粉丝站小屋了，它正在跑测试。");
+  assert.equal(out, "已经派给示例商城后台了，它正在跑测试。");
   assert.equal(clampVoiceSpokenReply("好的。"), "好的。");
   const noPunct = clampVoiceSpokenReply("一".repeat(90), { maxChars: 60 });
   assert.equal(noPunct.length, 60);
@@ -136,17 +136,17 @@ test("spoken replies are clamped to about two short sentences", () => {
 test("target candidates only auto-resolve on an exact model-chosen name", () => {
   const snapshot = { projects: [
     { cwd: "/dev/agent-control", name: "agent-control" },
-    { cwd: "/dev/fans-site", name: "fans-site", alias: "粉丝站小屋" },
+    { cwd: "/dev/fans-site", name: "fans-site", alias: "示例商城后台" },
     { cwd: "/dev/blog", name: "blog" },
   ] };
   assert.equal(suggestVoiceTargetCandidates({ targetProjectCwd: "agent-control" }, snapshot).unique.cwd, "/dev/agent-control");
-  const spoken = suggestVoiceTargetCandidates({ heardText: "让粉丝站小屋跑测试" }, snapshot);
+  const spoken = suggestVoiceTargetCandidates({ heardText: "让示例商城后台跑测试" }, snapshot);
   assert.equal(spoken.unique, null);
   assert.equal(spoken.candidates[0].cwd, "/dev/fans-site");
-  assert.equal(buildVoiceClarifyQuestion(spoken.candidates), "是交给粉丝站小屋吗？");
+  assert.equal(buildVoiceClarifyQuestion(spoken.candidates), "是交给示例商城后台吗？");
   const none = suggestVoiceTargetCandidates({ heardText: "跑一下" }, snapshot);
   assert.equal(none.candidates.length, 3);
-  assert.equal(buildVoiceClarifyQuestion(none.candidates), "是agent-control、粉丝站小屋，还是blog？");
+  assert.equal(buildVoiceClarifyQuestion(none.candidates), "是agent-control、示例商城后台，还是blog？");
 });
 
 test("transcription sends project hotwords to the ASR worker", async (t) => {
@@ -154,7 +154,7 @@ test("transcription sends project hotwords to the ASR worker", async (t) => {
   const hub = {
     listThreads: async () => ({
       threads: [{ id: "codex:w:1", cwd: "/dev/fans-site" }, { id: "codex:w:2", cwd: "/dev/agent-control" }],
-      projectsMeta: { "/dev/fans-site": { alias: "粉丝站小屋" } },
+      projectsMeta: { "/dev/fans-site": { alias: "示例商城后台" } },
     }),
   };
   const svc = new VoiceCallService({ hub, dataDir: dir, env: {
@@ -171,7 +171,7 @@ test("transcription sends project hotwords to the ASR worker", async (t) => {
     promptHints: await svc.getAsrPromptHints(),
   });
   assert.match(res.text, /^PROMPT:/);
-  assert.match(res.text, /粉丝站小屋、agent-control/);
+  assert.match(res.text, /示例商城后台、agent-control/);
 });
 
 test("voice turns queued during a slow reply are stitched, never dropped", async () => {

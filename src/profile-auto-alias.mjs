@@ -85,7 +85,7 @@ export function extractReadableOwnerHandle(email = "") {
   const atIdx = clean.indexOf("@");
   const rawLocal = (atIdx > 0 ? clean.slice(0, atIdx) : clean).trim();
   if (!rawLocal) return "";
-  // 去掉类似姓名缩写后跟着的出生年份/长串数字后缀（如 fpf19910417 -> fpf）
+  // 去掉类似姓名缩写后跟着的出生年份/长串数字后缀（如 carol1990 -> carol）
   const alphaLead = rawLocal.match(/^([a-zA-Z][a-zA-Z._-]{1,10}?)\d{4,}$/);
   if (alphaLead && alphaLead[1]) {
     return alphaLead[1].replace(/[._-]+$/g, "") || rawLocal;
@@ -195,8 +195,8 @@ export function buildLightweightAliasPrompt(providerId, profiles = []) {
   return [
     `智能体 ${providerId} 有多个账号/实例。请仅为 existingAlias 为空的实例各取一个 2~10 个字符且互不重复的简称，方便在窄侧边栏一眼区分归属。`,
     "严格按以下优先级命名：",
-    "1. 不同账号拥有者优先（邮箱 @ 前缀不同，如 guuguo@qq.com 与 fpf19910417@163.com 属于两个人）：必须以账号名/用户名为核心（可省略结尾长串数字年份，如 fpf19910417 -> fpf），并可带简短平台后缀，例如 guuguo·QQ、fpf·163。严禁只写 QQ 或 163 而丢掉拥有者。",
-    "2. 同一拥有者不同邮箱（邮箱 @ 前缀相同，如 guodeqing@icloud.com 与 guodeqing@hotmail.com）：用邮箱服务商区分，保留常用标准名称（如 iCloud、Hotmail、Gmail、Outlook），禁止将品牌生硬直译（如禁止把 Hotmail 译成“热邮”）。",
+    "1. 不同账号拥有者优先（邮箱 @ 前缀不同，如 alice@qq.com 与 carol1990@163.com 属于两个人）：必须以账号名/用户名为核心（可省略结尾长串数字年份，如 carol1990 -> carol），并可带简短平台后缀，例如 alice·QQ、carol·163。严禁只写 QQ 或 163 而丢掉拥有者。",
+    "2. 同一拥有者不同邮箱（邮箱 @ 前缀相同，如 bob@icloud.com 与 bob@hotmail.com）：用邮箱服务商区分，保留常用标准名称（如 iCloud、Hotmail、Gmail、Outlook），禁止将品牌生硬直译（如禁止把 Hotmail 译成“热邮”）。",
     "3. 未绑定邮箱的本地默认实例（如 id=default 且无 email）：可直接命名为“默认”，不要生成“default·副”。",
     "严格只输出一个 JSON 对象，key 为实例 key，value 为简称，不要输出任何额外解释或 markdown 代码块：",
     JSON.stringify(rows),

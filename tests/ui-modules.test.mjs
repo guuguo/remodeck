@@ -331,17 +331,17 @@ test("relay mobile send flow delivers Antigravity turns, returns explicit errors
     body: JSON.stringify({
       cwd: "/tmp/mock-agy-project",
       pinned: true,
-      alias: "粉丝站",
+      alias: "示例商城",
     }),
   });
   assert.equal(metaRes.status, 200);
   const metaJson = await metaRes.json();
   assert.equal(metaJson.projectsMeta["/tmp/mock-agy-project"]?.pinned, true);
-  assert.equal(metaJson.projectsMeta["/tmp/mock-agy-project"]?.alias, "粉丝站");
+  assert.equal(metaJson.projectsMeta["/tmp/mock-agy-project"]?.alias, "示例商城");
 
   const threadsRes = await fetch(apiUrl("api/threads", basePrefix), { headers: { Cookie: cookieHeader } });
   const threadsJson = await threadsRes.json();
-  assert.equal(threadsJson.projectsMeta?.["/tmp/mock-agy-project"]?.alias, "粉丝站");
+  assert.equal(threadsJson.projectsMeta?.["/tmp/mock-agy-project"]?.alias, "示例商城");
 
   const jsRes = await fetch(apiUrl("app.js", basePrefix), { headers: { Cookie: cookieHeader } });
   assert.equal(jsRes.status, 200);
@@ -787,10 +787,10 @@ test("formatTokensPerSec and renderAgentTelemetryBarHtml render 4-agent HUD, 5h/
       id: "desktop",
       label: "Antigravity 桌面",
       installed: true,
-      account: { email: "guo.deqing@gmail.com" },
+      account: { email: "bob.w@gmail.com" },
       quota: {
         status: "ok",
-        accountLabel: "guo.deqing@gmail.com",
+        accountLabel: "bob.w@gmail.com",
         windows: {
           fiveHour: { id: "gemini-5h", windowKind: "five_hour", label: "Gemini 5h", remainingPercent: 100 },
           weekly: { id: "gemini-weekly", windowKind: "weekly", label: "Gemini 周", remainingPercent: 100 },
@@ -805,10 +805,10 @@ test("formatTokensPerSec and renderAgentTelemetryBarHtml render 4-agent HUD, 5h/
       id: "cli",
       label: "Antigravity CLI",
       installed: true,
-      account: { email: "guo.deqing@gmail.com" },
+      account: { email: "bob.w@gmail.com" },
       quota: {
         status: "ok",
-        accountLabel: "guo.deqing@gmail.com",
+        accountLabel: "bob.w@gmail.com",
         windows: {
           fiveHour: { id: "gemini-5h", windowKind: "five_hour", label: "Gemini 5h", remainingPercent: 100 },
           weekly: { id: "gemini-weekly", windowKind: "weekly", label: "Gemini 周", remainingPercent: 100 },
@@ -925,7 +925,7 @@ test("dual Claude instances, selectable telemetry picker, identity hints, and mo
   const nowSec = 1_794_680_000;
   assert.equal(formatProfileIdentityHint({ account: { email: "alice@example.com" } }), "alic...com");
   assert.equal(formatProfileIdentityHint({ account: { email: "bob@example.com" } }), "bob...com");
-  assert.equal(formatProfileIdentityHint({ account: { email: "fpf19910417@gmail.com" } }), "fpf1...com");
+  assert.equal(formatProfileIdentityHint({ account: { email: "carol1990@gmail.com" } }), "caro...com");
 
   const profiles = [
     {
@@ -2559,38 +2559,38 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
       id: "default",
       label: "Codex 默认",
       installed: true,
-      account: { signedIn: true, email: "fpf19910417@gmail.com" },
+      account: { signedIn: true, email: "carol1990@gmail.com" },
     },
     {
       provider: "codex",
       id: "guuguo",
       label: "Codex · guuguo",
       installed: true,
-      account: { signedIn: true, email: "guuguo@qq.com" },
+      account: { signedIn: true, email: "alice@qq.com" },
     },
   ];
-  assert.equal(compactProfileChipText(dualCodexProfiles[0]), "fpf19910417");
+  assert.equal(compactProfileChipText(dualCodexProfiles[0]), "carol1990");
   assert.equal(compactProfileChipText(dualCodexProfiles[1]), "guuguo");
 
   const dualDefaultCodexTabChip = compactThreadSourceChip(
     { provider: "codex", profileId: "default", profileLabel: "Codex 默认" },
     { providerFilter: "codex", profiles: dualCodexProfiles },
   );
-  assert.equal(dualDefaultCodexTabChip?.text, "fpf·Gmail");
+  assert.equal(dualDefaultCodexTabChip?.text, "carol·Gmail");
   assert.equal(dualDefaultCodexTabChip?.tone, "codex");
-  assert.match(dualDefaultCodexTabChip?.title || "", /fpf19910417@gmail\.com/);
+  assert.match(dualDefaultCodexTabChip?.title || "", /carol1990@gmail\.com/);
 
   const dualWorkCodexTabChip = compactThreadSourceChip(
     { provider: "codex", profileId: "guuguo", profileLabel: "Codex · guuguo" },
     { providerFilter: "codex", profiles: dualCodexProfiles },
   );
-  assert.equal(dualWorkCodexTabChip?.text, "guuguo·QQ");
+  assert.equal(dualWorkCodexTabChip?.text, "alice·QQ");
 
   const dualDefaultAllChip = compactThreadSourceChip(
     { provider: "codex", profileId: "default", profileLabel: "Codex 默认" },
     { providerFilter: "all", profiles: dualCodexProfiles },
   );
-  assert.equal(dualDefaultAllChip?.text, "fpf·Gmail");
+  assert.equal(dualDefaultAllChip?.text, "carol·Gmail");
 
   const dualBoardHtml = renderProjectBoardHtml({
     groups: [
@@ -2609,7 +2609,7 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     ],
     profiles: dualCodexProfiles,
   });
-  assert.match(dualBoardHtml, /fpf19910417/);
+  assert.match(dualBoardHtml, /carol1990/);
   assert.match(dualBoardHtml, /guuguo/);
 
   // 3. renderSidebarThreadListHtml distinguishes project headers & child tree rail, hides duplicate preview,
@@ -3607,7 +3607,7 @@ test("zero pictographic UI emojis, hidden redundant topbar chrome, and overflow 
       goalBadge: "2/20",
       pendingRequest: { id: "req-1" },
     }]),
-    renderVoiceCallTranscriptHtml([{ heardText: "粉丝站什么进度", spokenReply: "当前有 1 项待确认", actionTag: "已派发" }]),
+    renderVoiceCallTranscriptHtml([{ heardText: "示例商城什么进度", spokenReply: "当前有 1 项待确认", actionTag: "已派发" }]),
   ];
   for (const chunk of renderedChunks) {
     assert.equal(/\p{Extended_Pictographic}/u.test(chunk), false, `rendered UI contains emoji: ${chunk.slice(0, 120)}`);
@@ -3667,7 +3667,7 @@ test("local Whisper ASR worker endpoint /api/voice/transcribe and fast voice/cal
     AGY_BIN: MOCK_AGY_BIN,
     EDGE_TTS_BIN: MOCK_EDGE_TTS_BIN,
     VOICE_ASR_BIN: MOCK_VOICE_ASR_BIN,
-    MOCK_VOICE_ASR_TEXT: "让 粉丝站小屋 跑一下检查",
+    MOCK_VOICE_ASR_TEXT: "让 示例商城后台 跑一下检查",
     AGENT_CONTROL_CODEX_HOMES: JSON.stringify([{ id: "default", label: "Codex 默认", home: codexHome }]),
     AGENT_CONTROL_CLAUDE_CONFIG_DIRS: JSON.stringify([{ id: "default", label: "Claude 默认", home: claudeHome }]),
     AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "cli", label: "Antigravity CLI", home: agyCli, profileType: "cli" }]),
@@ -3681,12 +3681,12 @@ test("local Whisper ASR worker endpoint /api/voice/transcribe and fast voice/cal
   });
   await srv.start();
 
-  const projCwd = resolve(root, "fans-home");
+  const projCwd = resolve(root, "demo-shop");
   await mkdir(projCwd, { recursive: true });
   await fetch(`${srv.url}/api/project/meta`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cwd: projCwd, alias: "粉丝站小屋", pinned: true }),
+    body: JSON.stringify({ cwd: projCwd, alias: "示例商城后台", pinned: true }),
   });
 
   const createdRes = await fetch(`${srv.url}/api/thread/new`, {
@@ -3724,7 +3724,7 @@ test("local Whisper ASR worker endpoint /api/voice/transcribe and fast voice/cal
   assert.equal(asrRes.status, 200);
   const asrJson = await asrRes.json();
   assert.equal(asrJson.ok, true);
-  assert.equal(asrJson.text, "让 粉丝站小屋 跑一下检查");
+  assert.equal(asrJson.text, "让 示例商城后台 跑一下检查");
   assert.equal(asrJson.engine, "mock-whisper");
 
   // /api/voice/call/start warms mock-whisper instead of ACP.
@@ -3756,7 +3756,7 @@ test("local Whisper ASR worker endpoint /api/voice/transcribe and fast voice/cal
   assert.equal(callJson.usedFallback, false);
   assert.equal(callJson.model, DEFAULT_VOICE_HYDROGEN_MODEL);
   assert.equal(callJson.asrEngine, "mock-whisper");
-  assert.equal(callJson.heardText, "让 粉丝站小屋 跑一下检查");
+  assert.equal(callJson.heardText, "让 示例商城后台 跑一下检查");
   assert.equal(callJson.plan?.intent, "send_turn");
   assert.equal(callJson.executed?.ok, true);
   assert.equal(callJson.executed?.action, "send_turn");
@@ -4384,7 +4384,7 @@ test("renderTurnHtml renders Claude <task-notification>, <cross-session-message>
         content: [
           {
             type: "text",
-            text: 'Another Claude session sent a message:\n<cross-session-message from="local_123" from-name="粉丝站管理后台评估">\n已部署 **prod**\n</cross-session-message>\n<bash-input>git status -s</bash-input><bash-stdout>\u001b[32mM README.md\u001b[0m</bash-stdout><bash-stderr></bash-stderr>',
+            text: 'Another Claude session sent a message:\n<cross-session-message from="local_123" from-name="示例商城管理后台评估">\n已部署 **prod**\n</cross-session-message>\n<bash-input>git status -s</bash-input><bash-stdout>\u001b[32mM README.md\u001b[0m</bash-stdout><bash-stderr></bash-stderr>',
           },
         ],
       },
@@ -4393,7 +4393,7 @@ test("renderTurnHtml renders Claude <task-notification>, <cross-session-message>
 
   assert.doesNotMatch(crossAndBashHtml, /&lt;cross-session-message|&lt;bash-input|msg-role">你</);
   assert.match(crossAndBashHtml, /class="msg-row msg-cross-session"/);
-  assert.match(crossAndBashHtml, /粉丝站管理后台评估/);
+  assert.match(crossAndBashHtml, /示例商城管理后台评估/);
   assert.match(crossAndBashHtml, /<strong>prod<\/strong>/);
   assert.match(crossAndBashHtml, /class="msg-row msg-claude-bash"/);
   assert.match(crossAndBashHtml, /\$ git status -s/);
@@ -4484,12 +4484,12 @@ test("renderTurnHtml renders per-turn model badges, inline interrupted resume bu
       id: "claude-hotmail",
       provider: "claude",
       label: "Claude · claude hotmail",
-      account: { signedIn: true, email: "guodeqing@hotmail.com", planType: "Pro" },
+      account: { signedIn: true, email: "bob@hotmail.com", planType: "Pro" },
       health: {
         status: "unavailable",
         reasonCode: "auth",
         shortReason: "CLI未登录",
-        detail: "CLI未登录：请执行 CLAUDE_CONFIG_DIR=~/.claude-claude-hotmail claude auth login --email guodeqing@hotmail.com",
+        detail: "CLI未登录：请执行 CLAUDE_CONFIG_DIR=~/.claude-claude-hotmail claude auth login --email bob@hotmail.com",
       },
     },
     {
@@ -4500,7 +4500,7 @@ test("renderTurnHtml renders per-turn model badges, inline interrupted resume bu
       health: { status: "available" },
     },
   ]);
-  assert.match(pillsHtml, /data-copy-login-cmd="CLAUDE_CONFIG_DIR=~\/\.claude-claude-hotmail claude auth login --email guodeqing@hotmail\.com"[^>]*>复制登录<\/button>/);
+  assert.match(pillsHtml, /data-copy-login-cmd="CLAUDE_CONFIG_DIR=~\/\.claude-claude-hotmail claude auth login --email bob@hotmail\.com"[^>]*>复制登录<\/button>/);
 });
 
 test("multi-profile colliding handles auto-disambiguate to distinct short aliases with lightweight AI and fallback", async (t) => {
@@ -4511,7 +4511,7 @@ test("multi-profile colliding handles auto-disambiguate to distinct short aliase
       id: "default",
       label: "Claude 默认",
       installed: true,
-      account: { signedIn: true, email: "guodeqing@icloud.com" },
+      account: { signedIn: true, email: "bob@icloud.com" },
     },
     {
       key: "claude:claude-hotmail",
@@ -4519,7 +4519,7 @@ test("multi-profile colliding handles auto-disambiguate to distinct short aliase
       id: "claude-hotmail",
       label: "Claude 默认",
       installed: true,
-      account: { signedIn: true, email: "guodeqing@hotmail.com" },
+      account: { signedIn: true, email: "bob@hotmail.com" },
     },
   ];
   assert.equal(resolveDistinctProfileChipText(samePrefixProfiles[0], samePrefixProfiles), "iCloud");
@@ -4575,8 +4575,8 @@ test("multi-profile colliding handles auto-disambiguate to distinct short aliase
     setCallbacks() {},
     async listProfiles() {
       return [
-        { key: "codex:default", provider: "codex", id: "default", label: "Codex 默认", installed: true, account: { email: "guodeqing@gmail.com" } },
-        { key: "codex:guuguo", provider: "codex", id: "guuguo", label: "Codex · guuguo", installed: true, account: { email: "guuguo@qq.com" } },
+        { key: "codex:default", provider: "codex", id: "default", label: "Codex 默认", installed: true, account: { email: "bob@gmail.com" } },
+        { key: "codex:guuguo", provider: "codex", id: "guuguo", label: "Codex · guuguo", installed: true, account: { email: "alice@qq.com" } },
       ];
     },
   };
@@ -4893,8 +4893,8 @@ test("expanded telemetry cards show reset dates inline without duplicate drawer 
       label: "Codex · guuguo自用",
       installed: true,
       authenticated: true,
-      account: { email: "guuguo@qq.com" },
-      health: { alias: "guuguo·QQ" },
+      account: { email: "alice@qq.com" },
+      health: { alias: "alice·QQ" },
       quota: {
         status: "ok",
         windows: {
@@ -4914,22 +4914,22 @@ test("expanded telemetry cards show reset dates inline without duplicate drawer 
 
   assert.deepEqual(
     suggestFallbackDistinctAliases([
-      { key: "codex:codex", provider: "codex", id: "codex", label: "Codex · guuguo自用", installed: true, account: { email: "guuguo@qq.com" } },
-      { key: "codex:default", provider: "codex", id: "default", label: "Codex 默认", installed: true, account: { email: "fpf19910417@163.com" } },
+      { key: "codex:codex", provider: "codex", id: "codex", label: "Codex · guuguo自用", installed: true, account: { email: "alice@qq.com" } },
+      { key: "codex:default", provider: "codex", id: "default", label: "Codex 默认", installed: true, account: { email: "carol1990@163.com" } },
     ]),
     {
-      "codex:codex": "guuguo·QQ",
-      "codex:default": "fpf·163",
+      "codex:codex": "alice·QQ",
+      "codex:default": "carol·163",
     },
   );
 
   assert.deepEqual(
     suggestFallbackDistinctAliases([
-      { key: "grok:cockpit-1", provider: "grok", id: "cockpit-1", label: "Grok · guuguo", installed: true, account: { email: "guuguo@qq.com" } },
+      { key: "grok:cockpit-1", provider: "grok", id: "cockpit-1", label: "Grok · guuguo", installed: true, account: { email: "alice@qq.com" } },
       { key: "grok:default", provider: "grok", id: "default", label: "Grok 默认", installed: true, account: { email: "" } },
     ]),
     {
-      "grok:cockpit-1": "guuguo·QQ",
+      "grok:cockpit-1": "alice·QQ",
       "grok:default": "默认",
     },
   );
@@ -4949,8 +4949,8 @@ test("expanded telemetry cards show reset dates inline without duplicate drawer 
     setCallbacks() {},
     async listProfiles() {
       return [
-        { id: "codex", label: "Codex · guuguo自用", installed: true, account: { email: "guuguo@qq.com" } },
-        { id: "default", label: "Codex 默认", installed: true, account: { email: "fpf19910417@163.com" } },
+        { id: "codex", label: "Codex · guuguo自用", installed: true, account: { email: "alice@qq.com" } },
+        { id: "default", label: "Codex 默认", installed: true, account: { email: "carol1990@163.com" } },
       ];
     },
   };
@@ -4960,8 +4960,8 @@ test("expanded telemetry cards show reset dates inline without duplicate drawer 
     setCallbacks() {},
     async listProfiles() {
       return [
-        { id: "default", label: "Claude 默认", installed: true, account: { email: "guodeqing@icloud.com" } },
-        { id: "claude-hotmail", label: "Claude · hotmail", installed: true, account: { email: "guodeqing@hotmail.com" } },
+        { id: "default", label: "Claude 默认", installed: true, account: { email: "bob@icloud.com" } },
+        { id: "claude-hotmail", label: "Claude · hotmail", installed: true, account: { email: "bob@hotmail.com" } },
       ];
     },
   };
@@ -4971,7 +4971,7 @@ test("expanded telemetry cards show reset dates inline without duplicate drawer 
     providers: [mockCodex, mockClaude],
     enableQueueDrain: false,
     callLightweightProfileAi: async ({ providerId }) => {
-      if (providerId === "codex") return '{"codex:codex":"guuguo·QQ","codex:default":"fpf·163"}';
+      if (providerId === "codex") return '{"codex:codex":"alice·QQ","codex:default":"carol·163"}';
       if (providerId === "claude") return '{"claude:claude-hotmail":"Hotmail"}';
       return null;
     },
@@ -4983,8 +4983,8 @@ test("expanded telemetry cards show reset dates inline without duplicate drawer 
     await new Promise((r) => setTimeout(r, 25));
     list = await hub.listProvidersAndProfiles();
   }
-  assert.equal(list.profiles.find((p) => p.key === "codex:codex")?.health?.alias, "guuguo·QQ");
-  assert.equal(list.profiles.find((p) => p.key === "codex:default")?.health?.alias, "fpf·163");
+  assert.equal(list.profiles.find((p) => p.key === "codex:codex")?.health?.alias, "alice·QQ");
+  assert.equal(list.profiles.find((p) => p.key === "codex:default")?.health?.alias, "carol·163");
   assert.equal(list.profiles.find((p) => p.key === "claude:default")?.health?.alias, "手动留名");
   assert.equal(list.profiles.find((p) => p.key === "claude:claude-hotmail")?.health?.alias, "Hotmail");
   await hub.close();

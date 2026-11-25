@@ -11,18 +11,18 @@ import {
 
 const mockOverview = {
   topics: [
-    { id: "manga-trans", name: "漫画翻译" },
+    { id: "manga-trans", name: "图片翻译" },
     { id: "ops-service", name: "服务端运维" },
   ],
   bossFocus: [
     {
       topicId: "manga-trans",
-      name: "漫画翻译",
+      name: "图片翻译",
       stageIndex: 3,
       stageLabel: "打磨",
       readyToHarvest: true,
-      bottleneck: "缺爱发电回调日志",
-      nextStep: "补齐爱发电回调验收",
+      bottleneck: "缺会员订阅回调日志",
+      nextStep: "补齐会员订阅回调验收",
     },
   ],
   radar: {
@@ -36,9 +36,9 @@ const mockOverview = {
       topics: [
         {
           id: "manga-trans",
-          name: "漫画翻译",
+          name: "图片翻译",
           pipeline: { readyToHarvest: true },
-          nextStep: "补齐爱发电回调验收",
+          nextStep: "补齐会员订阅回调验收",
           activeThreads: [{ id: "codex:default:t1", title: "日志联调", live: true }],
         },
         {
@@ -55,7 +55,7 @@ const mockOverview = {
 test("Sprite Assistant generates opening briefing and detects pending/harvest/completed/failed events", () => {
   const brief = buildSpriteOpeningBriefing(mockOverview, []);
   assert.match(brief.text, /1 名 AI 员工正在运转/);
-  assert.match(brief.text, /漫画翻译/);
+  assert.match(brief.text, /图片翻译/);
   assert.equal(brief.tone, "coin");
 
   const snap1 = captureSpriteOverviewSnapshot(mockOverview, []);
@@ -83,7 +83,7 @@ test("Sprite Assistant generates opening briefing and detects pending/harvest/co
           topics: [
             {
               id: "manga-trans",
-              name: "漫画翻译",
+              name: "图片翻译",
               pipeline: { readyToHarvest: true },
               activeThreads: [{ id: "codex:default:t1", title: "日志联调", live: false, lastError: "API timeout" }],
             },
@@ -110,7 +110,7 @@ test("Sprite Assistant classifies confirm/cancel/queries/dispatch and escapes XS
   assert.equal(classifySpriteUserInput("谁待拍板").intent, "query_pending");
   assert.equal(classifySpriteUserInput("准收菜").intent, "query_harvest");
 
-  const disp = classifySpriteUserInput("帮我派单：用 Antigravity 给漫画翻译新开分身补齐回调日志", {
+  const disp = classifySpriteUserInput("帮我派单：用 Antigravity 给图片翻译新开分身补齐回调日志", {
     overview: mockOverview,
     agentOptions,
   });
@@ -131,7 +131,7 @@ test("Sprite Assistant classifies confirm/cancel/queries/dispatch and escapes XS
       routes: [
         {
           action: "reuse_clean",
-          topicName: "漫画翻译 <img onerror=alert(1)>",
+          topicName: "图片翻译 <img onerror=alert(1)>",
           agentLabel: "Antigravity",
           reason: "复用空闲干净工位",
         },
@@ -166,10 +166,10 @@ test("Sprite Assistant supports scoped topic archive preview, confirm, and conte
   const archHtml = renderSpriteAssistantHtml({
     open: true,
     scopedTopicId: "manga-trans",
-    scopedTopicName: "漫画翻译",
+    scopedTopicName: "图片翻译",
     pendingArchive: {
       topicId: "manga-trans",
-      topicName: "漫画翻译",
+      topicName: "图片翻译",
       staleDays: 3,
       candidates: [{ id: "t1", title: "旧会话 <script>x</script>", preview: "已完成", idleDays: 5 }],
     },
@@ -182,7 +182,7 @@ test("Sprite Assistant supports scoped topic archive preview, confirm, and conte
     open: true,
     pendingPreview: {
       payload: { inheritContext: true },
-      routes: [{ action: "spawn_parallel", topicName: "漫画翻译", hasTopicDigest: true, agentLabel: "Agy" }],
+      routes: [{ action: "spawn_parallel", topicName: "图片翻译", hasTopicDigest: true, agentLabel: "Agy" }],
     },
   });
   assert.match(inheritHtml, /继承归档记忆/);
@@ -213,7 +213,7 @@ test("Sprite Assistant skips excluded accounts on provider match and renders exc
     { key: "codex:personal", provider: "codex", providerLabel: "Codex", label: "个人主力", excluded: false },
   ];
 
-  const disp = classifySpriteUserInput("用 Codex 给漫画翻译修个问题", {
+  const disp = classifySpriteUserInput("用 Codex 给图片翻译修个问题", {
     overview: mockOverview,
     agentOptions,
     excludedAgentKeys: ["codex:company"],
