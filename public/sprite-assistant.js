@@ -1,4 +1,6 @@
 import { iconSvg } from "./icons.js";
+import { apiUrl, apiPost, isDemoMode } from "./api-client.js";
+import { t } from "./i18n.js";
 
 export const SPRITE_PREFS_STORAGE_KEY = "agentControl.spritePrefs.v1";
 
@@ -82,6 +84,8 @@ export function captureSpriteOverviewSnapshot(overview, threads = []) {
         id: tp.id,
         name: tp.name || tp.id,
         nextStep: tp.nextStep || tp.bottleneck || "",
+        evidence: tp.harvestEvidence || null,
+        count: tp.assistantSignals?.counts?.harvest || 1,
       });
     }
     for (const th of tp?.activeThreads || []) {
@@ -153,58 +157,128 @@ export function captureSpriteOverviewSnapshot(overview, threads = []) {
 }
 
 export function buildSpriteOpeningBriefing(overview, threads = []) {
+  const topics = overview?.domains?.flatMap((d) => d.topics || []) || [];
   const snap = captureSpriteOverviewSnapshot(overview, threads);
-  if (!snap) {
-    return {
-      tone: "idle",
-      text: "正在盘点梦工厂各产线工位，稍等一下…",
-      spokenText: "正在盘点梦工厂各产线工位。",
-      chips: [],
-    };
+  const alert = topics.find((tp) => tp.assistantSignals?.counts?.alert > 0);
+  const harvest = topics.find((tp) => tp.assistantSignals?.counts?.harvest > 0 || tp.pipeline?.readyToHarvest);
+  const ruin = topics.find((tp) => tp.assistantSignals?.counts?.ruin > 0);
+  const oldest = [...topics].sort((a, b) => topicActivityAt(a) - topicActivityAt(b))[0];
+  const pending = snap && [...snap.pendingByThread.values()][0];
+  const topic = alert || (pending && topics.find((tp) => tp.activeThreads?.some((th) => th.id === pending.id))) || harvest || ruin || oldest;
+  const tone = alert || pending ? "urgent" : harvest ? "coin" : ruin ? "worry" : "idle";
+  const text = alert || pending
+    ? t("{name}还在等你拍板，先给它一句话？", { name: topic?.name || pending.topicName })
+    : harvest ? t("{name}有菜可收，先验一下这轮产出？", { name: harvest.name })
+      : ruin ? t("{name}上次停下还没收尾，接着做还是先搁着？", { name: ruin.name })
+      : oldest ? t("园子很太平，最久没动的是{name}，去看看？", { name: oldest.name })
+        : t("园区暂时没有工单，等产线有动静我再报。");
+  return { tone, text, spokenText: text, chips: topic ? [{ kind: "topic", id: topic.id, label: t("去看看") }] : [],
+    stats: snap ? t("{count} 名 AI 员工正在运转", { count: snap.liveThreadIds.size }) : "" };
+}
+
+function topicActivityAt(topic) {
+  const times = [topic.updatedAt, topic.lastActivityAt, ...(topic.activeThreads || []).map((th) => th.updatedAt)];
+  return Math.max(0, ...times.map((value) => Number(value) || Date.parse(value) || 0));
+}
+
+// Chunk parser keeps incomplete lines, including CRLF split across network chunks.
+export function parseSpriteNdjson(chunk, remainder = "", final = false) {
+  const lines = (remainder + chunk).split("\n");
+  const rest = final ? "" : lines.pop();
+  const events = lines.filter((line) => line.trim()).map((line) => JSON.parse(line));
+  return { events, remainder: rest };
+}
+
+export function appendSpriteTurn(session = {}, text, answer) {
+  return {
+    turns: [...(session.turns || []), { role: "user", text }, { role: "assistant", text: answer.text || "" }].slice(-6),
+    focusStack: answer.focusTopicId
+      ? [answer.focusTopicId, ...(session.focusStack || []).filter((id) => id !== answer.focusTopicId)]
+      : [...(session.focusStack || [])],
+  };
+}
+
+export async function askSpriteAssistant(body, onTrace, { fetchImpl = globalThis.fetch, demo = isDemoMode(), post = apiPost } = {}) {
+  if (demo) {
+    const answer = await post("/api/assistant/ask", body);
+    for (const trace of answer?.trace || []) onTrace(trace);
+    return answer;
   }
-
-  const liveCount = snap.liveThreadIds.size;
-  const pendingItems = Array.from(snap.pendingByThread.values());
-  const harvestItems = Array.from(snap.harvestTopics.values());
-  const topFocus = Array.isArray(overview?.bossFocus) ? overview.bossFocus[0] : null;
-
-  const parts = [];
-  const chips = [];
-  let tone = "idle";
-
-  if (pendingItems.length > 0) {
-    tone = "urgent";
-    const firstP = pendingItems[0];
-    parts.push(`有 ${pendingItems.length} 个工位待你拍板（如「${firstP.topicName} · ${firstP.title}」）`);
-    chips.push({ kind: "thread", id: firstP.id, label: `去拍板：${firstP.title.slice(0, 14)}` });
+  const response = await fetchImpl(apiUrl("./api/assistant/ask"), {
+    method: "POST", credentials: "same-origin",
+    headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" }, body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(t("问答请求失败（{status}）", { status: response.status }));
+  if (!(response.headers.get("content-type") || "").includes("ndjson")) {
+    const answer = await response.json();
+    for (const trace of answer.trace || []) onTrace(trace);
+    return answer;
   }
+  let remainder = "", answer = null;
+  const consume = (chunk, final = false) => {
+    const parsed = parseSpriteNdjson(chunk, remainder, final);
+    remainder = parsed.remainder;
+    for (const event of parsed.events) {
+      if (event.type === "trace") onTrace(event);
+      if (event.type === "answer") answer = event;
+    }
+  };
+  if (response.body?.getReader) {
+    const reader = response.body.getReader(), decoder = new TextDecoder();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        consume(decoder.decode(value, { stream: true }));
+      }
+      consume(decoder.decode(), true);
+    } finally { reader.releaseLock(); }
+  } else consume(await response.text(), true);
+  if (!answer) throw new Error(t("没有收到回答，请重试。"));
+  return answer;
+}
 
-  if (liveCount > 0) {
-    parts.push(`${liveCount} 名 AI 员工正在运转`);
-  } else {
-    parts.push("当前工位全部空闲待命");
-  }
+export function submitSpriteDispatch(payload, { confirmed = false, routes = [], post = apiPost } = {}) {
+  return post("/api/overview/dispatch", { ...payload, confirmOnly: !confirmed,
+    ...(confirmed ? { approvedRoutes: routes } : { useAiPlanner: true }) });
+}
 
-  if (harvestItems.length > 0) {
-    if (tone === "idle") tone = "coin";
-    const firstH = harvestItems[0];
-    parts.push(`${harvestItems.length} 条产线进入准收菜（首推「${firstH.name}」）`);
-    chips.push({ kind: "topic", id: firstH.id, label: `看产线：${firstH.name}` });
-  }
+export function spriteTomorrowAtEight(now = new Date()) {
+  const next = new Date(now);
+  next.setDate(next.getDate() + 1);
+  next.setHours(8, 0, 0, 0);
+  return next.toISOString();
+}
 
-  if (topFocus && topFocus.nextStep) {
-    chips.push({
-      kind: "preview",
-      topicId: topFocus.topicId,
-      text: topFocus.nextStep,
-      label: `推进主线：${topFocus.name}`,
-    });
-  }
+export function buildSpriteContext(topic, overview) {
+  const name = topic?.name;
+  const badges = overview?.assistantBadges || {};
+  const signal = topic?.assistantSignals?.top;
+  const prompts = { alert: "问{name}：等你拍板的是哪一步？或者说‘派工…’", harvest: "问{name}：这轮收菜的依据是什么？或者说‘派工…’", ruin: "问{name}：上次停在哪？或者说‘派工…’" };
+  const primary = signal === "alert" ? "去拍板" : signal === "harvest" ? "去收菜" : "接着做";
+  return {
+    placeholder: name ? t(prompts[signal] || "问{name}：做到哪了？卡在哪？或者说‘派工…’", { name }) : t("问我任何产线的进度，或者说‘派工…’"),
+    quick: name ? [t("做到哪了"), t("卡在哪"), t(primary), t("历史")]
+      : [badges.alert ? t("去拍板") : "", badges.harvest ? t("去收菜") : "", badges.ruin ? t("我忘了什么") : "", t("汇报进展")].filter(Boolean),
+  };
+}
 
-  const text = `${parts.join(" · ")}${topFocus ? ` · 主线优先「${topFocus.name}」` : ""}`;
-  const spokenText = `厂长好，当前${parts.join("，")}。`;
+function renderSources(sources = []) {
+  return sources.map((source) => source.threadId
+    ? renderSpriteChipHtml({ kind: "thread", id: source.threadId, label: source.label })
+    : source.topicId ? renderSpriteChipHtml({ kind: "topic", id: source.topicId, label: source.label })
+      : `<span class="sprite-source-label">${escapeHtml(source.label)}</span>`).join("");
+}
 
-  return { tone, text, spokenText, chips: chips.slice(0, 3) };
+export function renderSpriteWorkCard(card, { busy = false, continueMessage } = {}) {
+  const action = card.type === "harvest" ? "harvest" : "continue";
+  const message = continueMessage ?? t("接着上次停下的地方继续：{line}", { line: card.line });
+  const button = (type, label) => `<button type="button" data-sprite-card-id="${escapeHtml(card.id)}" data-sprite-card-action="${type}" ${busy ? "disabled" : ""}>${t(label)}</button>`;
+  return `<article class="sprite-work-card"><strong>${escapeHtml(card.title)}</strong><p>${escapeHtml(card.line)}</p>
+    <div class="sprite-msg-chips">${renderSources(card.sources)}</div>
+    ${action === "continue" ? `<textarea data-sprite-continue-message="${escapeHtml(card.id)}" aria-label="${t("续做语")}">${escapeHtml(message)}</textarea>` : ""}
+    <div class="sprite-card-actions">${button(action === "continue" ? "send_continue" : action, action === "harvest" ? "收菜" : "续做")}${button("snooze", "稍后")}${button("park", "搁置")}
+    <details><summary>${t("更多")}</summary>${button("done", "完成")}${button("dismiss", "不用提醒")}</details></div></article>`;
 }
 
 export function buildSpriteTopicBriefing(topic, nowSec = Math.floor(Date.now() / 1000)) {
@@ -287,7 +361,7 @@ export function buildSpriteQueryReply(kind, overview, threads = []) {
     const names = list.slice(0, 3).map((x) => `「${x.name}」`).join("、");
     return {
       tone: "coin",
-      text: `共有 ${list.length} 条准收菜产线：${names}，距离闭环变环最近！`,
+      text: list.map((tp) => `「${tp.name}」${tp.evidence ? t("有 {count} 筐可收（依据：{evidence}）", { count: tp.count, evidence: tp.evidence }) : t("看阶段快能收菜了（推测）")}`).join("；"),
       spokenText: `共有 ${list.length} 条准收菜产线，包括 ${list[0].name}。`,
       chips: list.slice(0, 3).map((x) => (
         x.nextStep
@@ -320,7 +394,7 @@ export function diffSpriteOverviewEvents(prevSnap, nextSnap, { recentCompletedBy
       events.push({
         type: "harvest",
         tone: "coin",
-        text: `准收菜达成！「${tp.name}」已推进到可验收变现阶段。`,
+        text: `「${tp.name}」${tp.evidence ? t("有 {count} 筐可收（依据：{evidence}）", { count: tp.count, evidence: tp.evidence }) : t("看阶段快能收菜了（推测）")}`,
         spokenText: `好消息，${tp.name}已进入准收菜阶段。`,
         chips: [{ kind: "topic", id: topicId, label: `查看：${tp.name}` }],
       });
@@ -347,8 +421,8 @@ export function diffSpriteOverviewEvents(prevSnap, nextSnap, { recentCompletedBy
         events.push({
           type: "completed",
           tone: "work",
-          text: `工位完工：${prefix}${title} 已完成本轮任务。`,
-          spokenText: `${meta?.topicName || title}工位已完成本轮任务。`,
+          text: `工位完工：${prefix}${title} 跑完一轮，等你收菜。`,
+          spokenText: `${meta?.topicName || title}工位跑完一轮，等你收菜。`,
           chips: [{ kind: "thread", id: prevLiveId, label: `验收：${title.slice(0, 12)}` }],
         });
       }
@@ -408,7 +482,7 @@ export function classifySpriteUserInput(rawText, {
   }
 
   let matchedTopicId = "";
-  const allTopics = Array.isArray(overview?.topics) ? overview.topics : [];
+  const allTopics = Array.isArray(overview?.topics) ? overview.topics : overview?.domains?.flatMap((d) => d.topics || []) || [];
   for (const tp of allTopics) {
     const cleanName = String(tp?.name || "").trim();
     if (cleanName && cleanName.length >= 2 && text.includes(cleanName)) {
@@ -442,6 +516,8 @@ export function classifySpriteUserInput(rawText, {
       instruction: text,
     };
   }
+
+  if (!/^(?:小精灵[,，\s]*)?(?:请|帮我|麻烦)?\s*(?:自动)?(?:派工(?!是什么|记录|历史|怎么)|派单(?!是什么|记录|历史|怎么)|让.{1,40}去|开(?:个|一个)?工位.{0,8}做|dispatch\b|assign\b)/i.test(text)) return { intent: "ask", text, topicId: effectiveTopicId };
 
   // Natural language dispatch extraction
   let agentKey = "auto";
@@ -612,6 +688,7 @@ function renderPendingPreviewCardHtml(pendingPreview, busy = false) {
           const taskBrief = String(rt.segmentText || "").trim();
           return `
             <div class="sprite-preview-route">
+              <p class="sprite-dispatch-confirm">${escapeHtml(t("我理解为：让 {agent} 在 {topic}（{station}）做 {task}，这样派吗？", { agent: agentLabel, topic: rt.topicName || t("未指定产线"), station: rt.action === "reuse_clean" ? t("原工位") : t("新工位"), task: taskBrief || pendingPreview.payload?.text || "" }))}</p>
               <div class="sprite-preview-line1">
                 <span class="sprite-route-act ${rt.action === "reuse_clean" ? "is-reuse" : "is-spawn"}">${escapeHtml(actLabel)}</span>
                 <strong class="sprite-route-topic">${escapeHtml(rt.topicName || "未指定产线")}</strong>
@@ -637,7 +714,7 @@ function renderPendingPreviewCardHtml(pendingPreview, busy = false) {
       <div class="sprite-preview-actions">
         <span class="sprite-preview-hint">可点右侧按钮，或语音说「确认」</span>
         <div class="sprite-preview-btns">
-          <button type="button" class="mo-ctrl-btn sprite-btn-cancel" data-sprite-action="cancel-dispatch" ${busy ? "disabled" : ""}>取消</button>
+          <button type="button" class="mo-ctrl-btn sprite-btn-cancel" data-sprite-action="edit-dispatch" ${busy ? "disabled" : ""}>${t("修改")}</button>
           <button type="button" class="btn-primary btn-xs sprite-btn-confirm" data-sprite-action="confirm-dispatch" ${busy ? "disabled" : ""}>
             ${iconSvg("send", { size: 11 })}<span>${busy ? "派出中…" : "确认派出"}</span>
           </button>
@@ -783,6 +860,7 @@ export function renderSpriteAssistantHtml(spriteState = {}, {
 
       ${open ? `
         <section class="sprite-popover-card${enteringOpen ? " is-entering" : ""}${recording || handsFree ? " is-voice-live" : ""}" aria-label="面板小精灵助手">
+          <div class="sprite-drawer-handle" data-sprite-drawer-handle="1" aria-hidden="true"></div>
           <header class="sprite-pop-head">
             <div class="sprite-pop-brand">
               ${renderSpriteAvatarSvg({ mood: effectiveMood, size: 24 })}
@@ -828,11 +906,16 @@ export function renderSpriteAssistantHtml(spriteState = {}, {
           </header>
 
           ${renderSpriteDispatchPrefsDrawerHtml({ prefsOpen, agentOptions, excludedAgentKeys, busy })}
+          ${prefsOpen ? `<div class="sprite-memory"><strong>${t("小精灵记忆")}</strong><button data-sprite-action="load-memory">${t("查看别名")}</button><button data-sprite-action="clear-memory">${t("一键清空")}</button>${spriteState.profile ? `<ul>${Object.entries(spriteState.profile.aliases || {}).map(([alias, id]) => `<li>${escapeHtml(alias)} → ${escapeHtml(id)}</li>`).join("") || t("暂无别名")}</ul>` : ""}</div>` : ""}
 
           <div id="spriteFeedList" class="sprite-feed">
             ${messages.length ? messages.slice(-10).map((m) => `
               <div class="sprite-msg is-${escapeHtml(m.role || "sprite")} ${m.tone ? `tone-${escapeHtml(m.tone)}` : ""}">
                 <div class="sprite-msg-text">${escapeHtml(m.text || "")}</div>
+                ${m.trace ? `<details class="sprite-trace"><summary>${escapeHtml(m.trace.label)}</summary><div class="sprite-msg-chips">${renderSources(m.sources)}</div></details>` : ""}
+                ${m.sources?.length ? `<div class="sprite-msg-chips">${renderSources(m.sources)}</div>` : ""}
+                ${m.actions?.length ? `<div class="sprite-answer-actions">${m.actions.map((action, index) => `<button type="button" data-sprite-answer-id="${escapeHtml(m.id)}" data-sprite-answer-action="${index}">${escapeHtml(action.label)}</button>`).join("")}</div>` : ""}
+                ${m.candidates?.length ? `<div class="sprite-answer-actions">${m.candidates.slice(0, 2).map((candidate) => `<button type="button" data-sprite-clarify-id="${escapeHtml(m.id)}" data-sprite-clarify-topic="${escapeHtml(candidate.topicId)}">${escapeHtml(candidate.title)}</button>`).join("")}</div>` : ""}
                 ${Array.isArray(m.chips) && m.chips.length ? `
                   <div class="sprite-msg-chips">${m.chips.map(renderSpriteChipHtml).join("")}</div>
                 ` : ""}
@@ -844,21 +927,13 @@ export function renderSpriteAssistantHtml(spriteState = {}, {
             `}
           </div>
 
+          ${spriteState.tour ? `<nav class="sprite-tour-controls"><strong>${escapeHtml(spriteState.tour.stops[spriteState.tour.index]?.topicTitle || "")}</strong><button data-sprite-action="tour-next">${t("下一站")}</button><button data-sprite-action="tour-skip">${t("跳过")}</button><button data-sprite-action="tour-end">${t("结束")}</button></nav>` : ""}
+          <div class="sprite-work-cards">${(spriteState.cards || []).map((card) => renderSpriteWorkCard(card, { ...spriteState, continueMessage: spriteState.continueDrafts?.[card.id] })).join("")}</div>
           ${renderPendingReorgCardHtml(pendingReorg, busy)}
           ${renderPendingArchiveCardHtml(pendingArchive, busy)}
           ${renderPendingPreviewCardHtml(pendingPreview, busy)}
 
-          <div class="sprite-quick-row">
-            ${scopedTopicId ? `
-              <button type="button" class="sprite-quick-chip is-highlight" data-sprite-archive-topic="${escapeHtml(scopedTopicId)}">${iconSvg("archive", { size: 10 })} 归档久远对话并总结</button>
-              <button type="button" class="sprite-quick-chip" data-sprite-topic-brief="${escapeHtml(scopedTopicId)}">本产线状态</button>
-            ` : `
-              <button type="button" class="sprite-quick-chip" data-sprite-say="汇报进展">汇报进展</button>
-              <button type="button" class="sprite-quick-chip" data-sprite-say="谁待拍板">待拍板</button>
-              <button type="button" class="sprite-quick-chip" data-sprite-say="准收菜">准收菜</button>
-              <button type="button" class="sprite-quick-chip" data-sprite-action="reorg-guide">调整产线布局</button>
-            `}
-          </div>
+          <div class="sprite-quick-row">${(spriteState.context?.quick || [t("汇报进展")]).map((label) => `<button type="button" class="sprite-quick-chip" data-sprite-say="${escapeHtml(label)}">${escapeHtml(label)}</button>`).join("")}${scopedTopicId ? `<button class="sprite-quick-chip" data-sprite-archive-topic="${escapeHtml(scopedTopicId)}">${t("归档历史")}</button>` : ""}</div>
 
           ${voiceBarHtml}
 
@@ -875,7 +950,7 @@ export function renderSpriteAssistantHtml(spriteState = {}, {
               type="text"
               class="sprite-cmd-input"
               value="${escapeHtml(draft)}"
-              placeholder="${recording ? "正在收听语音，也可随时打字发送…" : hasPendingCard ? "说「确认」执行，或输入新指令…" : (scopedTopicId ? `在「${scopedTopicName || scopedTopicId}」派工或说「归档历史对话」…` : "语音或输入派工 / 归档指令…")}"
+              placeholder="${escapeHtml(recording ? t("正在收听语音，也可随时打字发送…") : hasPendingCard ? t("说「确认」执行，或输入新指令…") : spriteState.context?.placeholder || t("问我任何产线的进度，或者说‘派工…’"))}"
               ${busy ? "disabled" : ""}
             />
             <button type="submit" class="btn-primary btn-xs sprite-send-btn" ${busy || transcribing ? "disabled" : ""}>

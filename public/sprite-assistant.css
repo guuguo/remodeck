@@ -1,0 +1,50 @@
+/* Assistant conversation, evidence, work orders, and mobile bottom drawer. */
+.sprite-popover-card { width: min(400px, calc(100vw - 24px)); max-height: min(600px, calc(100dvh - 160px)); }
+.sprite-drawer-handle { display: none; }
+.sprite-trace { font-size: 11px; color: var(--text-muted, #94a3b8); }
+.sprite-trace summary { cursor: pointer; }
+.sprite-answer-actions, .sprite-card-actions, .sprite-tour-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.sprite-answer-actions button, .sprite-card-actions button, .sprite-tour-controls button, .sprite-memory button { border: 1px solid #64748b55; background: #64748b18; color: inherit; border-radius: 8px; padding: 5px 9px; cursor: pointer; font: inherit; }
+.sprite-answer-actions { margin-top: 8px; }
+.sprite-work-cards { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+.sprite-work-card { padding: 10px; margin: 8px; border: 1px solid #38bdf855; border-radius: 10px; background: #38bdf80b; font-size: 12px; }
+.sprite-work-card p { margin: 6px 0; line-height: 1.5; }
+.sprite-work-card textarea { box-sizing: border-box; width: 100%; min-height: 64px; margin-top: 8px; resize: vertical; color: inherit; background: #64748b18; border: 1px solid #64748b55; border-radius: 6px; padding: 6px; }
+.sprite-card-actions { margin-top: 8px; }
+.sprite-card-actions > button:first-child { background: #0284c733; border-color: #38bdf8; }
+.sprite-card-actions details { position: relative; }
+.sprite-card-actions summary { cursor: pointer; }
+.sprite-card-actions details[open] { display: flex; }
+.sprite-source-label { font-size: 10px; color: var(--text-muted, #94a3b8); }
+.sprite-tour-controls, .sprite-memory { flex-shrink: 0; padding: 8px 10px; border-bottom: 1px solid #64748b33; font-size: 11px; }
+.sprite-memory ul { max-height: 80px; overflow: auto; padding-left: 16px; }
+.sprite-dispatch-confirm { line-height: 1.6; margin: 0 0 7px; }
+.sprite-popover-card > .sprite-preview-card { flex-shrink: 1; min-height: 0; overflow-y: auto; }
+.tycoon-assistant-badges { display: flex; gap: 5px; pointer-events: auto; }
+.tycoon-assistant-badge { display: inline-flex; gap: 5px; align-items: center; padding: 6px 9px; color: #e2e8f0; background: #0f172add; border: 1px solid #64748b66; border-radius: 20px; font-size: 11px; white-space: nowrap; cursor: pointer; }
+.tycoon-assistant-badge.is-alert { color: #fda4af; }
+.tycoon-assistant-badge.is-harvest { color: #fcd34d; }
+.tycoon-assistant-badge.is-ruin { color: #fdba74; }
+.tycoon-assistant-badge.is-empty { opacity: .45; }
+.tycoon-more-panel { display: contents; }
+.tycoon-mobile-more, .tycoon-mobile-scene-switch { display: none; }
+@media (max-width: 600px) {
+  .sprite-assistant-mount.is-3d.is-open { position: fixed; inset: auto 0 0; width: 100%; z-index: 100; margin: 0; transform: none; }
+  .sprite-assistant-mount.is-3d.is-open .sprite-assistant-wrap { display: flex; width: 100%; margin: 0; }
+  .sprite-assistant-mount.is-3d .sprite-popover-card { box-sizing: border-box; width: 100%; max-height: 45dvh; border-radius: 18px 18px 0 0; padding-bottom: env(safe-area-inset-bottom); background: var(--panel-bg, #101c30f5); color: var(--text, #e2e8f0); }
+  .sprite-drawer-handle { display: block; flex-shrink: 0; height: 14px; touch-action: pan-x; }
+  .sprite-drawer-handle::after { content: ''; display: block; width: 36px; height: 4px; border-radius: 4px; background: #94a3b877; margin: 5px auto; }
+  .sprite-assistant-wrap.is-open .sprite-avatar-trigger { display: none; }
+  .sprite-feed { min-height: 32px; flex: 1 1 auto; overflow: auto; }
+  .sprite-input-row, .sprite-quick-row, .sprite-pop-head { flex-shrink: 0; }
+  .sprite-quick-row { flex-wrap: nowrap; overflow-x: auto; }
+  .sprite-quick-chip { flex-shrink: 0; }
+  .sprite-work-cards { max-height: 23dvh; }
+  .sprite-tour-controls { padding: 5px 10px; }
+  .sprite-pop-titles strong { max-width: 125px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sprite-prefs-drawer, .sprite-memory { max-height: 12dvh; overflow: auto; }
+}
+
+@media (max-width: 600px) {
+  :root[data-theme="light"] .sprite-assistant-mount.is-3d .sprite-popover-card { background: #f5f9fff5; color: #172033; }
+}

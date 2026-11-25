@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { iconSvg, providerIconSvg } from "./icons.js";
 import { escapeHtml } from "./markdown.js";
 import { formatCompactRelativeTime, projectBaseName } from "./project-board.js";
@@ -1606,6 +1607,15 @@ export function renderTycoonHudHtml(overview, {
           <div class="tycoon-mode-switch">${renderBoardViewSwitchHtml("tycoon3d")}</div>
         </div>
 
+        <div class="tycoon-assistant-badges" aria-label="${t("园区工单")}">
+          ${[["alert", "!", "等你"], ["harvest", "$", "收菜"], ["ruin", "🚧", "烂尾"]].map(([type, mark, label]) => {
+            const count = Number(overview?.assistantBadges?.[type]) || 0;
+            return `<button type="button" class="tycoon-assistant-badge is-${type} ${count ? "" : "is-empty"}" data-assistant-badge="${type}" aria-label="${escapeHtml(t(label))} ${count}"><span>${mark} ${escapeHtml(t(label))}</span><strong>${count}</strong></button>`;
+          }).join("")}
+        </div>
+        <button type="button" class="tycoon-mobile-more" data-sprite-action="hud-more" aria-expanded="false" aria-label="${t("更多")}">⋯</button>
+        <div id="tycoonHudMore" class="tycoon-more-panel">
+        <div class="tycoon-mobile-scene-switch">${renderBoardViewSwitchHtml("tycoon3d")}</div>
         <div class="tycoon-resource-strip" aria-label="工厂核心资源与状态">
           <button type="button" class="tycoon-res-pill is-coin" data-tycoon-fly-harvest="1" title="点击飞往距收菜变现最近的 3D 工位">
             ${iconSvg("coin", { size: 13 })}
@@ -1658,6 +1668,7 @@ export function renderTycoonHudHtml(overview, {
             ${iconSvg("mic", { size: 13 })}
           </button>
           ${allowResume ? `<button type="button" class="mo-ctrl-btn tycoon-top-btn" data-board-action="resume">回对话</button>` : ""}
+        </div>
         </div>
       </header>
 
@@ -1785,7 +1796,7 @@ export function renderTycoonHudHtml(overview, {
           <button
             type="button"
             class="tycoon-mobile-dock-toggle ${isDockOpen ? "is-active" : ""} ${!isDockOpen && hasDockDraftOrQuery ? "has-draft" : ""}"
-            data-tycoon-toggle-dock="1"
+            data-sprite-action="open"
             aria-expanded="${isDockOpen ? "true" : "false"}"
           >
             ${iconSvg(isDockOpen ? "chevron-down" : "send", { size: 12 })}

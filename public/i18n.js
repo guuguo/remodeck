@@ -46,6 +46,62 @@ export function detectInitialLocale(storage = typeof localStorage !== "undefined
 
 // Keyed by exact Simplified Chinese source text so existing templates work without invasive rewrites.
 const DICTIONARY = {
+  "问{name}：等你拍板的是哪一步？或者说‘派工…’": { en: "Ask about {name}: which decision is waiting? Or say “dispatch…”" },
+  "问{name}：这轮收菜的依据是什么？或者说‘派工…’": { en: "Ask about {name}: what is ready for review? Or say “dispatch…”" },
+  "问{name}：上次停在哪？或者说‘派工…’": { en: "Ask about {name}: where did it stop? Or say “dispatch…”" },
+  "{name}上次停下还没收尾，接着做还是先搁着？": { en: "{name} has unfinished work. Continue or park it?" },
+  "园区工单": { en: "Park work orders" },
+  "等你": { en: "Waiting" },
+  "收菜": { en: "Harvest" },
+  "烂尾": { en: "Unfinished" },
+  "更多": { en: "More" },
+  "小精灵记忆": { en: "Sprite memory" },
+  "查看别名": { en: "View aliases" },
+  "一键清空": { en: "Clear memory" },
+  "暂无别名": { en: "No aliases yet" },
+  "续做语": { en: "Continuation message" },
+  "发送续做": { en: "Send continuation" },
+  "续做": { en: "Continue" },
+  "稍后": { en: "Later" },
+  "搁置": { en: "Park" },
+  "完成": { en: "Done" },
+  "不用提醒": { en: "Dismiss" },
+  "下一站": { en: "Next stop" },
+  "跳过": { en: "Skip" },
+  "结束": { en: "End" },
+  "修改": { en: "Edit" },
+  "原工位": { en: "existing station" },
+  "新工位": { en: "new station" },
+  "未指定产线": { en: "unspecified line" },
+  "归档历史": { en: "Archive history" },
+  "去看看": { en: "Take a look" },
+  "{name}还在等你拍板，先给它一句话？": { en: "{name} is waiting for your decision. Take a look first?" },
+  "{name}有菜可收，先验一下这轮产出？": { en: "{name} has output ready. Review this round first?" },
+  "园子很太平，最久没动的是{name}，去看看？": { en: "The park is quiet. {name} has been idle the longest. Take a look?" },
+  "园区暂时没有工单，等产线有动静我再报。": { en: "No work orders in the park. I will report when a line changes." },
+  "{count} 名 AI 员工正在运转": { en: "{count} AI workers are active" },
+  "问答请求失败（{status}）": { en: "Question request failed ({status})" },
+  "没有收到回答，请重试。": { en: "No answer received. Please retry." },
+  "问{name}：做到哪了？卡在哪？或者说‘派工…’": { en: "Ask about {name}: progress or blockers? Or say “dispatch…”" },
+  "问我任何产线的进度，或者说‘派工…’": { en: "Ask about any production line, or say “dispatch…”" },
+  "做到哪了": { en: "How far along is it?" },
+  "卡在哪": { en: "What is blocking it?" },
+  "接着做": { en: "Continue from where it stopped" },
+  "历史": { en: "History" },
+  "去拍板": { en: "Show pending decisions" },
+  "去收菜": { en: "Show harvests" },
+  "我忘了什么": { en: "What did I forget?" },
+  "汇报进展": { en: "Report progress" },
+  "我理解为：让 {agent} 在 {topic}（{station}）做 {task}，这样派吗？": { en: "My understanding: have {agent} work on {task} in {topic} ({station}). Dispatch?" },
+  "正在收听语音，也可随时打字发送…": { en: "Listening. You can also type a message…" },
+  "说「确认」执行，或输入新指令…": { en: "Say “confirm” to proceed, or enter a new instruction…" },
+  "问答暂时不可用：{error}": { en: "Questions are unavailable: {error}" },
+  "巡园暂时不可用：{error}": { en: "Tour is unavailable: {error}" },
+  "接着上次停下的地方继续：{line}": { en: "Continue from where you stopped: {line}" },
+  "有 {count} 筐可收（依据：{evidence}）": { en: "{count} harvests ready (evidence: {evidence})" },
+  "看阶段快能收菜了（推测）": { en: "Looks almost ready to harvest based on its stage (inferred)" },
+  "跑完一轮，等你收菜": { en: "Finished a round, awaiting your review" },
+
   "Agent Control · 多智能体远程控制台": {
     en: "Agent Control · Multi-Agent Remote Console",
     "zh-TW": "Agent Control · 多智慧體遠端控制台",
@@ -326,7 +382,7 @@ export function translateText(raw, locale = currentLocale) {
   return raw.replace(trimmed, translated);
 }
 
-export function t(key, vars = null, locale = currentLocale) {
+export function t(key, vars = null, locale = (typeof window !== "undefined" && window.AgentControlI18n?.getLocale()) || currentLocale) {
   let out = translateText(key, locale);
   if (vars && typeof vars === "object") {
     for (const [k, v] of Object.entries(vars)) {
@@ -483,7 +539,7 @@ export function installAutoDomTranslator(root = typeof document !== "undefined" 
   return observer;
 }
 
-if (typeof window !== "undefined" && typeof document !== "undefined") {
+if (typeof window !== "undefined" && typeof document !== "undefined" && !window.AgentControlI18n) {
   window.AgentControlI18n = {
     getLocale,
     setLocale,

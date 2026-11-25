@@ -10624,3 +10624,25 @@ details.task-notif-card[open] .task-notif-chevron {
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+/* Compact mobile park HUD; the original controls stay available under More. */
+@media (max-width: 600px) {
+  .tycoon-hud-root .tycoon-hud-top { display: flex !important; flex-wrap: nowrap !important; align-items: center; justify-content: space-between; padding: 6px !important; gap: 4px !important; }
+  .tycoon-hud-root .tycoon-brand-cluster { flex: 0 0 auto; gap: 0; order: 0; }
+  .tycoon-hud-root .tycoon-brand-cluster .tycoon-mode-switch { display: none; }
+  .tycoon-hud-root .tycoon-lv-crest { padding: 4px 6px !important; min-width: 36px !important; }
+  .tycoon-hud-root .tycoon-lv-num { font-size: 12px !important; }
+  .tycoon-hud-root .tycoon-assistant-badges { flex: 1; justify-content: center; gap: 4px; order: 1; }
+  .tycoon-hud-root .tycoon-assistant-badge { padding: 5px 7px; gap: 3px; font-size: 11px; }
+  .tycoon-hud-root .tycoon-mobile-more { order: 2; display: block; pointer-events: auto; color: inherit; background: #64748b33; border: 1px solid #64748b66; border-radius: 9px; font-size: 22px; line-height: 25px; width: 29px; }
+  .tycoon-hud-root .tycoon-more-panel { display: none; }
+  .tycoon-hud-root .tycoon-more-panel.is-expanded { display: flex; flex-direction: column; position: absolute; right: 6px; top: 48px; padding: 10px; gap: 10px; width: min(340px, calc(100vw - 32px)); background: var(--panel-bg, #102039f5); border: 1px solid #64748b66; border-radius: 12px; pointer-events: auto; z-index: 50; }
+  .tycoon-hud-root .tycoon-more-panel .tycoon-resource-strip, .tycoon-more-panel .tycoon-sys-controls { display: flex !important; flex-wrap: wrap; width: auto; }
+  .tycoon-hud-root .tycoon-more-panel .tycoon-vis-group { display: flex; flex-wrap: wrap; }
+  .tycoon-hud-root .tycoon-more-panel .tycoon-vis-btn, .tycoon-hud-root .tycoon-more-panel [data-mo-action="toggle-immersive"] { display: inline-flex; }
+  .tycoon-hud-root .tycoon-more-panel .tycoon-mobile-scene-switch { display: block; }
+  .tycoon-hud-root .tycoon-bottom-dock .tycoon-dock-dispatch-row, .tycoon-bottom-dock .tycoon-radar-search { display: none !important; }
+  .tycoon-hud-root .tycoon-bottom-dock .tycoon-dock-cam-row { display: flex; flex-wrap: nowrap; }
+  .tycoon-hud-root .tycoon-bottom-dock .tycoon-cam-pills { display: flex; flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .tycoon-hud-root .tycoon-bottom-dock .tycoon-cam-btn { flex: 0 0 auto; }
+}
