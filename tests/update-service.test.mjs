@@ -804,3 +804,45 @@ test("parseReleaseNotes and UpdateService support bilingual RELEASE_NOTES.en.md 
   assert.equal(applied.status.releaseNotes.locales?.en?.current?.version, "0.1.1");
   assert.equal(applied.status.releaseNotes.locales?.en?.pending?.length, 0);
 });
+
+test("rewritten upstream history realigns clean clients on official commits and protects local work", async (t) => {
+  const { authorDir, appDir, dataDir } = await setupLocalGitRemoteFixture(t);
+  const oldSha = gitSync(appDir, ["rev-parse", "HEAD"]).trim();
+
+  // Upstream rewrites history (new root commit with different content) and publishes the old-SHA map.
+  gitSync(authorDir, ["checkout", "--orphan", "rewritten"]);
+  await writeFile(resolve(authorDir, "package.json"), JSON.stringify({ name: "agent-control", version: "0.1.1" }, null, 2), "utf8");
+  await writeFile(resolve(authorDir, "history-rewrite.json"), JSON.stringify({ oldShas: [oldSha] }), "utf8");
+  gitSync(authorDir, ["add", "-A"]);
+  gitSync(authorDir, ["commit", "-m", "rewritten init"]);
+  gitSync(authorDir, ["push", "--force", "origin", "rewritten:main"]);
+
+  const service = new UpdateService({
+    rootDir: appDir,
+    dataDir,
+    initialDelayMs: 60_000,
+    restartDelayMs: 10,
+    execNpm: async () => ({ stdout: "", stderr: "" }),
+    canAutoUpdateIdle: () => true,
+    restartService: () => {},
+  });
+  t.after(() => service.close());
+  await service.load();
+
+  // A client with its own local commit must NOT be realigned.
+  await writeFile(resolve(appDir, "mine.txt"), "mine\n", "utf8");
+  gitSync(appDir, ["add", "mine.txt"]);
+  gitSync(appDir, ["commit", "-m", "local work"]);
+  const guarded = await service.checkForUpdates({ silent: false });
+  assert.ok(guarded.aheadCount > 0);
+  await assert.rejects(() => service.applyUpdate({ reason: "manual" }), /领先远端/);
+
+  // Drop the local commit -> HEAD is an official old commit -> realign via reset --hard.
+  gitSync(appDir, ["reset", "--hard", oldSha]);
+  const checked = await service.checkForUpdates({ silent: false });
+  assert.equal(checked.aheadCount, 0);
+  assert.equal(checked.hasUpdate, true);
+  const applied = await service.applyUpdate({ reason: "manual" });
+  assert.equal(applied.updated, true);
+  assert.equal(gitSync(appDir, ["rev-parse", "HEAD"]).trim(), gitSync(appDir, ["rev-parse", "origin/main"]).trim());
+});

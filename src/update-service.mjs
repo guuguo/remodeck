@@ -16,6 +16,9 @@ const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_APP_ROOT = resolve(MODULE_DIR, "..");
 export const RELEASE_NOTES_FILENAME = "RELEASE_NOTES.md";
 export const RELEASE_NOTES_EN_FILENAME = "RELEASE_NOTES.en.md";
+// Published on the remote after a history rewrite: lists the pre-rewrite commit SHAs so
+// clients sitting on an official old commit can safely realign instead of reporting "ahead".
+export const HISTORY_REWRITE_FILENAME = "history-rewrite.json";
 export const CHANGELOG_FILENAME = "CHANGELOG.md";
 export const DESKTOP_APP_NAME = "Agent Control.app";
 export const DESKTOP_SOURCE_FILES = [
@@ -944,6 +947,7 @@ export class UpdateService {
     remoteVersion: "",
     behindCount: 0,
     aheadCount: 0,
+    historyRewritten: false,
     pendingCommits: [],
     remoteReleaseNotesFile: "",
     remoteReleaseNotesSource: "none",
@@ -1287,8 +1291,24 @@ export class UpdateService {
 
     const [shortSha = "", tsStr = "0", subject = ""] = remoteLogRes.stdout.split(/\r?\n/);
     const counts = aheadBehindRes.stdout.trim().split(/\s+/);
-    const aheadCount = Number(counts[0]) || 0;
+    let aheadCount = Number(counts[0]) || 0;
     const behindCount = Number(counts[1]) || 0;
+
+    // Diverged because upstream rewrote history: if our HEAD is a known official pre-rewrite
+    // commit, we have no local work of our own and may realign with a hard reset.
+    let historyRewritten = false;
+    if (aheadCount > 0 && behindCount > 0 && this.#repoInfo.localSha) {
+      const mapRes = await this.#git(["show", `${remoteRef}:${HISTORY_REWRITE_FILENAME}`], { timeoutMs: 5_000 }).catch(() => ({ stdout: "" }));
+      try {
+        const oldShas = JSON.parse(mapRes.stdout || "{}")?.oldShas;
+        if (Array.isArray(oldShas) && oldShas.includes(this.#repoInfo.localSha)) {
+          historyRewritten = true;
+          aheadCount = 0;
+        }
+      } catch {
+        // Ignore malformed rewrite map.
+      }
+    }
     const pendingCommits = commitsRes.stdout
       .split(/\r?\n/)
       .filter(Boolean)
@@ -1347,6 +1367,7 @@ export class UpdateService {
       remoteVersion,
       behindCount,
       aheadCount,
+      historyRewritten,
       pendingCommits,
       remoteReleaseNotesFile,
       remoteReleaseNotesSource,
@@ -1753,7 +1774,11 @@ export class UpdateService {
       this.#emitStatus();
 
       const beforeHash = await readManifestHash(this.#rootDir);
-      await this.#git(["pull", "--ff-only", "origin", preSnap.branch], { timeoutMs: 45_000 });
+      if (this.#remoteInfo.historyRewritten) {
+        await this.#git(["reset", "--hard", `origin/${preSnap.branch}`], { timeoutMs: 45_000 });
+      } else {
+        await this.#git(["pull", "--ff-only", "origin", preSnap.branch], { timeoutMs: 45_000 });
+      }
       const afterHash = await readManifestHash(this.#rootDir);
       const needsNpmInstall = beforeHash !== afterHash || !existsSync(resolve(this.#rootDir, "node_modules"));
 

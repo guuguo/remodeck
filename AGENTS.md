@@ -26,7 +26,7 @@
    - 个人运营数据与推广素材（`.agent-metrics.json`、文章配图、流量与收入统计等），这类文件留在本地并加入 `.gitignore`；
    - 源码、提示词、界面占位符与测试夹具中的示例一律使用虚构数据（如 `alice@example.com`、`/Users/alice`、`example.com`、「示例商城」），不得拿自己的真实项目名或账号举例。
    提交前用 `git diff --cached` 自查上述内容；发现已推送的私货，用新提交剔除（不改写历史）。
-6. **Git Commit 英文规范**：新增提交统一使用简洁英文 Conventional Commits（如 `feat(ui): ...`、`fix(codex): ...`、`docs: ...`），严禁对已推送历史做 rebase / force-push（避免破坏客户端 `git pull --ff-only` 自动更新）。
+6. **Git Commit 英文规范**：新增提交统一使用简洁英文 Conventional Commits（如 `feat(ui): ...`、`fix(codex): ...`、`docs: ...`），严禁对已推送历史做 rebase / force-push（避免破坏客户端 `git pull --ff-only` 自动更新）。唯一例外：清除已泄露的私货时可改写历史，但必须先发布带 `history-rewrite.json` 对齐逻辑的兼容版本，并确认近 7 天活跃客户端（看使用 ping 的版本分布）都已升级后，经维护者明确同意才能 force-push；force-push 后需在新历史顶部提交 `history-rewrite.json`（`{"oldShas":[旧提交完整 SHA…]}`）。
 
 ## 常用验证命令
 
