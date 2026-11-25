@@ -12,9 +12,7 @@
 .sprite-work-card textarea { box-sizing: border-box; width: 100%; min-height: 64px; margin-top: 8px; resize: vertical; color: inherit; background: #64748b18; border: 1px solid #64748b55; border-radius: 6px; padding: 6px; }
 .sprite-card-actions { margin-top: 8px; }
 .sprite-card-actions > button:first-child { background: #0284c733; border-color: #38bdf8; }
-.sprite-card-actions details { position: relative; }
-.sprite-card-actions summary { cursor: pointer; }
-.sprite-card-actions details[open] { display: flex; }
+.sprite-card-actions .sprite-card-quiet { margin-left: auto; border-color: transparent; background: none; opacity: .65; padding-inline: 4px; }
 .sprite-source-label { font-size: 10px; color: var(--text-muted, #94a3b8); }
 .sprite-tour-controls, .sprite-memory { flex-shrink: 0; padding: 8px 10px; border-bottom: 1px solid #64748b33; font-size: 11px; }
 .sprite-memory ul { max-height: 80px; overflow: auto; padding-left: 16px; }

@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import test from "node:test";
 import { AssistantLLM } from "../src/assistant-llm.mjs";
 import { computeTopicSignals } from "../src/assistant-service.mjs";
-import { harvestEvidenceForThread } from "../src/assistant-signals.mjs";
+import { cardSubject, harvestEvidenceForThread, isCardHandled } from "../src/assistant-signals.mjs";
 import { inferPipelineStage } from "../src/mission-overview-service.mjs";
 import { assistantFixture, assistantThread, ASSISTANT_NOW } from "./helpers/assistant-fixtures.mjs";
 
@@ -92,7 +92,7 @@ test("T6 snooze 原子持久化，到次日 08:00 恢复", async (t) => {
   await f.assistant.cardAction(card.id, { type: "snooze", until });
   assert.equal(allTopics(await f.overview.getOverview())[0].assistantSignals.cards.length, 0);
   const state = JSON.parse(await readFile(resolve(f.dataDir, "assistant/card-state.json"), "utf8"));
-  assert.equal(state[card.id].until, until.replace("Z", ".000Z"));
+  assert.equal(state[cardSubject(card.id)].until, until.replace("Z", ".000Z"));
   f.setNow(Date.parse(until));
   assert.equal(allTopics(await f.overview.getOverview())[0].assistantSignals.cards[0].id, card.id);
   await assert.rejects(f.assistant.cardAction(card.id, { type: "snooze", until: "bad-date" }), /稍后时间/);
@@ -289,4 +289,24 @@ test("冷启动读尾部受时间预算约束，未读完的在后台补齐", as
   await new Promise((r) => setTimeout(r, 10));
   const second = await svc.readThreadEvidence(threads);
   assert.equal(second.every((t) => t.assistantTail?.asking), true);
+});
+
+test("工单处理按主体记：类型变了照样能标完成，新动静后完成的卡会再出现", async (t) => {
+  const f = await fixture(t);
+  const card = allTopics(await f.overview.getOverview())[0].assistantSignals.cards[0];
+  const staleId = `${card.type === "harvest" ? "ruin" : "harvest"}:${cardSubject(card.id)}`;
+  const result = await f.assistant.cardAction(staleId, { type: "done" });
+  assert.equal(result.ok, true);
+  assert.equal(allTopics(await f.overview.getOverview())[0].assistantSignals.cards.length, 0);
+  // Already-hidden or vanished cards still accept bookkeeping actions instead of 404.
+  assert.equal((await f.assistant.cardAction("ruin:gone-thread", { type: "park" })).ok, true);
+  assert.equal(f.sent.length, 0);
+
+  const doneAt = "2026-11-25T08:00:00.000Z";
+  const state = { [cardSubject(card.id)]: { type: "done", at: doneAt } };
+  assert.equal(isCardHandled({ id: card.id, since: "2026-11-24T08:00:00.000Z" }, state), true);
+  assert.equal(isCardHandled({ id: card.id, since: "2026-11-25T09:00:00.000Z" }, state), false);
+  assert.equal(isCardHandled({ id: card.id, since: "2026-11-25T09:00:00.000Z" }, { [cardSubject(card.id)]: { type: "dismiss", at: doneAt } }), true);
+  // States written before subject keys existed still apply.
+  assert.equal(isCardHandled({ id: card.id, since: "2026-11-24T08:00:00.000Z" }, { [card.id]: { type: "park", at: doneAt } }), true);
 });

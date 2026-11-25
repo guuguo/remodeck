@@ -283,7 +283,7 @@ export function renderSpriteWorkCard(card, { busy = false, continueMessage } = {
     <div class="sprite-msg-chips">${renderSources(card.sources)}</div>
     ${action === "continue" ? `<textarea data-sprite-continue-message="${escapeHtml(card.id)}" aria-label="${t("续做语")}">${escapeHtml(message)}</textarea>` : ""}
     <div class="sprite-card-actions">${button(action === "continue" ? "send_continue" : action, action === "harvest" ? "收菜" : "续做")}${button("snooze", "稍后")}${button("park", "搁置")}
-    <details><summary>${t("更多")}</summary>${button("done", "完成")}${button("dismiss", "不用提醒")}</details></div></article>`;
+${button("done", "完成")}<button type="button" class="sprite-card-quiet" data-sprite-card-id="${escapeHtml(card.id)}" data-sprite-card-action="dismiss" ${busy ? "disabled" : ""}>${t("不用提醒")}</button></div></article>`;
 }
 
 export function buildSpriteTopicBriefing(topic, nowSec = Math.floor(Date.now() / 1000)) {

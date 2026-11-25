@@ -98,6 +98,22 @@ function similar(a, b) {
   return [...x].filter((g) => y.has(g)).length / new Set([...x, ...y]).size >= 0.7;
 }
 
+// Card ids carry the signal type, but handling is about the subject (a thread or
+// a task card): a thread that flips from harvest to ruin must stay handled.
+export function cardSubject(id = "") {
+  return String(id).replace(/^(alert|harvest|ruin):/, "");
+}
+
+export function isCardHandled(card, cardState = {}, now = Date.now()) {
+  const state = cardState[cardSubject(card.id)] || cardState[card.id];
+  if (!state) return false;
+  if (state.type === "snooze") return timestamp(state.until) > now;
+  if (state.type === "dismiss") return true;
+  // Park / done / harvest hide the card until the subject moves again.
+  if (["park", "done", "harvest"].includes(state.type)) return timestamp(card.since) <= timestamp(state.at);
+  return false;
+}
+
 export function computeTopicSignals(topic, { now = Date.now(), cardState = {}, idleWip = [] } = {}) {
   const groups = [];
   const seen = new Set();
@@ -142,8 +158,7 @@ export function computeTopicSignals(topic, { now = Date.now(), cardState = {}, i
   const counts = { alert: 0, harvest: 0, ruin: 0 };
   const cards = candidates.sort((a, b) => SIGNAL_TYPES.indexOf(a.type) - SIGNAL_TYPES.indexOf(b.type) || timestamp(a.since) - timestamp(b.since))
     .filter((card) => {
-      const state = cardState[card.id];
-      if (state && (["park", "done", "dismiss", "harvest"].includes(state.type) || (state.type === "snooze" && timestamp(state.until) > now))) return false;
+      if (isCardHandled(card, cardState, now)) return false;
       if (counts[card.type] >= 3) return false;
       counts[card.type]++;
       return true;

@@ -136,7 +136,7 @@ import {
   spriteTomorrowAtEight,
   renderSpriteAssistantHtml,
   saveSpritePrefs,
-} from "./sprite-assistant.js?v=20261125sa2";
+} from "./sprite-assistant.js?v=20261125sa3";
 import {
   captureSubtreeUiState,
   replaceHtmlPreservingUiState,
@@ -10052,6 +10052,8 @@ async function actOnSpriteCard(cardId, type) {
       ...(type === "snooze" ? { until: spriteTomorrowAtEight() } : {}), ...(message ? { message } : {}),
     });
     state.sprite.cards = state.sprite.cards.filter((entry) => entry.id !== cardId);
+    const ack = { done: "好，记为完成", park: "先搁着，有新动静再说", snooze: "明早 8 点再提醒你", dismiss: "这条以后不再提醒", send_continue: "已发回原工位接着做" }[type];
+    if (ack) tycoon3dInstance?.spriteSay?.(t(ack), { proactive: false });
     if (type === "harvest" && result.threadId) await selectThread(result.threadId);
     void loadMissionOverview({ trigger: "assistant-action" });
   } catch (error) { pushSpriteMessage({ text: formatActionError(error), tone: "worry" }); }

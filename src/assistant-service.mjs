@@ -1,7 +1,7 @@
 import { MemoryVault, resolveVaultPath } from "./memory-vault.mjs";
 import { AssistantLLM } from "./assistant-llm.mjs";
 import { AssistantStore } from "./assistant-store.mjs";
-import { computeTopicSignals, SIGNAL_TYPES, shortText, timestamp, isoTime, threadTail, threadSource } from "./assistant-signals.mjs";
+import { computeTopicSignals, cardSubject, SIGNAL_TYPES, shortText, timestamp, isoTime, threadTail, threadSource } from "./assistant-signals.mjs";
 
 export { computeTopicSignals } from "./assistant-signals.mjs";
 const topicsOf = (overview) => (overview.domains || []).flatMap((d) => d.topics || []);
@@ -249,15 +249,21 @@ export class AssistantService {
     if (!["continue", "harvest", "snooze", "park", "done", "dismiss"].includes(type)) throw error("不支持的工单动作");
     if (type === "snooze" && (!timestamp(until) || timestamp(until) <= this.now())) throw error("稍后时间必须在未来");
     const overview = await this.getOverview();
-    const card = topicsOf(overview).flatMap((t) => t.assistantSignals?.cards || []).find((c) => c.id === id);
-    if (!card) throw error("工单不存在或已处理", 404);
+    const subject = cardSubject(id);
+    const cards = topicsOf(overview).flatMap((t) => t.assistantSignals?.cards || []);
+    // The card may have changed type or already been hidden since the client
+    // rendered it; bookkeeping actions still apply to the same subject.
+    let card = cards.find((c) => c.id === id) || cards.find((c) => cardSubject(c.id) === subject);
+    if (!card && !subject.includes(":wip:") && ["continue", "harvest"].includes(type)) card = { id, threadId: subject };
+    if (!card && !/^(alert|harvest|ruin):./.test(id)) throw error("工单不存在或已处理", 404);
+    if (!card) card = { id };
     if (["continue", "harvest"].includes(type) && !card.threadId) throw error("该工单没有原工位");
     if (type === "continue") {
       if (typeof this.hub?.sendTurn !== "function") throw error("原工位暂不可续做", 409);
       await this.hub.sendTurn({ threadId: card.threadId, text: String(message || `继续上次的工作。当前记录：${card.line}。请从原工位接着推进。`) });
       this.#tails.delete(card.threadId);
     }
-    await this.store.update("card-state", (states) => ({ ...states, [id]: { type, at: new Date(this.now()).toISOString(),
+    await this.store.update("card-state", (states) => ({ ...states, [subject]: { type, at: new Date(this.now()).toISOString(),
       ...(type === "snooze" ? { until: new Date(timestamp(until)).toISOString() } : {}), ...(reason ? { reason: String(reason).slice(0, 500) } : {}) } }));
     return { ok: true, card, ...(card.threadId ? { threadId: card.threadId } : {}) };
   }
