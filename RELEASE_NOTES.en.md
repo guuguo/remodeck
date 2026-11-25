@@ -2,7 +2,34 @@
 
 > Plain-language English release notes for end users covering key additions, improvements, and fixes in each version. Keep this file in sync with `RELEASE_NOTES.md` whenever user-visible changes ship; the in-app "Version & Updates" modal loads it automatically for non-Chinese UI locales.
 
-## In development (2026-11-24) — In-Car Voice: Full Sentences, Accurate Project Names, Ask-Back
+## v0.2.6 (2026-11-25) — Global Search, Human-Verify Panel, Codex Compatibility Mode, and Thread Polish
+
+Summary: Adds cross-thread global search and a "needs you in person" verification panel, a compatibility mode for Codex accounts restricted to the official client, and fixes a batch of thread-history, quota-display, and paste issues.
+
+### Added
+
+- **Global thread search**: Search content across all Codex / Claude / Antigravity threads by keyword; hits show a context snippet and jump straight to the thread.
+- **Human-verify panel**: When an automated flow hits a captcha, QR scan, or any step only you can do, a verification panel (plus a floating HUD on macOS) appears; finish it, submit, and the flow continues. Other projects can plug in through the generic API.
+- **Folder picker for new threads**: Pick the working directory with the native folder dialog when starting a thread — macOS, Windows, and Linux.
+- **Codex compatibility mode**: When an account is limited to the official client, you are prompted and can switch to a compatibility mode, and switch back to the default any time.
+- **Tidier thread titles**: Titles follow a "subject｜topic" format; once locked they are no longer overwritten by drifting upstream titles, and forks inherit a clean title.
+
+### Improved
+
+- **More accurate quota**: Claude's 5-hour and weekly windows reflect real data, stale samples no longer masquerade as "plenty", and the last view is kept if a refresh fails.
+- **Readable sleep state**: While Codex waits or sleeps, the activity panel says so and clears leftover hints when it ends.
+- **Sturdier long-content preview**: Large-file preview, bare-URL linking (stops correctly at CJK punctuation and bold markers), and paths containing spaces are all more reliable.
+- **3D factory and project board**: More interaction and styling polish, clearer project board information.
+- **More complete Antigravity history**: Question cards, error steps, and retry state now show up in history.
+
+### Fixed
+
+- **Fork history no longer balloons**: Repeated refreshes do not duplicate turns; a new turn adds exactly one.
+- **Reading position no longer jumps to the top**: Staying put or loading earlier history in a long thread no longer snaps back to the first turn, and collapsed state does not leak between turns.
+- **Cleaner image paste**: Copying images from Lark, Finder, etc. strips the attached local path or filename while keeping your own text and normal links.
+- **Messages sent while busy are kept**: When Codex is busy, text and images stay queued and are sent automatically once idle.
+
+## v0.2.5 (2026-11-24) — In-Car Voice: Full Sentences, Accurate Project Names, Ask-Back
 
 Summary: Fixed the issues that hurt voice use while driving most — sentences cut in half, misheard project names, and replies that ran too long.
 

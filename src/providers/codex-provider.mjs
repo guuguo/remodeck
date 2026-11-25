@@ -15,6 +15,7 @@ import {
   createServerRequestResponse,
   normalizeServerRequest,
 } from "./codex-app-server-client.mjs";
+import { CodexExecRunner } from "./codex-exec-runner.mjs";
 import { loadCodexThreadHistory } from "./codex-thread-history.mjs";
 import { readRolloutActivitySnapshot } from "./codex-thread-activity.mjs";
 import {
@@ -117,6 +118,7 @@ export class CodexProvider {
   #rateLimitsByProfile = new Map();
   #resumedThreads = new Set();
   #execFileImpl;
+  #execRunner;
   #onEvent;
   #onServerRequest;
 
@@ -124,6 +126,7 @@ export class CodexProvider {
     env = process.env,
     dataDir = "",
     execFileImpl = execFileCrossPlatform,
+    spawnImpl = undefined,
     onEvent = () => {},
     onServerRequest = () => {},
   } = {}) {
@@ -132,6 +135,11 @@ export class CodexProvider {
     this.#execFileImpl = execFileImpl;
     this.#onEvent = onEvent;
     this.#onServerRequest = onServerRequest;
+    this.#execRunner = new CodexExecRunner({
+      env: this.#env,
+      ...(spawnImpl ? { spawnImpl } : {}),
+      onNotification: (profileId, msg) => this.#handleNotification(profileId, msg),
+    });
   }
 
   setCallbacks({ onEvent, onServerRequest } = {}) {
@@ -643,8 +651,43 @@ export class CodexProvider {
     model = "",
     effort = "",
     permissionMode = "workspace",
+    executionMode = "app-server",
   } = {}) {
     const profile = await this.#getProfile(profileId);
+    const hasInitialInput = Boolean(String(text || "").trim() || (images && images.length));
+    if (executionMode === "exec" && hasInitialInput) {
+      const started = await this.#execRunner.runTurn({
+        profileId,
+        codexHome: profile.home,
+        rawId: "",
+        cwd,
+        text,
+        images,
+        model,
+        effort,
+        permissionMode,
+      });
+      const rawId = String(started?.rawId || "");
+      const turn = started?.turn || { id: `exec-turn-${Date.now()}`, status: "inProgress" };
+      const now = Math.floor(Date.now() / 1000);
+      const isLive = this.#execRunner.isActive(rawId);
+      if (isLive) {
+        this.#writers.markActive(rawId, { turnId: turn.id || "" });
+      }
+      const thread = this.#normalizeThread(profile, {
+        id: rawId,
+        cwd,
+        model,
+        reasoningEffort: effort,
+        preview: String(text || "").trim().slice(0, 120),
+        firstUserText: String(text || "").trim(),
+        createdAt: now,
+        updatedAt: now,
+        live: isLive,
+      });
+      return { thread, turn };
+    }
+
     const client = await this.#getClient(profileId);
     const policy = codexExecutionPolicy(permissionMode);
     const created = await client.request("thread/start", {
@@ -658,7 +701,7 @@ export class CodexProvider {
     this.#resumedThreads.add(`${profileId}:${rawId}`);
     const thread = this.#normalizeThread(profile, rawThread);
 
-    if (String(text || "").trim() || (images && images.length)) {
+    if (hasInitialInput) {
       const sent = await this.sendTurn({
         profileId,
         rawId,
@@ -668,6 +711,7 @@ export class CodexProvider {
         model,
         effort,
         permissionMode,
+        executionMode,
       });
       return {
         thread: sent.thread || thread,
@@ -719,16 +763,63 @@ export class CodexProvider {
     steer = false,
     expectedTurnId = "",
     writerConflictPolicy = "reject",
+    executionMode = "app-server",
   } = {}) {
     const profile = await this.#getProfile(profileId);
-    const client = await this.#getClient(profileId);
-    const policy = codexExecutionPolicy(permissionMode);
-    const input = buildCodexInputItems(text, images);
-
     const indexed = (readIndexedThreads(profile.home, { limit: 400, includeArchived: true }) || [])
       .find((item) => item.id === rawId);
     const resolvedCwd = cwd || indexed?.cwd || "";
     const inMemoryActive = this.#writers.getActive(rawId);
+    const ownAppServerPid = this.#clients.get(profileId)?.pid || null;
+    const ignorePids = ownAppServerPid ? [ownAppServerPid] : [];
+
+    if (executionMode === "exec") {
+      if (steer && inMemoryActive) {
+        await this.interrupt({ profileId, rawId }).catch(() => {});
+        this.#writers.clearActive(rawId, inMemoryActive.turnId || "");
+      } else if (!steer && inMemoryActive && writerConflictPolicy === "reject") {
+        throw Object.assign(new Error("当前会话正在运行，请等待完成、插入引导或加入排队"), {
+          status: 409,
+          code: "thread_busy",
+        });
+      }
+      if (writerConflictPolicy === "reject") {
+        const conflict = await this.#writers.detectExternalWriter({
+          rolloutPath: indexed?.rolloutPath || "",
+          ignorePids,
+        });
+        if (conflict.busy) {
+          throw Object.assign(new Error(conflict.message || "会话正被本地客户端占用"), {
+            status: 409,
+            code: conflict.source || "writer_conflict",
+          });
+        }
+      }
+      this.#resumedThreads.delete(`${profileId}:${rawId}`);
+      const started = await this.#execRunner.runTurn({
+        profileId,
+        codexHome: profile.home,
+        rawId,
+        cwd: resolvedCwd || os.homedir(),
+        text,
+        images,
+        model,
+        effort,
+        permissionMode,
+      });
+      const turn = started?.turn || { id: `exec-turn-${Date.now()}`, status: "inProgress" };
+      if (this.#execRunner.isActive(rawId)) {
+        this.#writers.markActive(rawId, { turnId: turn.id || "" });
+      }
+      return {
+        turn,
+        thread: this.#normalizeThread(profile, indexed || { id: rawId, cwd: resolvedCwd || os.homedir() }),
+      };
+    }
+
+    const client = await this.#getClient(profileId);
+    const policy = codexExecutionPolicy(permissionMode);
+    const input = buildCodexInputItems(text, images);
 
     let activeTurnId = inMemoryActive?.turnId || expectedTurnId || "";
     if (steer && !activeTurnId && inMemoryActive) {
@@ -742,6 +833,7 @@ export class CodexProvider {
       if (!inMemoryActive && writerConflictPolicy === "reject") {
         const conflict = await this.#writers.detectExternalWriter({
           rolloutPath: indexed?.rolloutPath || "",
+          ignorePids,
         });
         externalBusy = Boolean(conflict.busy);
         if (conflict.busy) {
@@ -800,6 +892,7 @@ export class CodexProvider {
     if (writerConflictPolicy === "reject") {
       const conflict = await this.#writers.detectExternalWriter({
         rolloutPath: indexed?.rolloutPath || "",
+        ignorePids,
       });
       if (conflict.busy) {
         throw Object.assign(new Error(conflict.message || "会话正被本地客户端占用"), {
@@ -826,6 +919,7 @@ export class CodexProvider {
       if (!this.#writers.getActive(rawId) && CODEX_ACTIVE_WRITER_RE.test(msg)) {
         const conflict = await this.#writers.detectExternalWriter({
           rolloutPath: indexed?.rolloutPath || "",
+          ignorePids,
         }).catch(() => ({ busy: false }));
         idleLock = !conflict.busy;
       }
@@ -852,6 +946,12 @@ export class CodexProvider {
   }
 
   async interrupt({ profileId = "default", rawId, turnId = "" } = {}) {
+    if (this.#execRunner.isActive(rawId)) {
+      const res = await this.#execRunner.interrupt(rawId);
+      const interruptedTurnId = res?.turnId || turnId || "";
+      this.#writers.clearActive(rawId, interruptedTurnId);
+      return { ok: true, turnId: interruptedTurnId };
+    }
     const client = await this.#getClient(profileId);
     const resolvedTurnId = turnId || this.#writers.getActive(rawId)?.turnId || "";
     if (!resolvedTurnId) {
@@ -1030,6 +1130,7 @@ export class CodexProvider {
   }
 
   async close() {
+    await this.#execRunner.close().catch(() => {});
     for (const client of this.#clients.values()) {
       await client.close();
     }

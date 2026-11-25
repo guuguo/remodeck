@@ -62,6 +62,10 @@
   border-left: 2px solid rgba(245, 158, 11, 0.82);
 }
 
+.project-group.has-error:not(.is-pinned) > .project-group-head {
+  border-left: 2px solid rgba(239, 68, 68, 0.86);
+}
+
 .project-group-left {
   display: flex;
   align-items: center;
@@ -122,6 +126,11 @@
 .group-stat-pill.is-pending {
   background: rgba(245, 158, 11, 0.2);
   color: #fcd34d;
+}
+
+.group-stat-pill.is-error {
+  background: rgba(239, 68, 68, 0.22);
+  color: #fca5a5;
 }
 
 .group-live-dot {
@@ -255,6 +264,11 @@
   background: linear-gradient(90deg, rgba(245, 158, 11, 0.08), transparent 72%);
 }
 
+.thread-item.is-error {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: linear-gradient(90deg, rgba(239, 68, 68, 0.1), rgba(239, 68, 68, 0.02) 72%, transparent);
+}
+
 .thread-item.is-selected {
   background: linear-gradient(90deg, rgba(76, 141, 255, 0.16), rgba(76, 141, 255, 0.055));
   border-color: rgba(76, 141, 255, 0.35);
@@ -323,6 +337,48 @@
 
 .thread-item-sub.is-live-sub {
   color: #6ee7b7;
+}
+
+.thread-item-sub.is-error-sub {
+  color: #fca5a5;
+}
+
+.thread-item-sub.is-search-hit {
+  color: var(--text-soft, var(--text));
+  opacity: 0.92;
+}
+
+.search-hit-mark {
+  background: rgba(250, 204, 21, 0.28);
+  color: #fef08a;
+  border-radius: 3px;
+  padding: 0 2px;
+  font-weight: 600;
+}
+
+.thread-hit-pill {
+  font-size: 9.5px;
+  line-height: 1.3;
+  padding: 0 4.5px;
+  border-radius: 999px;
+  background: rgba(250, 204, 21, 0.16);
+  color: #fde047;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.sidebar-search-status,
+.board-search-status {
+  padding: 6px 10px 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.board-search-status {
+  text-align: left;
+  padding: 4px 2px 6px;
 }
 
 .thread-status-dot {
@@ -450,6 +506,21 @@
   height: 10px;
 }
 
+.thread-status-dot.is-agent-marker.is-error {
+  width: 17px;
+  height: 17px;
+  border: 1.5px solid #ef4444;
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.52);
+  opacity: 1;
+}
+
+.thread-status-dot.is-agent-marker.is-error svg {
+  width: 10px;
+  height: 10px;
+}
+
 .thread-status-dot.is-live.is-agent-live {
   width: 16px;
   height: 16px;
@@ -570,6 +641,19 @@
   border-radius: 999px;
   background: rgba(245, 158, 11, 0.22);
   color: #fcd34d;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.thread-error-pill {
+  font-size: 9.5px;
+  line-height: 1.3;
+  padding: 0 4.5px;
+  border-radius: 999px;
+  background: rgba(239, 68, 68, 0.22);
+  border: 1px solid rgba(239, 68, 68, 0.38);
+  color: #fca5a5;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
@@ -776,6 +860,11 @@
   background: rgba(52, 211, 153, 0.06);
 }
 
+.strip-task-pill.is-error {
+  border-color: rgba(239, 68, 68, 0.42);
+  background: rgba(239, 68, 68, 0.1);
+}
+
 .strip-task-pill.is-active {
   background: rgba(76, 141, 255, 0.14);
   border-color: rgba(76, 141, 255, 0.55);
@@ -848,6 +937,11 @@
   animation: acPendingPulse 1.4s var(--ease-spring, ease-in-out) infinite;
 }
 
+.strip-status-dot.is-error {
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.85);
+}
+
 /* Project Multi-Task Board */
 .project-board {
   width: 100%;
@@ -917,6 +1011,11 @@
   border: 1px solid rgba(226, 149, 59, 0.4);
 }
 
+.board-attention-banner.is-error {
+  background: rgba(229, 83, 75, 0.14);
+  border-color: rgba(229, 83, 75, 0.44);
+}
+
 .board-attention-text {
   display: flex;
   flex-direction: column;
@@ -926,6 +1025,20 @@
 
 .board-attention-text strong {
   color: #ffd089;
+}
+
+.board-attention-banner.is-error .board-attention-text strong {
+  color: #ffb1aa;
+}
+
+.btn-primary.is-danger {
+  background: #dc2626;
+  border-color: #ef4444;
+  color: #ffffff;
+}
+
+.btn-primary.is-danger:hover {
+  background: #b91c1c;
 }
 
 .board-attention-text span {
@@ -1129,6 +1242,11 @@
   background: linear-gradient(90deg, rgba(52, 211, 153, 0.075), rgba(255, 255, 255, 0.02) 70%);
 }
 
+.board-task-row.is-error {
+  border-color: rgba(239, 68, 68, 0.34);
+  background: linear-gradient(90deg, rgba(239, 68, 68, 0.1), rgba(255, 255, 255, 0.02) 72%);
+}
+
 .board-task-row.is-selected {
   border-color: rgba(76, 141, 255, 0.55);
   background: rgba(76, 141, 255, 0.11);
@@ -1169,6 +1287,19 @@
   white-space: nowrap;
 }
 
+.board-task-preview.is-error {
+  color: #fca5a5;
+}
+
+.board-task-preview.is-search-hit {
+  color: var(--text-soft, var(--text));
+}
+
+.board-status-pill.is-hit {
+  background: rgba(250, 204, 21, 0.16);
+  color: #fde047;
+}
+
 .board-status-pill {
   font-size: 9.5px;
   line-height: 1.3;
@@ -1187,6 +1318,12 @@
 .board-status-pill.is-pending {
   background: rgba(226, 149, 59, 0.24);
   color: #ffd089;
+}
+
+.board-status-pill.is-error {
+  background: rgba(239, 68, 68, 0.22);
+  border: 1px solid rgba(239, 68, 68, 0.38);
+  color: #fca5a5;
 }
 
 .board-status-pill.is-goal {
@@ -2238,6 +2375,17 @@
   color: #047857;
 }
 
+:root[data-theme="light"] .search-hit-mark {
+  background: rgba(245, 158, 11, 0.25);
+  color: #92400e;
+}
+
+:root[data-theme="light"] .thread-hit-pill,
+:root[data-theme="light"] .board-status-pill.is-hit {
+  background: rgba(245, 158, 11, 0.18);
+  color: #b45309;
+}
+
 :root[data-theme="light"] .group-stat-pill.is-live {
   background: rgba(5, 150, 105, 0.1);
   border-color: rgba(5, 150, 105, 0.25);
@@ -2314,7 +2462,14 @@
   color: #6d28d9;
 }
 
-:root[data-theme="light"] .voice-dock-btn.is-hangup {
+:root[data-theme="light"] .voice-dock-btn.is-hangup,
+:root[data-theme="light"] .group-stat-pill.is-error,
+:root[data-theme="light"] .thread-error-pill,
+:root[data-theme="light"] .board-status-pill.is-error,
+:root[data-theme="light"] .thread-item-sub.is-error-sub,
+:root[data-theme="light"] .board-task-preview.is-error,
+:root[data-theme="light"] .board-attention-banner.is-error .board-attention-text strong,
+:root[data-theme="light"] .thread-status-dot.is-agent-marker.is-error {
   color: #b91c1c;
 }
 
@@ -5744,6 +5899,7 @@ body.is-tycoon3d-active #projectBoard {
 }
 
 .tycoon-drawer-bar {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -6363,7 +6519,7 @@ body.is-tycoon3d-active #projectBoard {
   .tycoon-hud-inspector {
     width: 100%;
     height: auto;
-    max-height: 58vh;
+    max-height: min(62dvh, 100%);
     border-radius: 12px;
   }
 
@@ -6375,6 +6531,23 @@ body.is-tycoon3d-active #projectBoard {
     padding: 5px 7px;
     gap: 6px;
     border-radius: 11px;
+    max-height: calc(100dvh - 92px - env(safe-area-inset-bottom));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tycoon-dock-cam-row,
+  .tycoon-dock-dispatch-row {
+    flex-shrink: 0;
+  }
+
+  .tycoon-bottom-dock .mo-dispatch-feedback.tycoon-dock-popup {
+    flex-shrink: 0;
+    max-height: min(220px, 34dvh);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
   }
 
   .tycoon-dock-cam-row {
@@ -6472,10 +6645,34 @@ body.is-tycoon3d-active #projectBoard {
     font-size: 11px;
   }
 
+  .tycoon-dispatch-config .mo-inherit-toggle {
+    grid-column: 1 / -1;
+    height: 28px;
+  }
+
+  .tycoon-dispatch-input-row {
+    flex-wrap: wrap;
+  }
+
   .tycoon-dock-dispatch-row .mo-dispatch-input {
+    flex: 1 1 100%;
+    order: -1;
+    width: 100%;
     min-width: 0;
-    height: 30px;
-    font-size: 12px;
+    height: 32px;
+    font-size: 12.5px;
+  }
+
+  .tycoon-route-toggle {
+    min-width: 0;
+    max-width: 55%;
+    margin-right: auto;
+  }
+
+  .tycoon-route-toggle span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .tycoon3d-tag {
@@ -7119,6 +7316,7 @@ body.is-tycoon3d-active #projectBoard {
 }
 
 .sprite-pop-head {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -7454,6 +7652,7 @@ body.is-tycoon3d-active #projectBoard {
 }
 
 .sprite-quick-row {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -7491,6 +7690,7 @@ body.is-tycoon3d-active #projectBoard {
 }
 
 .sprite-voice-bar {
+  flex-shrink: 0;
   --voice-level: 0.15;
   margin: 0 10px 6px;
   padding: 5px 8px;
@@ -7627,6 +7827,7 @@ body.is-tycoon3d-active #projectBoard {
 }
 
 .sprite-input-row {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -7791,7 +7992,27 @@ body.is-tycoon3d-active #projectBoard {
 
   .sprite-popover-card {
     width: calc(100vw - 20px);
-    max-height: calc(100dvh - 84px);
+    max-height: calc(100dvh - 20px - env(safe-area-inset-bottom));
+  }
+
+  .sprite-feed {
+    min-height: 44px;
+    max-height: none;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sprite-preview-card,
+  .sprite-prefs-drawer {
+    flex-shrink: 0;
+    max-height: 40dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sprite-preview-actions {
+    flex-wrap: wrap;
   }
 }
 

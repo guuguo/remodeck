@@ -184,6 +184,30 @@ async function handleUserTurn(userMsg) {
   };
   send({ type: "assistant", message: msgObj });
   writeJsonl({ type: "assistant", uuid: `a-${Date.now()}`, message: msgObj });
+  const rateLimitPath = configDir ? resolve(configDir, ".mock-rate-limit.json") : "";
+  if (rateLimitPath && existsSync(rateLimitPath)) {
+    const info = JSON.parse(readFileSync(rateLimitPath, "utf8"));
+    send({
+      type: "rate_limit_event",
+      rate_limit_info: info,
+      session_id: sessionId,
+    });
+  } else if (text.includes("[RATE_LIMIT]")) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    send({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "allowed",
+        resetsAt: nowSec + 3600,
+        rateLimitType: "five_hour",
+        unifiedWindows: {
+          five_hour: { utilization: 0.75, resetsAt: nowSec + 3600, status: "allowed" },
+          seven_day: { utilization: 0.34, resetsAt: nowSec + 86400 * 3, status: "allowed" },
+        },
+      },
+      session_id: sessionId,
+    });
+  }
   send({
     type: "result",
     subtype: "success",

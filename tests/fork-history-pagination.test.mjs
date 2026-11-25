@@ -96,3 +96,44 @@ test("分叉历史只接在最早一页，滚动加载后刷新尾部不丢中�
   assert.deepEqual(ids(mergedColliding), ids(collidingExisting));
   assert.equal(mergedColliding[4].status, "inProgress");
 });
+
+test("分叉会话全量刷新遇到重复 agy-step-0 与尾部临时轮次时不重复拼接继承历史", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const merge = vm.runInNewContext(
+    source.slice(source.indexOf("function mergeReloadedTurns("), source.indexOf("let activeThreadReloadInFlight"))
+      + "\nmergeReloadedTurns;",
+  );
+  const ids = (turns) => Array.from(turns, (turn) => turn.id);
+  const makeTurns = (turnIds, status = "completed") => turnIds.map((id) => ({ id, status, items: [] }));
+
+  const inheritedIds = Array.from({ length: 58 }, (_, i) => (i === 0 ? "agy-step-0" : `agy-step-${i * 40}`));
+  const sixtyIds = [...inheritedIds, "agy-step-0", "agy-step-76"];
+  const sixtyOneIds = [...sixtyIds, "agy-step-152"];
+
+  // 1. 全量刷新（nextCursor === null，子会话仅 2 轮，limit=2 仍返回全部 60 轮）连续刷新不得膨胀为 118/176 轮
+  let loaded = makeTurns(sixtyIds);
+  loaded = merge(loaded, makeTurns(sixtyIds));
+  assert.deepEqual(ids(loaded), sixtyIds);
+  loaded = merge(loaded, makeTurns(sixtyIds));
+  assert.deepEqual(ids(loaded), sixtyIds);
+
+  // 新增第 3 轮时精确增长到 61 轮
+  loaded = merge(loaded, makeTurns(sixtyOneIds));
+  assert.deepEqual(ids(loaded), sixtyOneIds);
+
+  // 2. 仅有 1 轮子会话 [A0, A2, A4, A0] 全量刷新及新增第 2 轮 [A0, A2, A4, A0, A2]
+  const oneChild = makeTurns(["agy-step-0", "agy-step-2", "agy-step-4", "agy-step-0"]);
+  assert.deepEqual(ids(merge(oneChild, oneChild)), ["agy-step-0", "agy-step-2", "agy-step-4", "agy-step-0"]);
+  const twoChild = makeTurns(["agy-step-0", "agy-step-2", "agy-step-4", "agy-step-0", "agy-step-2"]);
+  assert.deepEqual(ids(merge(oneChild, twoChild)), ["agy-step-0", "agy-step-2", "agy-step-4", "agy-step-0", "agy-step-2"]);
+
+  // 3. 尾部存在 optimistic-turn-* 或 agy-turn-* 临时轮次时，刷新后由持久化轮次替换且不重复前缀
+  const withOptimistic = [...makeTurns(sixtyIds), { id: "optimistic-turn-1795400", status: "inProgress", items: [] }];
+  assert.deepEqual(ids(merge(withOptimistic, makeTurns(sixtyOneIds))), sixtyOneIds);
+
+  const tailWithAgySynth = [...makeTurns(["agy-step-0", "agy-step-2", "agy-step-4", "agy-step-0"]), { id: "agy-turn-1795401-abc", status: "inProgress", items: [] }];
+  assert.deepEqual(
+    ids(merge(tailWithAgySynth, makeTurns(["agy-step-0", "agy-step-2"]))),
+    ["agy-step-0", "agy-step-2", "agy-step-4", "agy-step-0", "agy-step-2"],
+  );
+});

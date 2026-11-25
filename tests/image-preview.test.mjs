@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { autoPreviewThreadImages } from "../public/image-preview-policy.js";
-import { stripAttachedImagePaths } from "../public/image-attachment.js";
+import { cleanClipboardTextForPastedImages, stripAttachedImagePaths } from "../public/image-attachment.js";
 import { CodexProvider } from "../src/providers/codex-provider.mjs";
 import { readLargeThreadPreview } from "../src/providers/codex-large-preview.mjs";
 import { recoverCodexImagePreview } from "../src/providers/codex-image-preview.mjs";
@@ -30,6 +30,104 @@ test("成功附加的图片路径不占正文，保留说明、其他文件和�
   const unchanged = "\n  保留缩进\nhttps://example.com/abc.jpg\n/Users/a/other.jpg 参考图片 abc.jpg\n";
   assert.equal(stripAttachedImagePaths(unchanged, [file]), unchanged);
   assert.equal(stripAttachedImagePaths("/Users/a/abc.jpg 出错", []), "/Users/a/abc.jpg 出错");
+
+  // 含空格目录（如 Application Support、Data SSD）及 shell 转义空格、file:// URI
+  const larkName = "img_v3_0217n_48cfee6f-a633-45ad-93fb-23f66296aa7g.jpg";
+  const larkPath = `/Users/alice/Library/Application Support/LarkShell/sdk_storage/0123456789abcdef0123456789abcdef/resources/images/${larkName}`;
+  assert.equal(stripAttachedImagePaths(larkPath, [{ name: larkName }]), "");
+  assert.equal(stripAttachedImagePaths(`看下这个问题 ${larkPath} 怎么回事`, [{ name: larkName }]), "看下这个问题 怎么回事");
+
+  const spaceFile = { name: "测试 截图.png" };
+  assert.equal(stripAttachedImagePaths("看 /Volumes/Data SSD/dev/测试 截图.png 这张图", [spaceFile]), "看 这张图");
+  assert.equal(stripAttachedImagePaths("看 /Users/alice/Application\\ Support/LarkShell/测试\\ 截图.png 这张图", [spaceFile]), "看 这张图");
+  assert.equal(stripAttachedImagePaths("file:///Users/a/My%20Docs/%E6%B5%8B%E8%AF%95%20%E6%88%AA%E5%9B%BE.png 说明", [spaceFile]), "说明");
+  assert.equal(stripAttachedImagePaths("file://localhost/Users/a/My Docs/测试 截图.png 说明", [spaceFile]), "说明");
+
+  // 同行多路径/网址不跨路径误吞
+  assert.equal(
+    stripAttachedImagePaths("请对比 /Users/a/other.jpg 和 /Users/a/My Pictures/abc.jpg 这张图", [file]),
+    "请对比 /Users/a/other.jpg 和 这张图",
+  );
+  const localAndHttps = "/Users/a/other.jpg 线上 https://example.com/abc.jpg";
+  assert.equal(stripAttachedImagePaths(localAndHttps, [file]), localAndHttps);
+
+  // 较长非匹配路径无性能退化
+  const longNonMatching = `/Users/a/${"sub dir/".repeat(80)}other_file.txt 说明 ${"word ".repeat(80)}abc.jpg`;
+  const startedAt = performance.now();
+  assert.equal(stripAttachedImagePaths(longNonMatching, [file]), longNonMatching);
+  assert.ok(performance.now() - startedAt < 50);
+});
+
+test("粘贴图片时同步清理剪贴板附带的本地路径与裸文件名，同时保留混合正文与无关链接", async () => {
+  const larkPath = "/Users/alice/Library/Application Support/LarkShell/sdk_storage/0123456789abcdef0123456789abcdef/resources/images/img_v3_0217n_48cfee6f-a633-45ad-93fb-23f66296aa7g.jpg";
+
+  // 飞书单图复制：真实文件名匹配 & 浏览器合成名 image.png
+  assert.equal(cleanClipboardTextForPastedImages({
+    plainText: larkPath,
+    imageFiles: [{ name: "img_v3_0217n_48cfee6f-a633-45ad-93fb-23f66296aa7g.jpg" }],
+  }), "");
+  assert.equal(cleanClipboardTextForPastedImages({
+    plainText: larkPath,
+    imageFiles: [{ name: "image.png" }],
+  }), "");
+
+  // Finder 单图/多图复制：text/plain 为裸文件名
+  assert.equal(cleanClipboardTextForPastedImages({
+    plainText: "Screenshot 2026-11-23.png",
+    imageFiles: [{ name: "Screenshot 2026-11-23.png" }],
+  }), "");
+  assert.equal(cleanClipboardTextForPastedImages({
+    plainText: "a.png\nb.jpg",
+    imageFiles: [{ name: "a.png" }, { name: "b.jpg" }],
+  }), "");
+
+  // 飞书混合消息：真实文件名、HTML <img> + 合成名、仅合成名三种情况
+  const mixedText = `接口报错如下\n${larkPath}\n请帮忙排查`;
+  assert.equal(cleanClipboardTextForPastedImages({
+    plainText: mixedText,
+    imageFiles: [{ name: "img_v3_0217n_48cfee6f-a633-45ad-93fb-23f66296aa7g.jpg" }],
+  }), "接口报错如下\n请帮忙排查");
+  assert.equal(cleanClipboardTextForPastedImages({
+    plainText: mixedText,
+    html: `<meta charset='utf-8'><span>接口报错如下</span><img src="file://${encodeURI(larkPath)}"><span>请帮忙排查</span>`,
+    imageFiles: [{ name: "image.png" }],
+  }), "接口报错如下\n请帮忙排查");
+  assert.equal(cleanClipboardTextForPastedImages({
+    plainText: mixedText,
+    imageFiles: [{ name: "image.png" }],
+  }), "接口报错如下\n请帮忙排查");
+
+  // 独立路径行位于首行、中间行、末行时移除空行，但保留原有的空行结构
+  assert.equal(cleanClipboardTextForPastedImages({
+    plainText: `${larkPath}\n第一段\n\n第二段`,
+    imageFiles: [{ name: "image.png" }],
+  }), "第一段\n\n第二段");
+  assert.equal(cleanClipboardTextForPastedImages({
+    plainText: `第一段\n\n第二段\n${larkPath}`,
+    imageFiles: [{ name: "image.png" }],
+  }), "第一段\n\n第二段");
+
+  // 不误删网络链接、非图片文件、普通文本里的图片名
+  const safeMixed = "参考 https://example.com/abc.jpg 与 /Users/a/report.pdf 和 /Users/a/foo.txt 说明 abc.jpg";
+  assert.equal(cleanClipboardTextForPastedImages({
+    plainText: safeMixed,
+    imageFiles: [{ name: "image.png" }],
+  }), safeMixed);
+
+  // 纯正常正文 + 粘贴图片时返回完全相等的原文
+  const pureBody = "第一行说明\r\n\r\n  保持缩进与换行";
+  assert.equal(cleanClipboardTextForPastedImages({
+    plainText: pureBody,
+    imageFiles: [{ name: "image.png" }],
+  }), pureBody);
+
+  // 验证 app.js paste 监听已接入同步清理并在变更或清空时阻止默认粘贴
+  const appSource = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const pasteIdx = appSource.indexOf('$("promptInput").addEventListener("paste"');
+  assert.ok(pasteIdx >= 0);
+  const pasteBlock = appSource.slice(pasteIdx, pasteIdx + 1200);
+  assert.match(pasteBlock, /cleanClipboardTextForPastedImages\(/);
+  assert.match(pasteBlock, /if\s*\(!cleanedText\s*\|\|\s*cleanedText\s*!==\s*plainText\)\s*\{\s*e\.preventDefault\(\);/);
 });
 
 test("自动预览观察可见附件卡，隐藏的图片节点不会阻断加载", async () => {

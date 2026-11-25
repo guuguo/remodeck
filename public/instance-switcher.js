@@ -2088,6 +2088,30 @@ export function formatQuotaResetRelative(resetsAtSec, nowSec = Math.floor(Date.n
   return remHours > 0 ? `${days}天${remHours}小时后重置` : `${days}天后重置`;
 }
 
+export function hasElapsedQuotaReset(profiles = [], nowSec = Math.floor(Date.now() / 1000)) {
+  const safeNow = Number(nowSec);
+  if (!Number.isFinite(safeNow) || safeNow <= 0) return false;
+  for (const p of Array.isArray(profiles) ? profiles : []) {
+    const q = p?.quota;
+    if (!q || typeof q !== "object") continue;
+    const w = q.windows && typeof q.windows === "object" ? q.windows : {};
+    const candidates = [
+      w.fiveHour,
+      w.weekly,
+      w.thirdPartyFiveHour,
+      w.thirdPartyWeekly,
+      ...(Array.isArray(q.buckets) ? q.buckets : []),
+    ];
+    for (const bucket of candidates) {
+      const resetSec = normalizeResetSec(bucket?.resetsAt);
+      if (resetSec !== null && resetSec <= safeNow) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function shortQuotaProfileLabel(profile) {
   const raw = String(profile?.label || profile?.id || "").trim();
   const provider = String(profile?.provider || "").trim();

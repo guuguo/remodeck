@@ -460,6 +460,10 @@ rl.on("line", async (line) => {
       return;
     }
 
+    if (process.env.MOCK_AGY_ASK_PERMISSION_ON_CONTINUE === "1" && text.trim() === "继续") {
+      await askPermission(sessionId, "继续执行授权确认");
+    }
+
     const isGoalContinuation = text.includes("[Goal 自动推进");
     let reply = `Antigravity 回复(${sessions.get(sessionId)?.model || "default"}/${sessions.get(sessionId)?.thought_level || "high"}): ${text}`;
     if (text.includes("[GOAL_TWO_STEPS]") && !isGoalContinuation) {

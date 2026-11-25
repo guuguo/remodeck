@@ -37,6 +37,24 @@ test("RRULE parsing, human formatting, and next-run calculation work cleanly", (
   );
 });
 
+test("RRULE time lists keep five-minute heartbeats across both hours", () => {
+  const time = (day, hour, minute, second = 0) =>
+    new Date(2026, 10, day, hour, minute, second).getTime();
+  const rule = "FREQ=DAILY;BYHOUR=12,13;BYMINUTE=0,5,10,15,20,25,30,35,40,45,50,55;BYSECOND=0";
+  assert.equal(computeNextRunAtMs(rule, { lastRunAtMs: time(22, 12, 0, 16) }), time(22, 12, 5));
+  assert.equal(computeNextRunAtMs(rule, { lastRunAtMs: time(22, 12, 55) }), time(22, 13, 0));
+  assert.equal(computeNextRunAtMs(rule, { lastRunAtMs: time(22, 13, 55) }), time(23, 12, 0));
+  assert.match(formatRruleHuman(rule), /BYHOUR=12,13;BYMINUTE=0,5,10/);
+
+  const weeklyRule = rule.replace("FREQ=DAILY", "FREQ=WEEKLY;BYDAY=SU");
+  assert.equal(computeNextRunAtMs(weeklyRule, { lastRunAtMs: time(22, 12, 55) }), time(22, 13, 0));
+  assert.equal(computeNextRunAtMs(weeklyRule, { lastRunAtMs: time(22, 13, 55) }), time(29, 12, 0));
+
+  const hourlyRule = "FREQ=HOURLY;INTERVAL=2;BYMINUTE=45,15";
+  assert.equal(computeNextRunAtMs(hourlyRule, { lastRunAtMs: time(22, 12, 15) }), time(22, 12, 45));
+  assert.equal(computeNextRunAtMs(hourlyRule, { lastRunAtMs: time(22, 12, 45) }), time(22, 14, 15));
+});
+
 test("AutomationScheduler discovers Codex/Claude tasks, avoids duplicate runs when native ran, and wakes overdue tasks", async (t) => {
   const dir = await mkdtemp(resolve(os.tmpdir(), "ac-automations-"));
   const codexHome = resolve(dir, "codex-home");

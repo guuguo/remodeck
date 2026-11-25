@@ -1085,3 +1085,83 @@ test("discoverClaudeProfiles merges Cockpit desktop dedicated CLI dirs without c
   assert.ok(hotmailThreads.some((th) => th.rawId === histDeskId));
   assert.ok(hotmailThreads.some((th) => th.rawId === cliSessId));
 });
+
+test("ClaudeProvider captures rate_limit_event from CLI stream-json & probe, persists across restart", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-claude-rl-"));
+  const claudeDir = resolve(dir, ".claude");
+  const dataDir = resolve(dir, "data");
+  await Promise.all([
+    mkdir(claudeDir, { recursive: true }),
+    mkdir(dataDir, { recursive: true }),
+  ]);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const rlEvents = [];
+  const completions = [];
+  const env = {
+    ...process.env,
+    CLAUDE_BIN: MOCK_CLAUDE_BIN,
+    AGENT_CONTROL_CLAUDE_CONFIG_DIRS: JSON.stringify([{ id: "default", label: "Claude 默认", home: claudeDir }]),
+  };
+
+  const provider = new ClaudeProvider({
+    env,
+    dataDir,
+    onEvent: (evt) => {
+      if (evt.type === "rate_limit_updated") rlEvents.push(evt);
+      if (evt.type === "turn_completed") completions.push(evt);
+    },
+  });
+
+  const created = await provider.startThread({
+    profileId: "default",
+    cwd: dir,
+    text: "测试 [RATE_LIMIT] 事件采集",
+  });
+  await waitFor(() => completions.find((e) => e.threadId === created.thread.id));
+  await waitFor(() => rlEvents.length >= 1);
+
+  const cached = await provider.readRateLimits("default");
+  assert.equal(cached?.fiveHour?.utilization, 0.75);
+  assert.equal(cached?.sevenDay?.utilization, 0.34);
+  assert.equal(cached?.source, "claude-cli-stream");
+  await provider.close();
+
+  // Verify persistence survives provider restart and probeClaudeProfile captures new sample.
+  const futureReset5h = Math.floor(Date.now() / 1000) + 7200;
+  const futureReset7d = Math.floor(Date.now() / 1000) + 86400 * 5;
+  await writeFile(resolve(claudeDir, ".mock-rate-limit.json"), JSON.stringify({
+    status: "allowed",
+    resetsAt: futureReset5h,
+    rateLimitType: "five_hour",
+    unifiedWindows: {
+      five_hour: { utilization: 0.4, resetsAt: futureReset5h, status: "allowed" },
+      seven_day: { utilization: 0.5, resetsAt: futureReset7d, status: "allowed" },
+    },
+  }), "utf8");
+
+  const completions2 = [];
+  const provider2 = new ClaudeProvider({
+    env,
+    dataDir,
+    onEvent: (evt) => {
+      if (evt.type === "turn_completed") completions2.push(evt);
+    },
+  });
+  t.after(() => provider2.close());
+  const reloaded = await provider2.readRateLimits("default");
+  assert.equal(reloaded?.fiveHour?.utilization, 0.75);
+  assert.equal(reloaded?.sevenDay?.utilization, 0.34);
+
+  // Subsequent CLI turn updates cached limits from .mock-rate-limit.json.
+  await provider2.sendTurn({
+    profileId: "default",
+    rawId: created.thread.rawId,
+    cwd: dir,
+    text: "第二轮刷新额度",
+  });
+  await waitFor(() => completions2.length >= 1);
+  const afterTurn2 = await provider2.readRateLimits("default");
+  assert.equal(afterTurn2?.fiveHour?.utilization, 0.4);
+  assert.equal(afterTurn2?.sevenDay?.utilization, 0.5);
+});

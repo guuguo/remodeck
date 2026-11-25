@@ -832,3 +832,164 @@ export function killProcessTreeCrossPlatform(proc, {
     // Ignore if already exited.
   }
 }
+
+/**
+ * Expand a leading ~ or ~/ (~\) home prefix and normalize workspace path.
+ */
+export function expandHomePath(rawPath, env = process.env, platform = process.platform) {
+  const raw = String(rawPath || "").trim();
+  if (!raw) return "";
+  const norm = normalizePlatform(platform);
+  const home = resolveUserHome(env, norm);
+  if (raw === "~" || /^~[\\/]*$/.test(raw)) {
+    return home ? normalizeWorkspacePath(home) : "~";
+  }
+  if (/^~[\\/]/.test(raw)) {
+    if (!home) return normalizeWorkspacePath(raw);
+    const rest = raw.slice(2);
+    const p = pathModuleForPlatform(norm);
+    return normalizeWorkspacePath(rest ? p.join(home, rest) : home);
+  }
+  return normalizeWorkspacePath(raw);
+}
+
+function resolveValidInitialDirectory(rawInitialDir, { env = process.env, platform = process.platform } = {}) {
+  const expanded = expandHomePath(rawInitialDir, env, platform);
+  if (!expanded) return "";
+  const p = pathModuleForPlatform(platform);
+  let candidate = expanded;
+  for (let i = 0; i < 4 && candidate; i += 1) {
+    try {
+      if (existsSync(candidate) && statSync(candidate).isDirectory()) {
+        return candidate;
+      }
+    } catch {
+      // Ignore stat errors and walk up to parent.
+    }
+    const parent = p.dirname(candidate);
+    if (!parent || parent === candidate) break;
+    candidate = parent;
+  }
+  return "";
+}
+
+/**
+ * Open the native OS directory picker dialog on macOS, Windows, or Linux.
+ */
+export async function pickNativeDirectory({
+  initialDir = "",
+  prompt = "选择新会话的工作目录",
+  platform = process.platform,
+  env = process.env,
+  execImpl = execFileCrossPlatform,
+} = {}) {
+  const norm = normalizePlatform(platform);
+  const validInitialDir = resolveValidInitialDirectory(initialDir, { env, platform: norm });
+  const promptText = String(prompt || "选择新会话的工作目录");
+
+  if (norm === "darwin") {
+    const script = [
+      "on run argv",
+      "  set promptText to item 1 of argv",
+      "  set defaultDir to \"\"",
+      "  if (count of argv) > 1 then set defaultDir to item 2 of argv",
+      "  activate",
+      "  try",
+      "    if defaultDir is not \"\" then",
+      "      set chosenFolder to choose folder with prompt promptText default location (POSIX file defaultDir)",
+      "    else",
+      "      set chosenFolder to choose folder with prompt promptText",
+      "    end if",
+      "    return POSIX path of chosenFolder",
+      "  on error number -128",
+      "    return \"\"",
+      "  end try",
+      "end run",
+    ].join("\n");
+    const args = ["-e", script, promptText];
+    if (validInitialDir) args.push(validInitialDir);
+    try {
+      const res = await execImpl("osascript", args, { env, timeout: 120_000 });
+      const chosen = normalizeWorkspacePath(String(res?.stdout || "").trim());
+      return { canceled: !chosen, path: chosen };
+    } catch (err) {
+      if (String(err?.stderr || err?.message || "").includes("-128")) {
+        return { canceled: true, path: "" };
+      }
+      throw err;
+    }
+  }
+
+  if (norm === "win32") {
+    const psScript = [
+      "Add-Type -AssemblyName System.Windows.Forms",
+      "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog",
+      "$dlg.Description = $env:AC_PICK_PROMPT",
+      "$dlg.ShowNewFolderButton = $true",
+      "if ($env:AC_PICK_INITIAL_DIR -and (Test-Path -LiteralPath $env:AC_PICK_INITIAL_DIR)) {",
+      "  $dlg.SelectedPath = $env:AC_PICK_INITIAL_DIR",
+      "}",
+      "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {",
+      "  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+      "  Write-Output $dlg.SelectedPath",
+      "}",
+    ].join("; ");
+    const res = await execImpl("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-STA",
+      "-Command",
+      psScript,
+    ], {
+      env: {
+        ...env,
+        AC_PICK_PROMPT: promptText,
+        AC_PICK_INITIAL_DIR: validInitialDir,
+      },
+      timeout: 120_000,
+      windowsHide: true,
+    });
+    const chosen = normalizeWorkspacePath(String(res?.stdout || "").trim());
+    return { canceled: !chosen, path: chosen };
+  }
+
+  const zenityArgs = [
+    "--file-selection",
+    "--directory",
+    `--title=${promptText}`,
+  ];
+  if (validInitialDir) {
+    zenityArgs.push(`--filename=${validInitialDir.endsWith("/") ? validInitialDir : `${validInitialDir}/`}`);
+  }
+  try {
+    const res = await execImpl("zenity", zenityArgs, { env, timeout: 120_000 });
+    const chosen = normalizeWorkspacePath(String(res?.stdout || "").trim());
+    return { canceled: !chosen, path: chosen };
+  } catch (err) {
+    if (Number(err?.code) === 1) {
+      return { canceled: true, path: "" };
+    }
+    if (err?.code !== "ENOENT") {
+      throw err;
+    }
+  }
+
+  try {
+    const res = await execImpl("kdialog", [
+      "--getexistingdirectory",
+      validInitialDir || resolveUserHome(env, norm) || "/",
+      "--title",
+      promptText,
+    ], { env, timeout: 120_000 });
+    const chosen = normalizeWorkspacePath(String(res?.stdout || "").trim());
+    return { canceled: !chosen, path: chosen };
+  } catch (err) {
+    if (Number(err?.code) === 1) {
+      return { canceled: true, path: "" };
+    }
+    if (err?.code === "ENOENT") {
+      throw new Error("当前桌面环境缺少文件夹选择工具（zenity 或 kdialog），请直接输入目录路径");
+    }
+    throw err;
+  }
+}

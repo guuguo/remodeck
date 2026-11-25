@@ -104,8 +104,15 @@ export function parseRrule(raw = "") {
   const freq = parts.FREQ || "";
   if (!freq) return null;
   const interval = Math.max(1, Number.parseInt(parts.INTERVAL || "1", 10) || 1);
-  const byMinute = parts.BYMINUTE !== undefined ? Number.parseInt(parts.BYMINUTE, 10) : null;
-  const byHour = parts.BYHOUR !== undefined ? Number.parseInt(parts.BYHOUR, 10) : null;
+  const parseTimeField = (value, max) => {
+    const values = [...new Set((value || "").split(",")
+      .map((item) => Number.parseInt(item, 10))
+      .filter(Number.isFinite)
+      .map((item) => Math.max(0, Math.min(max, item))))].sort((a, b) => a - b);
+    return values.length > 1 ? values : values[0] ?? null;
+  };
+  const byMinute = parseTimeField(parts.BYMINUTE, 59);
+  const byHour = parseTimeField(parts.BYHOUR, 23);
   const count = parts.COUNT !== undefined ? Number.parseInt(parts.COUNT, 10) : null;
   const byDay = parts.BYDAY
     ? parts.BYDAY.split(",").map((d) => d.trim()).filter((d) => Object.hasOwn(RRULE_WEEKDAYS, d))
@@ -113,8 +120,8 @@ export function parseRrule(raw = "") {
   return {
     freq,
     interval,
-    byMinute: Number.isFinite(byMinute) ? Math.max(0, Math.min(59, byMinute)) : null,
-    byHour: Number.isFinite(byHour) ? Math.max(0, Math.min(23, byHour)) : null,
+    byMinute,
+    byHour,
     byDay,
     count: Number.isFinite(count) && count > 0 ? count : null,
   };
@@ -123,6 +130,7 @@ export function parseRrule(raw = "") {
 export function formatRruleHuman(raw = "") {
   const parsed = parseRrule(raw);
   if (!parsed) return raw ? String(raw) : "手动触发";
+  if (Array.isArray(parsed.byMinute) || Array.isArray(parsed.byHour)) return String(raw);
   const pad2 = (n) => String(n).padStart(2, "0");
   if (parsed.freq === "MINUTELY") {
     return `每 ${parsed.interval} 分钟`;
@@ -170,41 +178,44 @@ export function computeNextRunAtMs(rawRrule = "", {
     const base = anchorMs > 0 ? anchorMs : nowMs - stepMs;
     const d = new Date(base);
     if (parsed.byMinute !== null) {
-      d.setSeconds(0, 0);
-      d.setMinutes(parsed.byMinute);
-      if (d.getTime() <= base) {
-        d.setTime(d.getTime() + stepMs);
+      const minutes = [parsed.byMinute].flat();
+      for (const minute of minutes) {
+        d.setMinutes(minute, 0, 0);
+        if (d.getTime() > base) return d.getTime();
       }
-      return d.getTime();
+      d.setMinutes(minutes[0], 0, 0);
+      return d.getTime() + stepMs;
     }
     return base + stepMs;
   }
 
-  if (parsed.freq === "DAILY") {
-    const base = anchorMs > 0 ? anchorMs : nowMs - 86_400_000;
-    const d = new Date(base);
-    const targetH = parsed.byHour ?? d.getHours();
-    const targetM = parsed.byMinute ?? 0;
-    d.setHours(targetH, targetM, 0, 0);
-    if (d.getTime() <= base) {
-      d.setDate(d.getDate() + parsed.interval);
-    }
-    return d.getTime();
-  }
-
-  if (parsed.freq === "WEEKLY") {
-    const base = anchorMs > 0 ? anchorMs : nowMs - 60_000;
+  if (parsed.freq === "DAILY" || parsed.freq === "WEEKLY") {
+    const daily = parsed.freq === "DAILY";
+    const base = anchorMs > 0 ? anchorMs : nowMs - (daily ? 86_400_000 : 60_000);
     const start = new Date(base);
-    const targetH = parsed.byHour ?? start.getHours();
-    const targetM = parsed.byMinute ?? 0;
+    const hours = [parsed.byHour ?? start.getHours()].flat();
+    const minutes = [parsed.byMinute ?? 0].flat();
+    const nextOnDate = (offset) => {
+      const date = new Date(start);
+      if (offset) date.setDate(date.getDate() + offset);
+      let next = Infinity;
+      for (const hour of hours) {
+        for (const minute of minutes) {
+          const candidate = new Date(date).setHours(hour, minute, 0, 0);
+          if (candidate > base) next = Math.min(next, candidate);
+        }
+      }
+      return Number.isFinite(next) ? next : 0;
+    };
+    if (daily) return nextOnDate(0) || nextOnDate(parsed.interval);
+
     const allowedDays = parsed.byDay.length
       ? new Set(parsed.byDay.map((d) => RRULE_WEEKDAYS[d]))
       : new Set([start.getDay()]);
     for (let offset = 0; offset <= 14; offset += 1) {
-      const candidate = new Date(start.getFullYear(), start.getMonth(), start.getDate() + offset, targetH, targetM, 0, 0);
-      if (allowedDays.has(candidate.getDay()) && candidate.getTime() > base) {
-        return candidate.getTime();
-      }
+      if (!allowedDays.has((start.getDay() + offset) % 7)) continue;
+      const next = nextOnDate(offset);
+      if (next) return next;
     }
   }
   return 0;

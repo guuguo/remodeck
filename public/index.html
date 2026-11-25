@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="ac-ui-version" content="20261121b" />
+  <meta name="ac-ui-version" content="20261125a" />
   <title>Agent Control · 多智能体远程控制台</title>
   <script>
     (function () {
@@ -18,8 +18,8 @@
       } catch {}
     })();
   </script>
-  <link rel="stylesheet" href="./app.css?v=20261121b" />
-  <link rel="stylesheet" href="./project-workspace.css?v=20261121b" />
+  <link rel="stylesheet" href="./app.css?v=20261125a" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261125a" />
 </head>
 <body>
   <div id="appShell" class="app-shell">
@@ -83,7 +83,7 @@
       </div>
 
       <div class="sidebar-search-row">
-        <input type="search" id="sidebarSearchInput" class="sidebar-search-input" placeholder="搜索会话标题、预览或项目…" autocomplete="off" />
+        <input type="search" id="sidebarSearchInput" class="sidebar-search-input" placeholder="搜索标题、对话内容或项目…" autocomplete="off" />
         <button type="button" id="sidebarSearchClearBtn" class="sidebar-search-clear" title="清除搜索" hidden>×</button>
       </div>
 
@@ -131,6 +131,20 @@
             </div>
             <div class="active-subrow">
               <code id="activeCwd" class="active-cwd"></code>
+              <button
+                type="button"
+                id="newThreadCwdBtn"
+                class="new-thread-cwd-btn"
+                hidden
+                aria-haspopup="dialog"
+                aria-expanded="false"
+                aria-controls="newThreadCwdPopover"
+                title="点击选择或切换新会话的工作目录"
+              >
+                <span class="new-thread-cwd-icon" data-icon="folder" data-icon-size="12" aria-hidden="true"></span>
+                <span id="newThreadCwdText" class="new-thread-cwd-text"></span>
+                <span class="new-thread-cwd-caret" data-icon="chevron-down" data-icon-size="11" aria-hidden="true"></span>
+              </button>
             </div>
           </div>
         </div>
@@ -204,6 +218,7 @@
         <span id="livePhaseText" class="live-phase">执行中</span>
         <span id="liveDetailText" class="live-detail"></span>
       </div>
+      <div id="codexCompatBanner" class="codex-compat-banner" hidden></div>
 
       <section id="messagesViewport" class="messages-viewport">
         <div id="loadOlderWrap" class="load-older-wrap" hidden>
@@ -792,6 +807,13 @@
                   </select>
                 </span>
               </div>
+              <label class="update-toggle-row">
+                <input id="agyAutoRetryAuth401Toggle" type="checkbox" checked />
+                <span class="update-toggle-copy">
+                  <strong>AGY 遇到瞬时 401 自动续发一次继续</strong>
+                  <small>每小时 OAuth 令牌刷新间隙触发 401 中断时，延迟 2.5 秒自动补发一次「继续」（单轮最多 1 次）</small>
+                </span>
+              </label>
             </section>
           </div>
 
@@ -926,7 +948,33 @@
     </div>
   </dialog>
 
-  <script type="module" src="./i18n.js?v=20261119autocompact1"></script>
-  <script type="module" src="./app.js?v=20261121b"></script>
+  <div id="newThreadCwdPopover" class="cwd-picker-popover" role="dialog" aria-label="选择工作目录" hidden>
+    <div class="cwd-picker-head">
+      <input
+        id="newThreadCwdSearchInput"
+        class="cwd-picker-input"
+        type="text"
+        placeholder="搜索项目或输入目录路径…"
+        autocomplete="off"
+        spellcheck="false"
+        aria-label="搜索项目或输入目录路径…"
+      />
+      <button
+        type="button"
+        id="newThreadCwdBrowseBtn"
+        class="btn-secondary btn-xs cwd-picker-browse-btn"
+        title="从本机选择文件夹"
+        hidden
+      >
+        <span class="btn-icon-glyph" data-icon="folder" data-icon-size="12" aria-hidden="true"></span>
+        <span>浏览…</span>
+      </button>
+    </div>
+    <div id="newThreadCwdStatus" class="cwd-picker-status" role="status" hidden></div>
+    <div id="newThreadCwdList" class="cwd-picker-list" role="listbox" aria-label="工作目录列表"></div>
+  </div>
+
+  <script type="module" src="./i18n.js?v=20261125a"></script>
+  <script type="module" src="./app.js?v=20261125a"></script>
 </body>
 </html>

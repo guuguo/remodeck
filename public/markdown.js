@@ -440,23 +440,31 @@ function renderInlineMarkdown(text, { threadId = "", deferImages = false, basePa
     },
   );
 
-  // 7. Bare URL auto-linking (stops before whitespace, CJK punctuation, and balanced parens).
-  working = working.replace(/https?:\/\/[^\s<>"'`\x00\u3000-\u303f\uff01-\uffef“”‘’]+/g, (rawMatch) => {
+  // 7. Bare URL auto-linking (stops before whitespace, CJK punctuation, Markdown emphasis delimiters, and balanced parens).
+  working = working.replace(/https?:\/\/(?:(?!\*\*|~~)[^\s<>"'`\x00\u3000-\u303f\uff01-\uffef“”‘’])+/g, (rawMatch) => {
     let url = rawMatch;
     let suffix = "";
-    while (url.length > 8 && /[.,;:!?。，；！？、]+$/.test(url)) {
+    const protoLen = url.indexOf("://") + 3;
+    while (url.length > protoLen) {
       const last = url[url.length - 1];
-      suffix = last + suffix;
-      url = url.slice(0, -1);
+      if (/[.,;:!?*_~。，；！？、]/.test(last)) {
+        suffix = last + suffix;
+        url = url.slice(0, -1);
+        continue;
+      }
+      if (last === ")" && (url.match(/\(/g) || []).length < (url.match(/\)/g) || []).length) {
+        suffix = ")" + suffix;
+        url = url.slice(0, -1);
+        continue;
+      }
+      if (last === "]" && (url.match(/\[/g) || []).length < (url.match(/\]/g) || []).length) {
+        suffix = "]" + suffix;
+        url = url.slice(0, -1);
+        continue;
+      }
+      break;
     }
-    while (url.endsWith(")") && (url.match(/\(/g) || []).length < (url.match(/\)/g) || []).length) {
-      suffix = ")" + suffix;
-      url = url.slice(0, -1);
-    }
-    while (url.endsWith("]") && (url.match(/\[/g) || []).length < (url.match(/\]/g) || []).length) {
-      suffix = "]" + suffix;
-      url = url.slice(0, -1);
-    }
+    if (url.length <= protoLen) return rawMatch;
     const anchor = stash(`<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`);
     return anchor + suffix;
   });
@@ -885,8 +893,35 @@ export function renderMarkdown(source, { depth = 0, threadId = "", deferImages =
 function statusPillHtml(status) {
   if (!status || status === "completed") return `<span class="item-status ok">完成</span>`;
   if (status === "inProgress" || status === "running") return `<span class="item-status running">进行中</span>`;
+  if (status === "interrupted" || status === "cancelled") return `<span class="item-status">已中断</span>`;
   if (status === "failed" || status === "declined") return `<span class="item-status err">失败</span>`;
   return `<span class="item-status">${escapeHtml(status)}</span>`;
+}
+
+function describeSleepToolCall(item) {
+  if (!item || item.type !== "mcpToolCall") return null;
+  const tool = String(item.tool || "").trim();
+  if (!/^(?:clock\.)?sleep$/i.test(tool)) return null;
+  const args = item.arguments && typeof item.arguments === "object" ? item.arguments : {};
+  const rawDuration = Number(item.durationMs ?? args.duration_ms ?? args.durationMs);
+  const dur = Number.isFinite(rawDuration) && rawDuration > 0 ? formatClientDurationMs(rawDuration) : "";
+  const status = String(item.status || "completed");
+  const isRunning = status === "inProgress" || status === "running";
+  const isInterrupted = status === "interrupted" || status === "cancelled";
+  let label = "clock.sleep";
+  if (isRunning) {
+    label = dur ? `clock.sleep · 定时等待 ${dur}` : "clock.sleep · 定时等待中";
+  } else if (isInterrupted) {
+    label = dur ? `clock.sleep · 等待 ${dur}（已中断）` : "clock.sleep · 已中断";
+  } else if (dur) {
+    label = `clock.sleep · 等待 ${dur}`;
+  }
+  return {
+    kind: "等待",
+    label,
+    isSleep: true,
+    output: String(item.resultText || item.output || "").trim(),
+  };
 }
 
 const CLIENT_IMAGE_TAG_RE = /<image\b([^>\n]*\b(?:name|path)\s*=[^>\n]*)>(?:\s*<\/image>)?/gi;
@@ -2078,10 +2113,13 @@ function collectProcessDigest(processItems) {
           errorMessage: errMsg ? formatToolExecutionError(errMsg, { filePath: rawPath, toolName: tool }) : "",
         });
       } else {
-        const label = unwrapToolText(args.toolSummary || "") || tool || "工具调用";
+        const sleepInfo = describeSleepToolCall(item);
+        const label = sleepInfo ? sleepInfo.label : (unwrapToolText(args.toolSummary || "") || tool || "工具调用");
         otherTools.push({
+          kind: sleepInfo ? sleepInfo.kind : "工具",
           label: label.slice(0, 80),
           status: item.status || "completed",
+          output: sleepInfo ? sleepInfo.output : "",
           errorMessage: errMsg ? formatToolExecutionError(errMsg, { filePath: rawPath, toolName: tool }) : "",
           recoverable,
         });
@@ -2516,13 +2554,15 @@ function buildLiveStepStream(processItems) {
           lastIdx: idx,
         });
       } else {
-        const label = unwrapToolText(args.toolSummary || "") || tool || "工具调用";
+        const sleepInfo = describeSleepToolCall(item);
+        const label = sleepInfo ? sleepInfo.label : (unwrapToolText(args.toolSummary || "") || tool || "工具调用");
         steps.push({
-          kind: "工具",
+          kind: sleepInfo ? sleepInfo.kind : "工具",
           label: label.slice(0, 80),
           status: item.status || "completed",
           isCode: true,
-          output: "",
+          isSleep: Boolean(sleepInfo),
+          output: sleepInfo ? sleepInfo.output : "",
           firstIdx: idx,
           lastIdx: idx,
         });
@@ -2614,9 +2654,16 @@ function renderLiveProgressFeedHtml(processItems, digest, { liveThought = "", li
     }
     const step = recentSteps[idx];
     const isFrontierStep = idx === recentSteps.length - 1 && lastStepInProgress;
+    let stepLabel = step.label;
+    if (isFrontierStep && step.isSleep && cleanPhase) {
+      const waitMatch = cleanPhase.match(/已等待\s*[^·\n]+/);
+      if (waitMatch && !stepLabel.includes("已等待")) {
+        stepLabel = `${stepLabel}（${waitMatch[0].trim()}）`;
+      }
+    }
     const labelHtml = step.isCode
-      ? `<code class="tool-title">${escapeHtml(step.label)}</code>`
-      : `<span class="process-note-text">${escapeHtml(step.label)}</span>`;
+      ? `<code class="tool-title">${escapeHtml(stepLabel)}</code>`
+      : `<span class="process-note-text">${escapeHtml(stepLabel)}</span>`;
     const pill = step.status ? statusPillHtml(step.status) : "";
     let cmdSnippetHtml = "";
     if (idx === lastCmdWithOutIdx && step.output) {
@@ -2787,6 +2834,8 @@ function renderProcessGroupHtml(processItems, { isRunning = false, liveThought =
   }
 
   for (const toolItem of digest.otherTools) {
+    const kindLabel = toolItem.kind || "工具";
+    const toolOut = String(toolItem.output || "").trim();
     if (toolItem.errorMessage) {
       if (toolItem.recoverable) {
         rows.push(`
@@ -2799,7 +2848,7 @@ function renderProcessGroupHtml(processItems, { isRunning = false, liveThought =
         rows.push(`
           <details class="process-subdetail">
             <summary>
-              <span class="tool-kind">工具</span>
+              <span class="tool-kind">${escapeHtml(kindLabel)}</span>
               <code class="tool-title">${escapeHtml(toolItem.label)}</code>
               ${statusPillHtml(toolItem.status)}
             </summary>
@@ -2809,10 +2858,23 @@ function renderProcessGroupHtml(processItems, { isRunning = false, liveThought =
           </details>
         `);
       }
+    } else if (toolOut) {
+      rows.push(`
+        <details class="process-subdetail">
+          <summary>
+            <span class="tool-kind">${escapeHtml(kindLabel)}</span>
+            <code class="tool-title">${escapeHtml(toolItem.label)}</code>
+            ${statusPillHtml(toolItem.status)}
+          </summary>
+          <div class="tool-body">
+            <pre class="tool-output">${escapeHtml(toolOut.slice(0, 400))}</pre>
+          </div>
+        </details>
+      `);
     } else {
       rows.push(`
         <div class="process-step-row">
-          <span class="tool-kind">工具</span>
+          <span class="tool-kind">${escapeHtml(kindLabel)}</span>
           <code class="tool-title">${escapeHtml(toolItem.label)}</code>
           ${statusPillHtml(toolItem.status)}
         </div>
@@ -3351,7 +3413,15 @@ export function renderTurnHtml(turn, {
   }
 
   const errorBanner = normalizedTurn?.error?.message
-    ? `<div class="turn-error">${escapeHtml(normalizedTurn.error.message)}</div>`
+    ? `
+      <div class="turn-error">
+        <div class="turn-error-head">
+          <div class="turn-error-main">${escapeHtml(normalizedTurn.error.message)}</div>
+          ${!isRunning && !supersededByNextTurn ? `<button type="button" class="turn-resume-inline-btn is-error-retry" data-resume-interrupted-turn="1">${goalSuspended ? "▶ 恢复 Goal" : "▶ 重试继续"}</button>` : ""}
+        </div>
+        ${normalizedTurn.error.detail ? `<details class="turn-error-details"><summary>查看原始错误详情</summary><pre class="turn-error-pre">${escapeHtml(normalizedTurn.error.detail)}</pre></details>` : ""}
+      </div>
+    `
     : "";
 
   return `<section class="turn-block" data-turn-id="${escapeHtml(normalizedTurn.id || "")}">${parts.join("")}${errorBanner}</section>`;

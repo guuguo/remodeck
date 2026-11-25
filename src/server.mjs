@@ -20,7 +20,13 @@ import {
 import { defaultDataDir, ensureInstanceIdentity } from "./instance-identity.mjs";
 import { listLanUrls } from "./lan-network.mjs";
 import { listLocalApps, LOCAL_APPS_DIR, proxyLocalApp } from "./local-apps.mjs";
-import { execFileCrossPlatform, isSubpathOrEqual } from "./platform.mjs";
+import {
+  execFileCrossPlatform,
+  expandHomePath,
+  isSubpathOrEqual,
+  normalizeWorkspacePath,
+  pickNativeDirectory,
+} from "./platform.mjs";
 import { ProviderHub } from "./provider-hub.mjs";
 import { listSlashCommands } from "./slash-commands.mjs";
 import {
@@ -39,6 +45,7 @@ import { MissionOverviewService } from "./mission-overview-service.mjs";
 import { UpdateService } from "./update-service.mjs";
 import { createUsagePing } from "./usage-ping.mjs";
 import { VoiceCallService } from "./voice-call-service.mjs";
+import { HumanVerifyManager } from "./human-verify.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, "..", "public");
@@ -140,7 +147,9 @@ export async function createAgentControlServer({
   hub: customHub = null,
   remoteBridgeOptions = null,
   updateServiceOptions = null,
+  humanVerifyOptions = null,
   revealFileImpl = null,
+  pickDirectoryImpl = null,
   writeErrorLog,
 } = {}) {
   const identity = await ensureInstanceIdentity({ dataDir });
@@ -246,6 +255,13 @@ export async function createAgentControlServer({
     onEvent: (eventName, payload) => broadcastSse(eventName, payload),
   });
   await automationScheduler.load();
+
+  const humanVerify = new HumanVerifyManager({
+    dataDir,
+    env,
+    onEvent: (eventName, payload) => broadcastSse(eventName, payload),
+    ...(humanVerifyOptions || {}),
+  });
 
   const heartbeat = setInterval(() => {
     for (const res of [...sseClients]) {
@@ -535,6 +551,38 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/threads/search" && request.method === "GET") {
+        const query = url.searchParams.get("q") || "";
+        const provider = url.searchParams.get("provider") || "";
+        const profileId = url.searchParams.get("profileId") || "";
+        const archived = url.searchParams.get("archived") || "0";
+        const cwd = url.searchParams.get("cwd") || "";
+        const limit = Math.max(1, Math.min(150, Number(url.searchParams.get("limit") || 60)));
+        const result = await hub.searchThreads({ query, provider, profileId, archived, cwd, limit });
+        const slimThreads = Array.isArray(result?.threads)
+          ? result.threads.map(({
+            rolloutPath: _rp,
+            path: _p,
+            sourcePath: _sp,
+            gitInfo: _git,
+            firstUserText: _fut,
+            lastUserText: _lut,
+            autoTitle: _at,
+            autoTitleSourceSig: _ats,
+            autoTitleIsDrift: _atd,
+            ...rest
+          }) => rest)
+          : [];
+        sendJson(response, 200, {
+          ok: true,
+          query: result.query,
+          terms: result.terms,
+          threads: slimThreads,
+          indexStatus: result.indexStatus,
+        }, { requestId });
+        return;
+      }
+
       if (pathname === "/api/projects/meta" && request.method === "GET") {
         sendJson(response, 200, { projectsMeta: hub.listProjectsMeta() }, { requestId });
         return;
@@ -697,6 +745,8 @@ export async function createAgentControlServer({
           profileId: body.profileId || "",
           ...(Object.hasOwn(body, "disabled") ? { disabled: Boolean(body.disabled) } : {}),
           ...(Object.hasOwn(body, "alias") ? { alias: body.alias } : {}),
+          ...(Object.hasOwn(body, "codexExecMode") ? { codexExecMode: Boolean(body.codexExecMode) } : {}),
+          ...(Object.hasOwn(body, "codexExecSuggested") ? { codexExecSuggested: Boolean(body.codexExecSuggested) } : {}),
         });
         sendJson(response, 200, result, { requestId });
         return;
@@ -930,6 +980,25 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/fs/pick-directory" && request.method === "POST") {
+        if (!canManageRemote) {
+          sendJson(response, 403, { error: { code: "LOCAL_ONLY", message: "仅支持在本机控制台选择文件夹" } }, { requestId });
+          return;
+        }
+        const body = await readJsonBody(request).catch(() => ({}));
+        const initialDir = String(body?.initialDir || "").trim();
+        const picked = pickDirectoryImpl
+          ? await pickDirectoryImpl({ initialDir })
+          : await pickNativeDirectory({ initialDir, env });
+        const rawPath = typeof picked === "string" ? picked : String(picked?.path || "");
+        const cleanPath = rawPath.trim() ? normalizeWorkspacePath(rawPath) : "";
+        const canceled = typeof picked === "object" && picked !== null && "canceled" in picked
+          ? Boolean(picked.canceled || !cleanPath)
+          : !cleanPath;
+        sendJson(response, 200, { ok: true, canceled, path: cleanPath }, { requestId });
+        return;
+      }
+
       if (pathname === "/api/thread/activity" && request.method === "GET") {
         const threadId = url.searchParams.get("id") || "";
         context.threadId = threadId;
@@ -942,10 +1011,12 @@ export async function createAgentControlServer({
       if (pathname === "/api/thread/new" && request.method === "POST") {
         const body = await readJsonBody(request);
         const text = String(body.text ?? body.prompt ?? "");
+        const rawCwd = String(body.cwd || "").trim();
+        const expandedCwd = rawCwd ? expandHomePath(rawCwd, env) : "";
         const result = await hub.startThread({
           provider: body.provider || "codex",
           profileId: body.profileId || "default",
-          cwd: body.cwd || "",
+          cwd: expandedCwd,
           text,
           images: Array.isArray(body.images) ? body.images : [],
           model: body.model || "",
@@ -1102,7 +1173,10 @@ export async function createAgentControlServer({
 
       if (pathname === "/api/thread/name" && request.method === "POST") {
         const body = await readJsonBody(request);
-        if (String(body.source || "").trim().toLowerCase() === "agent" && hub.getSettings().agentAutoTitle === false) {
+        const rawSource = String(body.source || "user").trim().toLowerCase();
+        const source = rawSource === "agent" || rawSource === "domain" ? rawSource : "user";
+        const action = String(body.action || "set").trim().toLowerCase() === "append" ? "append" : "set";
+        if (source === "agent" && hub.getSettings().agentAutoTitle === false) {
           sendJson(response, 200, { ok: true, skipped: true, reason: "agent_auto_title_disabled" }, { requestId });
           return;
         }
@@ -1116,7 +1190,12 @@ export async function createAgentControlServer({
           });
         }
         context.threadId = threadId;
-        const result = await hub.renameThread(threadId, body.name);
+        const result = await hub.renameThread(threadId, body.name, {
+          source,
+          action,
+          suffix: body.suffix || "",
+          lock: Boolean(body.lock),
+        });
         sendJson(response, 200, result, { requestId });
         return;
       }
@@ -1313,6 +1392,7 @@ export async function createAgentControlServer({
           instanceId: identity.instanceId,
           label: identity.label,
           pendingRequests: hub.allPendingRequests(),
+          pendingHumanVerifications: humanVerify.listPending(),
           queuedTurns: hub.allQueuedTurns(),
           telemetry: await hub.getTelemetry().catch(() => null),
           remote: canManageRemote ? remoteSnap : { ...remoteSnap, pairUrl: "" },
@@ -1566,6 +1646,79 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/human-verify" && request.method === "GET") {
+        sendJson(response, 200, { ok: true, items: humanVerify.listPending() }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/human-verify" && request.method === "POST") {
+        if (!canManageRemote) {
+          sendJson(response, 403, { error: { code: "forbidden", message: "仅限在本机控制台发起动态验证" } }, { requestId });
+          return;
+        }
+        const body = await readJsonBody(request);
+        const created = await humanVerify.create(body);
+        if (body.wait === false) {
+          sendJson(response, 200, { ok: true, item: created.item }, { requestId });
+          return;
+        }
+        let finished = false;
+        const onClientDisconnect = () => {
+          if (finished || response.writableFinished || body.keepAliveOnDisconnect === true) return;
+          humanVerify.cancel(created.item.id, { reason: "disconnected" });
+        };
+        request.on("aborted", onClientDisconnect);
+        response.on("close", onClientDisconnect);
+        const outcome = await created.wait();
+        finished = true;
+        request.off("aborted", onClientDisconnect);
+        response.off("close", onClientDisconnect);
+        if (!response.writableEnded && !response.destroyed) {
+          sendJson(response, 200, outcome, { requestId });
+        }
+        return;
+      }
+
+      const hvActionMatch = pathname.match(/^\/api\/human-verify\/([^/]+)(?:\/(submit|cancel|refresh))?\/?$/);
+      if (hvActionMatch) {
+        const hvId = decodeURIComponent(hvActionMatch[1]);
+        const hvAction = hvActionMatch[2] || "";
+        if (!hvAction && request.method === "GET") {
+          const item = humanVerify.get(hvId);
+          if (!item) {
+            sendJson(response, 404, { error: { code: "not_found", message: "验证请求不存在或已结束" } }, { requestId });
+            return;
+          }
+          sendJson(response, 200, { ok: true, item }, { requestId });
+          return;
+        }
+        if (hvAction === "submit" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const result = humanVerify.submit(hvId, {
+            value: body.value,
+            values: body.values,
+            submittedBy: body.submittedBy || (canManageRemote ? "web" : "remote"),
+          });
+          sendJson(response, 200, result, { requestId });
+          return;
+        }
+        if (hvAction === "cancel" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const result = humanVerify.cancel(hvId, {
+            reason: body.reason || "cancelled",
+            submittedBy: body.submittedBy || (canManageRemote ? "web" : "remote"),
+          });
+          sendJson(response, 200, result, { requestId });
+          return;
+        }
+        if (hvAction === "refresh" && request.method === "POST") {
+          await readJsonBody(request);
+          const item = await humanVerify.refresh(hvId);
+          sendJson(response, 200, { ok: true, item }, { requestId });
+          return;
+        }
+      }
+
       if (pathname.startsWith("/api/")) {
         sendJson(response, 404, { error: { message: "API 路由不存在" } }, { requestId });
         return;
@@ -1599,6 +1752,7 @@ export async function createAgentControlServer({
 
   const closeResources = async () => {
     clearInterval(heartbeat);
+    humanVerify.close();
     automationScheduler.close();
     updateService.close();
     usagePing.close();
@@ -1627,6 +1781,7 @@ export async function createAgentControlServer({
     tunnelAuth,
     updateService,
     overviewService,
+    humanVerify,
     identity,
     get port() {
       return actualPort;
@@ -1648,6 +1803,7 @@ export async function createAgentControlServer({
       quickTunnel.setTargetOrigin(localOrigin);
       tailscaleFunnel.setTargetOrigin(localOrigin);
       bridge.setTargetOrigin(localOrigin);
+      humanVerify.setTargetOrigin(localOrigin);
       bridge.connect();
       if (!disableUpdateCheck) {
         updateService.start();
@@ -1656,6 +1812,7 @@ export async function createAgentControlServer({
       if (!env.AGENT_CONTROL_DISABLE_AUTOMATIONS) {
         automationScheduler.start();
       }
+      hub.startSearchIndex?.();
       leaseHandle = await acquireRuntimeLease({
         dataDir,
         host,

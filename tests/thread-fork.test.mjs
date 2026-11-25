@@ -153,4 +153,13 @@ test("换 Agent 通过 HTTP 新建独立接续会话，保留目录与上下文�
   assert.match(JSON.stringify(read.thread.turns[1]), /接着核对工作区/);
   assert.doesNotMatch(JSON.stringify(read.thread.turns[1]), /AC_FORK_CONTEXT_START/);
   assert.equal((await hub.getActivity(original.thread.id)).live, true);
+
+  // Stale fork draft IDs transparently redirect to the materialized thread after first send.
+  const staleRead = await hub.readThread(fork.id, { detail: "full" });
+  assert.equal(staleRead.thread.id, sent.redirectedThreadId);
+  const staleAct = await hub.getActivity(fork.id);
+  assert.equal(typeof staleAct.live, "boolean");
+  const staleSent = await hub.sendTurn({ threadId: fork.id, text: "第二次跟进 [COMPLETE_NOW]" });
+  assert.equal(staleSent.redirectedThreadId, sent.redirectedThreadId);
+  assert.equal(staleSent.forkedFromId, fork.id);
 });

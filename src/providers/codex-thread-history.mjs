@@ -75,6 +75,17 @@ function normalizeCodexTurns(turns = [], automationNames = null) {
         if (item?.type === "agentMessage") {
           return normalizeCodexAgentMessageItem(item, { automationNames });
         }
+        if (item?.type === "Extension" || item?.type === "extension") {
+          const rawDuration = Number(item.durationMs ?? item.duration_ms);
+          const durationMs = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : null;
+          return {
+            type: "mcpToolCall",
+            id: item.id || "",
+            status: item.status || "completed",
+            tool: item.kind || item.tool || "extension",
+            ...(durationMs ? { durationMs, arguments: { duration_ms: durationMs } } : {}),
+          };
+        }
         return item;
       }),
     };

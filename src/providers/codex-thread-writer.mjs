@@ -42,7 +42,7 @@ export class CodexThreadWriterRegistry {
     return this.#activeTurns.get(rawId) || null;
   }
 
-  async detectExternalWriter({ rolloutPath = "", thread = null } = {}) {
+  async detectExternalWriter({ rolloutPath = "", thread = null, ignorePids = [] } = {}) {
     const activeTurn = Array.isArray(thread?.turns)
       && thread.turns.some((turn) => turn?.status === "inProgress");
     if (activeTurn) {
@@ -50,12 +50,15 @@ export class CodexThreadWriterRegistry {
     }
     if (!rolloutPath) return { busy: false };
 
+    const ignoreSet = new Set((ignorePids || []).map((p) => String(p)).filter(Boolean));
+
     try {
       const info = await stat(rolloutPath);
       const recentlyModified = Date.now() - info.mtimeMs < 2_500;
       if (!recentlyModified) return { busy: false };
       if (this.#lsofImpl) {
-        const pids = await this.#lsofImpl(rolloutPath);
+        const rawPids = await this.#lsofImpl(rolloutPath);
+        const pids = (Array.isArray(rawPids) ? rawPids : []).filter((p) => !ignoreSet.has(String(p)));
         if (pids.length > 0) {
           return { busy: true, source: "external_writer", pids, message: "本地 Codex 客户端正在写入该会话" };
         }
@@ -64,7 +67,10 @@ export class CodexThreadWriterRegistry {
           timeout: 800,
           maxBuffer: 16 * 1024,
         }).catch(() => ({ stdout: "" }));
-        const pids = String(stdout || "").trim().split(/\s+/).filter(Boolean);
+        const pids = String(stdout || "")
+          .trim()
+          .split(/\s+/)
+          .filter((p) => p && !ignoreSet.has(p));
         if (pids.length > 0) {
           return { busy: true, source: "external_writer", pids, message: "本地 Codex 客户端正在写入该会话" };
         }

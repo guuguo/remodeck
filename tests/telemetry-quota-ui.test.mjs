@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { renderAgentTelemetryBarHtml } from "../public/instance-switcher.js";
+import { hasElapsedQuotaReset, renderAgentTelemetryBarHtml } from "../public/instance-switcher.js";
 
 function renderQuota(windows, options = {}) {
   return renderAgentTelemetryBarHtml([{
@@ -102,4 +102,36 @@ test("reset countdown advances when rendered again even without a new quota snap
   assert.match(renderQuota(windows, { expanded: true, nowSec }), />2分后重置</);
   assert.match(renderQuota(windows, { expanded: true, nowSec: nowSec + 60 }), />1分后重置</);
   assert.match(renderQuota(windows, { expanded: true, nowSec: nowSec + 120 }), /已到重置时间，待刷新/);
+});
+
+test("hasElapsedQuotaReset detects expired resetsAt windows across profiles", () => {
+  const nowSec = 1795345200;
+  assert.equal(hasElapsedQuotaReset([], nowSec), false);
+  assert.equal(hasElapsedQuotaReset([{
+    provider: "claude",
+    id: "default",
+    quota: {
+      windows: {
+        fiveHour: { remainingPercent: 25, resetsAt: nowSec + 300 },
+        weekly: { remainingPercent: 66, resetsAt: nowSec + 86400 },
+      },
+    },
+  }], nowSec), false);
+  assert.equal(hasElapsedQuotaReset([{
+    provider: "claude",
+    id: "default",
+    quota: {
+      windows: {
+        fiveHour: { remainingPercent: 0, resetsAt: nowSec },
+        weekly: { remainingPercent: 9, resetsAt: null },
+      },
+    },
+  }], nowSec), true);
+  assert.equal(hasElapsedQuotaReset([{
+    provider: "antigravity",
+    id: "desktop",
+    quota: {
+      buckets: [{ id: "3p-5h", remainingPercent: 0, resetsAt: (nowSec - 5) * 1000 }],
+    },
+  }], nowSec), true);
 });

@@ -9,6 +9,69 @@ export const SIDEBAR_ACTIVE_LIVE_WINDOW_SEC = 20 * 60;
 export const SIDEBAR_AUTO_EXPAND_LIVE_COUNT = 2;
 export const THREAD_EXPAND_STEP = 10;
 
+const MAX_UI_SEARCH_TERMS = 6;
+
+export function splitSearchTerms(searchText = "") {
+  const seen = new Set();
+  const terms = [];
+  for (const part of String(searchText || "").trim().split(/\s+/)) {
+    const clean = part.trim();
+    if (!clean) continue;
+    const lower = clean.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    terms.push(clean);
+    if (terms.length >= MAX_UI_SEARCH_TERMS) break;
+  }
+  return terms;
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function renderHighlightedTextHtml(text, searchText = "") {
+  const raw = String(text ?? "");
+  const terms = splitSearchTerms(searchText);
+  if (!raw || !terms.length) return escapeHtml(raw);
+  const sorted = [...terms].sort((a, b) => b.length - a.length);
+  const re = new RegExp(`(${sorted.map(escapeRegExp).join("|")})`, "gi");
+  let out = "";
+  let lastIdx = 0;
+  let m;
+  while ((m = re.exec(raw)) !== null) {
+    if (m.index > lastIdx) {
+      out += escapeHtml(raw.slice(lastIdx, m.index));
+    }
+    out += `<mark class="search-hit-mark">${escapeHtml(m[0])}</mark>`;
+    lastIdx = m.index + m[0].length;
+  }
+  if (lastIdx < raw.length) {
+    out += escapeHtml(raw.slice(lastIdx));
+  }
+  return out;
+}
+
+function formatSearchMatchSnippet(searchMatch) {
+  const snippet = String(searchMatch?.matchSnippet || "").trim();
+  if (!snippet) return "";
+  if (searchMatch?.matchRole === "user") return `你: ${snippet}`;
+  if (searchMatch?.matchRole === "assistant") return `AI: ${snippet}`;
+  return snippet;
+}
+
+function formatSearchStatusMessage(searchLoading = false, searchIndexStatus = null) {
+  if (searchIndexStatus?.indexing) {
+    const total = Number(searchIndexStatus.totalThreads) || 0;
+    const done = Number(searchIndexStatus.indexedThreads) || 0;
+    return total > 0 ? `后台建立历史正文索引中（${done}/${total}）…` : "后台建立历史正文索引中…";
+  }
+  if (searchLoading) {
+    return "正在检索历史对话内容…";
+  }
+  return "";
+}
+
 function resolveExtraExpandedCount(expandedStore, cwd, step = THREAD_EXPAND_STEP) {
   if (!expandedStore || !cwd) return 0;
   if (expandedStore instanceof Map) {
@@ -92,6 +155,7 @@ export function resolveProjectGroupCollapsed(group, {
   if (activeThreadId && group.threads?.some((t) => t.id === activeThreadId)) return false;
   if (!autoFoldProjects) return false;
   if ((group.pendingCount || 0) > 0) return false;
+  if ((group.errorCount || 0) > 0) return false;
   if (countGroupActiveRunning(group, { nowMs, liveActivityByThread, activeLiveWindowSec }) >= autoExpandLiveCount) {
     return false;
   }
@@ -123,6 +187,7 @@ export function partitionSidebarProjectGroups(groups = [], {
       group.pinned
       || (group.liveCount || 0) > 0
       || (group.pendingCount || 0) > 0
+      || (group.errorCount || 0) > 0
       || (group.goalCount || 0) > 0
       || hasActiveThread
       || manualExpand
@@ -268,13 +333,36 @@ export function dedupeThreadPreview(title = "", preview = "") {
   return rawPreview;
 }
 
+export function isThreadFailed(thread, recentCompletedByThread = null) {
+  if (!thread || thread.live || (thread.pendingCount || 0) > 0) return false;
+  if (thread.lastTurnStatus === "failed" || Boolean(String(thread.lastError || "").trim())) return true;
+  return recentCompletedByThread?.get?.(thread.id)?.status === "failed";
+}
+
+export function compactThreadErrorSummary(thread, recentCompletedByThread = null) {
+  const raw = String(
+    thread?.lastError
+      || recentCompletedByThread?.get?.(thread?.id)?.summary
+      || "",
+  ).trim();
+  if (!raw) return "执行报错中断";
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line && !/^Agent execution terminated due to error\.?$/i.test(line));
+  const picked = lines[0] || raw.replace(/\s+/g, " ").trim();
+  return picked.length > 88 ? `${picked.slice(0, 88).trim()}…` : picked;
+}
+
 export function buildProjectGroups(threads = [], {
   pendingRequests = [],
   pendingRequestsSynced = false,
   projectsMeta = {},
   searchText = "",
+  searchMatchesByThread = null,
   providerFilter = "all",
   profileFilter = "all",
+  recentCompletedByThread = null,
 } = {}) {
   const pendingCountByThread = new Map();
   for (const req of pendingRequests || []) {
@@ -282,7 +370,7 @@ export function buildProjectGroups(threads = [], {
     pendingCountByThread.set(req.threadId, (pendingCountByThread.get(req.threadId) || 0) + 1);
   }
 
-  const query = String(searchText || "").trim().toLowerCase();
+  const lowerTerms = splitSearchTerms(searchText).map((t) => t.toLowerCase());
   const grouped = new Map();
 
   for (const rawThread of threads || []) {
@@ -290,27 +378,35 @@ export function buildProjectGroups(threads = [], {
     const meta = projectsMeta[cwd] || {};
     const rawName = projectBaseName(cwd);
     const alias = String(meta.alias || "").trim();
+    const remoteMatch = searchMatchesByThread?.get?.(rawThread.id) || rawThread.searchMatch || null;
 
     if (providerFilter !== "all" && rawThread.provider !== providerFilter) continue;
     if (profileFilter !== "all" && `${rawThread.provider}:${rawThread.profileId}` !== profileFilter) continue;
-    if (query) {
+    if (lowerTerms.length > 0) {
       const hay = [
         rawThread.title,
         rawThread.preview,
+        rawThread.lastError,
         cwd,
         rawName,
         alias,
         rawThread.provider,
         rawThread.profileLabel,
       ].join(" ").toLowerCase();
-      if (!hay.includes(query)) continue;
+      const localMatched = lowerTerms.every((term) => hay.includes(term));
+      if (!localMatched && !remoteMatch) continue;
     }
 
     const livePending = pendingCountByThread.get(rawThread.id) || 0;
     const pendingCount = (pendingRequestsSynced || rawThread.pendingCountSynced)
       ? livePending
       : (livePending || rawThread.pendingCount || 0);
-    const thread = { ...rawThread, cwd, pendingCount };
+    const thread = {
+      ...rawThread,
+      cwd,
+      pendingCount,
+      ...(remoteMatch ? { searchMatch: remoteMatch } : {}),
+    };
     if (!grouped.has(cwd)) {
       grouped.set(cwd, {
         cwd,
@@ -323,6 +419,7 @@ export function buildProjectGroups(threads = [], {
         threads: [],
         liveCount: 0,
         pendingCount: 0,
+        errorCount: 0,
         goalCount: 0,
         latestUpdatedAt: 0,
       });
@@ -331,6 +428,7 @@ export function buildProjectGroups(threads = [], {
     group.threads.push(thread);
     if (thread.live) group.liveCount += 1;
     if (pendingCount > 0) group.pendingCount += pendingCount;
+    if (isThreadFailed(thread, recentCompletedByThread)) group.errorCount += 1;
     if (thread.goalState?.active) group.goalCount += 1;
     if ((thread.updatedAt || 0) > group.latestUpdatedAt) {
       group.latestUpdatedAt = Number(thread.updatedAt) || 0;
@@ -426,6 +524,7 @@ export function renderBatchActionBarHtml({
 function resolveThreadDotClass(thread, recentCompletedByThread = null) {
   if ((thread?.pendingCount || 0) > 0) return "is-pending";
   if (thread?.live) return "is-live";
+  if (isThreadFailed(thread, recentCompletedByThread)) return "is-error";
   if (recentCompletedByThread?.has?.(thread?.id)) return "is-done is-recent";
   return "is-done";
 }
@@ -446,23 +545,30 @@ function renderThreadCompactChipHtml(thread, chip) {
   return `<span class="thread-micro-tag is-text-only is-${escapeHtml(chip.tone)}" title="${escapeHtml(chip.title)}">${escapeHtml(text)}</span>`;
 }
 
-function renderTaskSlotHtml(thread, activeThreadId, { selectionMode = false, selectedSet = null, profiles = [], recentCompletedByThread = null } = {}) {
+function renderTaskSlotHtml(thread, activeThreadId, { selectionMode = false, selectedSet = null, profiles = [], recentCompletedByThread = null, searchText = "" } = {}) {
   const isSelected = thread.id === activeThreadId;
   const isBatchChecked = Boolean(selectionMode && selectedSet?.has(thread.id));
+  const hasQuery = Boolean(String(searchText || "").trim());
   const title = thread.title || "新会话";
   const timeText = formatCompactRelativeTime(thread.updatedAt);
   const pendingCount = thread.pendingCount || 0;
   const queuedCount = thread.queuedCount || 0;
-  const isDone = !thread.live && pendingCount === 0;
+  const isError = isThreadFailed(thread, recentCompletedByThread);
+  const isDone = !thread.live && pendingCount === 0 && !isError;
   const isRecentDone = isDone && Boolean(recentCompletedByThread?.has?.(thread.id));
   const markerHtml = renderThreadStatusMarkerHtml(thread, recentCompletedByThread);
   const chip = compactThreadSourceChip(thread, { profiles });
   const chipHtml = renderThreadCompactChipHtml(thread, chip);
+  const searchMatch = hasQuery ? (thread.searchMatch || null) : null;
+  const snippetText = searchMatch ? formatSearchMatchSnippet(searchMatch) : "";
   const statusBadges = [];
   if (pendingCount > 0) {
     statusBadges.push(`<span class="board-status-pill is-pending">待确认 ${pendingCount}</span>`);
   }
-  if (isRecentDone) {
+  if (isError) {
+    const fullErr = String(thread.lastError || recentCompletedByThread?.get?.(thread.id)?.summary || "执行报错中断").trim();
+    statusBadges.push(`<span class="board-status-pill is-error" title="${escapeHtml(fullErr)}">报错中断</span>`);
+  } else if (isRecentDone) {
     statusBadges.push(`<span class="board-status-pill is-recent-done" title="刚刚完成，尚未查看">新完成</span>`);
   }
   if (queuedCount > 0) {
@@ -471,13 +577,21 @@ function renderTaskSlotHtml(thread, activeThreadId, { selectionMode = false, sel
   if (thread.goalState?.active) {
     statusBadges.push(`<span class="board-status-pill is-goal" title="Goal 自动推进中">${iconSvg("target", { size: 11 })}</span>`);
   }
-  const preview = dedupeThreadPreview(title, thread.preview);
+  if (searchMatch && Number(searchMatch.matchCount) > 1) {
+    statusBadges.push(`<span class="board-status-pill is-hit" title="对话正文命中 ${searchMatch.matchCount} 处">${searchMatch.matchCount} 处</span>`);
+  }
+  const preview = (isError && !snippetText)
+    ? compactThreadErrorSummary(thread, recentCompletedByThread)
+    : (snippetText || dedupeThreadPreview(title, thread.preview));
+  const titleHtml = hasQuery ? renderHighlightedTextHtml(title, searchText) : escapeHtml(title);
+  const previewHtml = hasQuery ? renderHighlightedTextHtml(preview, searchText) : escapeHtml(preview);
   const rowClasses = [
     "board-task-row",
     isSelected ? "is-selected" : "",
     isBatchChecked ? "is-batch-checked" : "",
     thread.live ? "is-live" : "",
     pendingCount > 0 ? "is-pending" : "",
+    isError ? "is-error" : "",
     isDone ? "is-done" : "",
     isRecentDone ? "is-recent-done" : "",
   ].filter(Boolean).join(" ");
@@ -492,12 +606,12 @@ function renderTaskSlotHtml(thread, activeThreadId, { selectionMode = false, sel
         <div class="board-task-top">
           ${selectionMode ? renderBatchCheckHtml({ checked: isBatchChecked }) : ""}
           ${markerHtml}
-          <span class="board-task-title">${escapeHtml(title)}</span>
+          <span class="board-task-title">${titleHtml}</span>
           ${statusBadges.join("")}
           ${chipHtml}
           <span class="board-task-time">${escapeHtml(timeText)}</span>
         </div>
-        ${preview ? `<div class="board-task-preview">${escapeHtml(preview)}</div>` : ""}
+        ${preview ? `<div class="board-task-preview${(isError && !snippetText) ? " is-error" : (snippetText ? " is-search-hit" : "")}">${previewHtml}</div>` : ""}
       </div>
     </button>
   `;
@@ -510,6 +624,7 @@ function renderSidebarProjectGroupHtml(group, {
   sidebarFoldPrefs = null,
   autoFoldProjects = true,
   hasQuery = false,
+  searchText = "",
   nowMs = Date.now(),
   nowSec = 0,
   manualHoldMs = SIDEBAR_MANUAL_HOLD_MS,
@@ -550,6 +665,7 @@ function renderSidebarProjectGroupHtml(group, {
     || Boolean(t.live)
     || (t.pendingCount || 0) > 0
     || (t.queuedCount || 0) > 0
+    || isThreadFailed(t, recentCompletedByThread)
     || Boolean(t.goalState?.active)
     || Boolean(recentCompletedByThread?.has?.(t.id))
   );
@@ -600,6 +716,7 @@ function renderSidebarProjectGroupHtml(group, {
     group.pinned ? "is-pinned" : "",
     group.liveCount > 0 ? "has-live" : "",
     group.pendingCount > 0 ? "has-pending" : "",
+    group.errorCount > 0 ? "has-error" : "",
     collapsed ? "is-collapsed" : "",
     selectionMode ? "is-batch-mode" : "",
     groupSel?.checked ? "is-batch-checked" : "",
@@ -613,19 +730,28 @@ function renderSidebarProjectGroupHtml(group, {
         const isBatchChecked = Boolean(selectionMode && selectedSet?.has(t.id));
         const pendingCount = t.pendingCount || 0;
         const queuedCount = t.queuedCount || 0;
-        const isDone = !t.live && pendingCount === 0;
+        const isError = isThreadFailed(t, recentCompletedByThread);
+        const isDone = !t.live && pendingCount === 0 && !isError;
         const isRecentDone = isDone && Boolean(recentCompletedByThread?.has?.(t.id));
         const markerHtml = renderThreadStatusMarkerHtml(t, recentCompletedByThread);
         const chip = compactThreadSourceChip(t, { providerFilter, profileFilter, profiles });
         const chipHtml = renderThreadCompactChipHtml(t, chip);
         const title = t.title || "新会话";
         const liveAct = t.live ? liveActivityByThread?.get?.(t.id) : null;
+        const searchMatch = hasQuery ? (t.searchMatch || null) : null;
+        const snippetText = searchMatch ? formatSearchMatchSnippet(searchMatch) : "";
         let subText = "";
         let isLiveSub = false;
+        let isSearchHitSub = false;
         if (t.live) {
           const phase = liveAct?.phase || t.livePhase || `${providerVisualMeta(t.provider).short} 执行中`;
           subText = liveAct?.detail ? `${phase} · ${liveAct.detail}` : phase;
           isLiveSub = true;
+        } else if (snippetText) {
+          subText = snippetText;
+          isSearchHitSub = true;
+        } else if (isError) {
+          subText = compactThreadErrorSummary(t, recentCompletedByThread);
         } else if (hasQuery) {
           subText = dedupeThreadPreview(title, t.preview || "");
         }
@@ -636,17 +762,31 @@ function renderSidebarProjectGroupHtml(group, {
           isBatchChecked ? "is-batch-checked" : "",
           t.live ? "is-live" : "",
           pendingCount > 0 ? "is-pending" : "",
+          isError ? "is-error" : "",
           isDone ? "is-done" : "",
           isRecentDone ? "is-recent-done" : "",
         ].filter(Boolean).join(" ");
 
+        const fullErr = isError
+          ? String(t.lastError || recentCompletedByThread?.get?.(t.id)?.summary || "执行报错中断").trim()
+          : "";
+        const hitCount = searchMatch ? Number(searchMatch.matchCount) || 0 : 0;
         const tagsHtml = [
           pendingCount ? `<span class="thread-pending-pill" title="待确认 ${pendingCount} 项">${pendingCount}</span>` : "",
+          isError ? `<span class="thread-error-pill" title="${escapeHtml(fullErr)}">报错</span>` : "",
+          hitCount > 1 ? `<span class="thread-hit-pill" title="对话正文命中 ${hitCount} 处">${hitCount} 处</span>` : "",
           queuedCount ? `<span class="thread-queued-pill" title="排队中 ${queuedCount} 条">排队 ${queuedCount}</span>` : "",
           t.goalState?.active ? `<span class="goal-micro-tag" title="Goal 自动推进中">${iconSvg("target", { size: 11 })}</span>` : "",
           chipHtml,
         ].filter(Boolean).join("");
         const timeHtml = !t.live ? `<span class="thread-item-time">${escapeHtml(formatCompactRelativeTime(t.updatedAt))}</span>` : "";
+        const titleHtml = hasQuery ? renderHighlightedTextHtml(title, searchText) : escapeHtml(title);
+        const subHtml = (hasQuery && !isLiveSub && !(isError && !isSearchHitSub))
+          ? renderHighlightedTextHtml(subText, searchText)
+          : escapeHtml(subText);
+        const subClass = isLiveSub
+          ? "is-live-sub"
+          : (isSearchHitSub ? "is-search-hit" : (isError ? "is-error-sub" : ""));
 
         return `
           <div class="thread-item-wrap${selectionMode ? "" : " has-menu"}">
@@ -654,13 +794,13 @@ function renderSidebarProjectGroupHtml(group, {
             <span class="thread-item-top">
               ${selectionMode ? renderBatchCheckHtml({ checked: isBatchChecked }) : ""}
               ${markerHtml}
-              <span class="thread-item-title">${escapeHtml(title)}</span>
+              <span class="thread-item-title">${titleHtml}</span>
               ${t.pinned ? `<span class="thread-pin-marker" title="已在当前项目置顶" aria-label="已在当前项目置顶">${iconSvg("pin", { size: 11 })}</span>` : ""}
               ${!subText && (tagsHtml || timeHtml) ? `<span class="thread-item-right">${tagsHtml}${timeHtml}</span>` : timeHtml}
             </span>
             ${subText ? `
               <span class="thread-item-secondary">
-                <span class="thread-item-sub ${isLiveSub ? "is-live-sub" : ""}" title="${escapeHtml(subText)}">${escapeHtml(subText)}</span>
+                <span class="thread-item-sub ${subClass}" title="${escapeHtml((isError && !isSearchHitSub ? fullErr : "") || subText)}">${subHtml}</span>
                 ${tagsHtml ? `<span class="thread-item-tags">${tagsHtml}</span>` : ""}
               </span>
             ` : ""}
@@ -707,6 +847,7 @@ function renderSidebarProjectGroupHtml(group, {
           <span class="project-group-name">${escapeHtml(groupTitle)}</span>
         </span>
         <span class="project-group-right">
+          ${group.errorCount > 0 ? `<span class="group-stat-pill is-error" title="${group.errorCount} 个任务报错中断">报错 ${group.errorCount}</span>` : ""}
           ${group.pendingCount > 0 ? `<span class="group-stat-pill is-pending" title="待确认 ${group.pendingCount}">${group.pendingCount}</span>` : ""}
           ${group.liveCount > 0 ? `<span class="group-stat-pill is-live" title="${group.liveCount} 个运行中"><span class="group-live-dot" aria-hidden="true"></span>${group.liveCount}</span>` : ""}
           ${!selectionMode && allowOpenProjectWindow ? `<button type="button" class="project-group-open" data-open-project-window="${escapeHtml(cwd)}" title="在独立新窗口打开此项目" aria-label="在独立新窗口打开此项目">${iconSvg("external-link", { size: 11 })}</button>` : ""}
@@ -740,16 +881,22 @@ export function renderSidebarThreadListHtml(groups = [], {
   liveActivityByThread = new Map(),
   recentCompletedByThread = new Map(),
   searchText = "",
+  searchLoading = false,
+  searchIndexStatus = null,
   maxVisiblePerGroup = 8,
   selectionMode = false,
   selectedThreadIds = null,
   allowOpenProjectWindow = true,
 } = {}) {
+  const hasQuery = Boolean(String(searchText || "").trim());
+  const statusMsg = hasQuery ? formatSearchStatusMessage(searchLoading, searchIndexStatus) : "";
   if (!Array.isArray(groups) || !groups.length) {
+    if (statusMsg) {
+      return `<div class="thread-empty">${escapeHtml(statusMsg)}</div>`;
+    }
     return `<div class="thread-empty">暂无匹配的会话</div>`;
   }
 
-  const hasQuery = Boolean(String(searchText || "").trim());
   const nowSec = toEpochSeconds(nowMs);
   const { primaryGroups, staleGroups } = partitionSidebarProjectGroups(groups, {
     activeThreadId,
@@ -768,6 +915,7 @@ export function renderSidebarThreadListHtml(groups = [], {
     sidebarFoldPrefs,
     autoFoldProjects,
     hasQuery,
+    searchText,
     nowMs,
     nowSec,
     manualHoldMs,
@@ -818,6 +966,10 @@ export function renderSidebarThreadListHtml(groups = [], {
     }
   }
 
+  if (statusMsg) {
+    html.push(`<div class="sidebar-search-status">${escapeHtml(statusMsg)}</div>`);
+  }
+
   return html.join("");
 }
 
@@ -830,6 +982,7 @@ function renderProjectCardHtml(group, {
   profiles = [],
   recentCompletedByThread = null,
   allowOpenProjectWindow = true,
+  searchText = "",
 } = {}) {
   const baseLimit = 4;
   const visibleCount = expanded === true
@@ -844,6 +997,7 @@ function renderProjectCardHtml(group, {
     "board-project-card",
     group.pinned ? "is-pinned" : "",
     group.pendingCount > 0 ? "has-pending" : "",
+    group.errorCount > 0 ? "has-error" : "",
     group.liveCount > 0 ? "has-live" : "",
     selectionMode ? "is-batch-mode" : "",
     groupSel?.checked ? "is-batch-checked" : "",
@@ -866,6 +1020,7 @@ function renderProjectCardHtml(group, {
             <div class="board-card-title-row">
               <strong class="board-card-name">${escapeHtml(group.name)}</strong>
               <span class="board-card-count">${group.threads.length} 个任务</span>
+              ${group.errorCount ? `<span class="board-status-pill is-error">报错 ${group.errorCount}</span>` : ""}
               ${group.liveCount ? `<span class="board-status-pill is-live">${group.liveCount} 运行中</span>` : ""}
               ${group.pendingCount ? `<span class="board-status-pill is-pending">待确认 ${group.pendingCount}</span>` : ""}
             </div>
@@ -902,7 +1057,7 @@ function renderProjectCardHtml(group, {
         </div>
       </div>
       <div class="board-task-list">
-        ${shownThreads.map((t) => renderTaskSlotHtml(t, activeThreadId, { selectionMode, selectedSet, profiles, recentCompletedByThread })).join("")}
+        ${shownThreads.map((t) => renderTaskSlotHtml(t, activeThreadId, { selectionMode, selectedSet, profiles, recentCompletedByThread, searchText })).join("")}
       </div>
       ${hiddenCount > 0 ? (() => {
         const expandLabel = hiddenCount <= THREAD_EXPAND_STEP
@@ -939,12 +1094,16 @@ export function renderProjectBoardHtml({
   expandedProjects = new Set(),
   activeThreadId = "",
   searchText = "",
+  searchLoading = false,
+  searchIndexStatus = null,
   selectionMode = false,
   selectedThreadIds = null,
   profiles = [],
   recentCompletedByThread = null,
   allowOpenProjectWindow = true,
 } = {}) {
+  const hasQuery = Boolean(String(searchText || "").trim());
+  const statusMsg = hasQuery ? formatSearchStatusMessage(searchLoading, searchIndexStatus) : "";
   const pinnedGroups = groups.filter((g) => g.pinned);
   const unpinnedGroups = groups.filter((g) => !g.pinned);
 
@@ -954,6 +1113,30 @@ export function renderProjectBoardHtml({
   const recentLimit = searchText.trim() || showAllProjects ? unpinnedGroups.length : 8;
   const visibleUnpinned = unpinnedGroups.slice(0, recentLimit);
   const hiddenOtherCount = Math.max(0, unpinnedGroups.length - visibleUnpinned.length);
+
+  const failedThreads = [];
+  const seenFailedIds = new Set();
+  for (const g of allGroups || []) {
+    for (const t of g?.threads || []) {
+      if (!t?.id || seenFailedIds.has(t.id)) continue;
+      if (isThreadFailed(t, recentCompletedByThread)) {
+        seenFailedIds.add(t.id);
+        failedThreads.push({ ...t, projectName: g.name });
+      }
+    }
+  }
+
+  const errorAlertHtml = failedThreads.length ? `
+    <div class="board-attention-banner is-error">
+      <div class="board-attention-text">
+        <strong>有 ${failedThreads.length} 个任务因报错中断</strong>
+        <span>${escapeHtml(`${failedThreads[0].projectName ? `${failedThreads[0].projectName} · ` : ""}${failedThreads[0].title || "会话"}：${compactThreadErrorSummary(failedThreads[0], recentCompletedByThread)}`)}</span>
+      </div>
+      <button type="button" class="btn-primary btn-xs is-danger" data-board-open-thread="${escapeHtml(failedThreads[0].id)}">
+        立即查看
+      </button>
+    </div>
+  ` : "";
 
   const pendingAlertHtml = pendingRequests.length ? `
     <div class="board-attention-banner">
@@ -1013,18 +1196,20 @@ export function renderProjectBoardHtml({
         type="search"
         class="board-search-input"
         value="${escapeHtml(searchText)}"
-        placeholder="输入项目名、简称、路径或任务关键词快速筛选…"
+        placeholder="输入项目名、简称、标题或对话内容关键词…"
       />
       ${searchText ? `<button type="button" class="btn-secondary btn-sm" data-board-action="clear-search">清空</button>` : ""}
     </div>
+    ${statusMsg && groups.length ? `<div class="board-search-status">${escapeHtml(statusMsg)}</div>` : ""}
 
+    ${errorAlertHtml}
     ${pendingAlertHtml}
     ${suggestionsHtml}
 
     ${!groups.length ? `
       <div class="board-empty-card">
-        <strong>没有找到匹配的项目或任务</strong>
-        <span>你可以清空搜索词，或者点击右上角「+ 新建会话」直接开始</span>
+        <strong>${statusMsg ? escapeHtml(statusMsg) : "没有找到匹配的项目或任务"}</strong>
+        <span>${statusMsg ? "请稍候，正在扫描历史对话正文…" : "你可以清空搜索词，或者点击右上角「+ 新建会话」直接开始"}</span>
       </div>
     ` : ""}
 
@@ -1042,6 +1227,7 @@ export function renderProjectBoardHtml({
             profiles,
             recentCompletedByThread,
             allowOpenProjectWindow,
+            searchText,
           })).join("")}
         </div>
       </section>
@@ -1066,6 +1252,7 @@ export function renderProjectBoardHtml({
             profiles,
             recentCompletedByThread,
             allowOpenProjectWindow,
+            searchText,
           })).join("")}
         </div>
         ${hiddenOtherCount > 0 ? `
@@ -1080,7 +1267,7 @@ export function renderProjectBoardHtml({
   `;
 }
 
-export function renderProjectTaskStripHtml({ projectGroup, activeThreadId = "" } = {}) {
+export function renderProjectTaskStripHtml({ projectGroup, activeThreadId = "", recentCompletedByThread = null } = {}) {
   if (!projectGroup) return "";
   const shown = projectGroup.threads.slice(0, 12);
   if (activeThreadId && !shown.some((t) => t.id === activeThreadId)) {
@@ -1101,19 +1288,24 @@ export function renderProjectTaskStripHtml({ projectGroup, activeThreadId = "" }
       ${shown.map((t) => {
         const isCurrent = t.id === activeThreadId;
         const label = t.title || "新会话";
-        const isDone = !t.live && !(t.pendingCount > 0);
+        const isError = isThreadFailed(t, recentCompletedByThread);
+        const isDone = !t.live && !(t.pendingCount > 0) && !isError;
         const visual = providerVisualMeta(t.provider);
+        const fullErr = isError
+          ? String(t.lastError || recentCompletedByThread?.get?.(t.id)?.summary || "执行报错中断").trim()
+          : "";
         return `
           <button
             type="button"
-            class="strip-task-pill ${isCurrent ? "is-active" : ""}${t.live ? " is-live" : ""}${isDone ? " is-done" : ""}"
+            class="strip-task-pill ${isCurrent ? "is-active" : ""}${t.live ? " is-live" : ""}${isError ? " is-error" : ""}${isDone ? " is-done" : ""}"
             data-strip-thread-id="${escapeHtml(t.id)}"
-            title="${escapeHtml(`${visual.label} · ${label}`)}"
+            title="${escapeHtml(fullErr ? `${visual.label} · ${label}（报错：${fullErr}）` : `${visual.label} · ${label}`)}"
           >
-            <span class="strip-status-dot is-${escapeHtml(t.provider)}${t.live ? " is-live" : ""}${t.pendingCount > 0 ? " is-pending" : ""}${isDone ? " is-done" : ""}" aria-hidden="true"></span>
+            <span class="strip-status-dot is-${escapeHtml(t.provider)}${t.live ? " is-live" : ""}${t.pendingCount > 0 ? " is-pending" : ""}${isError ? " is-error" : ""}${isDone ? " is-done" : ""}" aria-hidden="true"></span>
             <span class="strip-provider-tag is-${escapeHtml(t.provider)}" aria-hidden="true">${escapeHtml(visual.glyph)}</span>
             <span class="strip-task-label">${escapeHtml(label)}</span>
             ${t.pendingCount > 0 ? `<span class="thread-pending-pill">${t.pendingCount}</span>` : ""}
+            ${isError ? `<span class="thread-error-pill" title="${escapeHtml(fullErr)}">报错</span>` : ""}
             ${t.queuedCount > 0 ? `<span class="thread-queued-pill" title="排队中 ${t.queuedCount} 条">排队 ${t.queuedCount}</span>` : ""}
           </button>
         `;

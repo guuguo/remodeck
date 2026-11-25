@@ -366,6 +366,71 @@ export function writeTycoonVisualPrefs(patch = {}) {
   return next;
 }
 
+const TYCOON_THEME_TUNING = Object.freeze({
+  light: Object.freeze({
+    env: Object.freeze({
+      top: 0x7c9fc4,
+      horizon: 0xaec0d4,
+      bottom: 0x5a685e,
+      softboxes: Object.freeze([
+        Object.freeze([1.25, 1.18, 1.05]),
+        Object.freeze([0.55, 0.68, 0.85]),
+        Object.freeze([0.78, 0.62, 0.44]),
+        Object.freeze([0.42, 0.46, 0.54]),
+      ]),
+    }),
+    lights: Object.freeze({
+      hemiSky: 0xcce0f5,
+      hemiGround: 0x5c6b5e,
+      hemiIntensity: 0.32,
+      keyColor: 0xfff0d4,
+      keyIntensity: 2.35,
+      rimColor: 0x93c5fd,
+      rimIntensity: 0.42,
+    }),
+    post: Object.freeze({
+      exposure: 0.9,
+      bloomThr: 1.35,
+      bloomKnee: 0.55,
+      bloomStrength: 0.16,
+      vignette: 0.14,
+    }),
+  }),
+  dark: Object.freeze({
+    env: Object.freeze({
+      top: 0x1d3a7a,
+      horizon: 0x0b1530,
+      bottom: 0x02040a,
+      softboxes: Object.freeze([
+        Object.freeze([2.4, 2.5, 2.8]),
+        Object.freeze([0.5, 1.4, 2.4]),
+        Object.freeze([2.2, 1.1, 0.5]),
+        Object.freeze([0.6, 0.4, 1.4]),
+      ]),
+    }),
+    lights: Object.freeze({
+      hemiSky: 0x7f9cd6,
+      hemiGround: 0x0a1410,
+      hemiIntensity: 0.5,
+      keyColor: 0xc7d8ff,
+      keyIntensity: 1.5,
+      rimColor: 0x60a5fa,
+      rimIntensity: 1.5,
+    }),
+    post: Object.freeze({
+      exposure: 1.15,
+      bloomThr: 0.78,
+      bloomKnee: 0.58,
+      bloomStrength: 0.8,
+      vignette: 0.42,
+    }),
+  }),
+});
+
+export function resolveTycoonThemeTuning(theme = "dark") {
+  return theme === "light" ? TYCOON_THEME_TUNING.light : TYCOON_THEME_TUNING.dark;
+}
+
 const ISO_OFFSET_CONST = { x: 28, y: 25, z: 28 };
 const ISO_ELEV_DEG = (Math.atan2(ISO_OFFSET_CONST.y, Math.hypot(ISO_OFFSET_CONST.x, ISO_OFFSET_CONST.z)) * 180) / Math.PI;
 
@@ -757,7 +822,7 @@ export function createTycoon3DWorld(containerEl, {
     }, { srgb: false });
 
     tex.grass = canvasTex(256, 256, (g, w, h) => {
-      g.fillStyle = light ? "#7aa95f" : "#13291c";
+      g.fillStyle = light ? "#4f8246" : "#13291c";
       g.fillRect(0, 0, w, h);
       const r = seededRandom(7);
       for (let i = 0; i < 3200; i += 1) {
@@ -765,7 +830,7 @@ export function createTycoon3DWorld(containerEl, {
         const y = r() * h;
         const l = r();
         g.fillStyle = light
-          ? (l > 0.5 ? "rgba(52,110,40,0.32)" : "rgba(170,205,110,0.28)")
+          ? (l > 0.5 ? "rgba(34,78,32,0.34)" : "rgba(124,172,92,0.28)")
           : (l > 0.5 ? "rgba(8,30,18,0.45)" : "rgba(50,95,62,0.32)");
         g.fillRect(x, y, 1.6, 3.2);
       }
@@ -773,7 +838,7 @@ export function createTycoon3DWorld(containerEl, {
         const x = r() * w;
         const y = r() * h;
         const grd = g.createRadialGradient(x, y, 0, x, y, 30 + r() * 30);
-        grd.addColorStop(0, light ? "rgba(140,180,80,0.22)" : "rgba(30,70,45,0.3)");
+        grd.addColorStop(0, light ? "rgba(92,138,60,0.22)" : "rgba(30,70,45,0.3)");
         grd.addColorStop(1, "rgba(0,0,0,0)");
         g.fillStyle = grd;
         g.fillRect(0, 0, w, h);
@@ -782,23 +847,23 @@ export function createTycoon3DWorld(containerEl, {
     tex.grass.repeat.set(40, 30);
 
     tex.concrete = canvasTex(512, 512, (g, w, h) => {
-      g.fillStyle = light ? "#d9dee6" : "#161e2d";
+      g.fillStyle = light ? "#9aa8ba" : "#161e2d";
       g.fillRect(0, 0, w, h);
       const r = seededRandom(11);
       for (let i = 0; i < 9000; i += 1) {
         const bright = r() > 0.5;
         g.fillStyle = bright
-          ? (light ? "rgba(255,255,255,0.18)" : "rgba(148,163,184,0.06)")
-          : (light ? "rgba(71,85,105,0.08)" : "rgba(0,0,0,0.22)");
+          ? (light ? "rgba(255,255,255,0.12)" : "rgba(148,163,184,0.06)")
+          : (light ? "rgba(30,41,59,0.12)" : "rgba(0,0,0,0.22)");
         g.fillRect(r() * w, r() * h, 1 + r() * 1.5, 1 + r() * 1.5);
       }
-      g.strokeStyle = light ? "rgba(100,116,139,0.34)" : "rgba(0,0,0,0.55)";
+      g.strokeStyle = light ? "rgba(51,65,85,0.42)" : "rgba(0,0,0,0.55)";
       g.lineWidth = 2;
       for (let i = 0; i <= w; i += 256) {
         g.beginPath(); g.moveTo(i, 0); g.lineTo(i, h); g.stroke();
         g.beginPath(); g.moveTo(0, i); g.lineTo(w, i); g.stroke();
       }
-      g.strokeStyle = light ? "rgba(255,255,255,0.4)" : "rgba(56,189,248,0.05)";
+      g.strokeStyle = light ? "rgba(255,255,255,0.22)" : "rgba(56,189,248,0.05)";
       g.lineWidth = 1;
       for (let i = 2; i <= w; i += 256) {
         g.beginPath(); g.moveTo(i, 0); g.lineTo(i, h); g.stroke();
@@ -808,7 +873,7 @@ export function createTycoon3DWorld(containerEl, {
 
     tex.stone = canvasTex(256, 256, (g, w, h) => {
       const r = seededRandom(23);
-      g.fillStyle = light ? "#b9b0a2" : "#1f2636";
+      g.fillStyle = light ? "#8d8477" : "#1f2636";
       g.fillRect(0, 0, w, h);
       const bw = 64;
       const bh = 32;
@@ -816,8 +881,8 @@ export function createTycoon3DWorld(containerEl, {
         const off = row % 2 ? bw / 2 : 0;
         for (let col = -1; col < w / bw + 1; col += 1) {
           const v = r();
-          const base = light ? [236, 229, 216] : [44, 52, 70];
-          const k = (v - 0.5) * (light ? 22 : 14);
+          const base = light ? [198, 187, 169] : [44, 52, 70];
+          const k = (v - 0.5) * (light ? 20 : 14);
           g.fillStyle = `rgb(${Math.round(base[0] + k)},${Math.round(base[1] + k)},${Math.round(base[2] + k)})`;
           g.fillRect(col * bw + off + 2, row * bh + 2, bw - 4, bh - 4);
         }
@@ -892,9 +957,9 @@ export function createTycoon3DWorld(containerEl, {
     tex.bg = canvasTex(8, 512, (g, w, h) => {
       const grd = g.createLinearGradient(0, 0, 0, h);
       if (light) {
-        grd.addColorStop(0, "#f5f8fd");
-        grd.addColorStop(0.55, "#e6edf7");
-        grd.addColorStop(1, "#d3deec");
+        grd.addColorStop(0, "#cdd8e8");
+        grd.addColorStop(0.55, "#b8c7dc");
+        grd.addColorStop(1, "#9fb2cc");
       } else {
         grd.addColorStop(0, "#0e1b38");
         grd.addColorStop(0.5, "#08112a");
@@ -1190,12 +1255,13 @@ export function createTycoon3DWorld(containerEl, {
 
   // ------------------------------------------------------------ environment
   function buildEnvMap(light) {
+    const { env } = resolveTycoonThemeTuning(light ? "light" : "dark");
     const envScene = new THREE.Scene();
     const sky = new THREE.SphereGeometry(50, 32, 16);
     const pos = sky.attributes.position;
-    const top = new THREE.Color(light ? 0xffffff : 0x1d3a7a);
-    const horizon = new THREE.Color(light ? 0xe6eef8 : 0x0b1530);
-    const bottom = new THREE.Color(light ? 0xb8c4d4 : 0x02040a);
+    const top = new THREE.Color(env.top);
+    const horizon = new THREE.Color(env.horizon);
+    const bottom = new THREE.Color(env.bottom);
     const colors = [];
     for (let i = 0; i < pos.count; i += 1) {
       const y = pos.getY(i) / 50;
@@ -1217,10 +1283,10 @@ export function createTycoon3DWorld(containerEl, {
       return m;
     };
     const mats = [
-      softbox(26, 14, [6, 34, 14], light ? [3.2, 3.1, 2.9] : [2.4, 2.5, 2.8]),
-      softbox(18, 10, [-36, 12, -6], light ? [1.6, 1.8, 2.1] : [0.5, 1.4, 2.4]),
-      softbox(14, 8, [30, 10, -24], light ? [2.2, 1.7, 1.1] : [2.2, 1.1, 0.5]),
-      softbox(20, 6, [0, 6, 38], light ? [1.4, 1.4, 1.5] : [0.6, 0.4, 1.4]),
+      softbox(26, 14, [6, 34, 14], env.softboxes[0]),
+      softbox(18, 10, [-36, 12, -6], env.softboxes[1]),
+      softbox(14, 8, [30, 10, -24], env.softboxes[2]),
+      softbox(20, 6, [0, 6, 38], env.softboxes[3]),
     ];
 
     const pmrem = new THREE.PMREMGenerator(renderer);
@@ -1236,6 +1302,7 @@ export function createTycoon3DWorld(containerEl, {
   function applySceneTheme(theme) {
     currentTheme = theme;
     const light = isLight();
+    const { lights, post } = resolveTycoonThemeTuning(theme);
     for (const m of matCache.values()) m.dispose();
     matCache.clear();
     createSharedTextures();
@@ -1244,7 +1311,7 @@ export function createTycoon3DWorld(containerEl, {
     envRT?.dispose?.();
     envRT = buildEnvMap(light);
     scene.environment = envRT.texture;
-    renderer.toneMappingExposure = light ? 1.0 : 1.15;
+    renderer.toneMappingExposure = post.exposure;
 
     floorMesh.material.map = tex.grass;
     floorMesh.material.color.setHex(0xffffff);
@@ -1264,13 +1331,13 @@ export function createTycoon3DWorld(containerEl, {
     }
     syncPostThemeUniforms();
 
-    hemiLight.color.setHex(light ? 0xffffff : 0x7f9cd6);
-    hemiLight.groundColor.setHex(light ? 0xb9c6a4 : 0x0a1410);
-    hemiLight.intensity = light ? 1.15 : 0.5;
-    keyLight.color.setHex(light ? 0xfff2dc : 0xc7d8ff);
-    keyLight.intensity = light ? 2.7 : 1.5;
-    rimLight.color.setHex(light ? 0xdbeafe : 0x60a5fa);
-    rimLight.intensity = light ? 0.6 : 1.5;
+    hemiLight.color.setHex(lights.hemiSky);
+    hemiLight.groundColor.setHex(lights.hemiGround);
+    hemiLight.intensity = lights.hemiIntensity;
+    keyLight.color.setHex(lights.keyColor);
+    keyLight.intensity = lights.keyIntensity;
+    rimLight.color.setHex(lights.rimColor);
+    rimLight.intensity = lights.rimIntensity;
 
     particles.material.map = tex.glow;
     particles.material.color.setHex(light ? 0x60a5fa : 0x7dd3fc);
@@ -1309,10 +1376,10 @@ export function createTycoon3DWorld(containerEl, {
     const padCz = (C.minZ + C.maxZ) / 2;
     const dummy = new THREE.Object3D();
 
-    const concreteMat = cached("concrete", () => new THREE.MeshStandardMaterial({ map: tex.concrete, roughness: light ? 0.82 : 0.68, metalness: light ? 0 : 0.12 }));
+    const concreteMat = cached("concrete", () => new THREE.MeshStandardMaterial({ map: tex.concrete, roughness: light ? 0.88 : 0.68, metalness: light ? 0 : 0.12 }));
     const stoneMat = cached("stone", () => new THREE.MeshStandardMaterial({ map: tex.stone, roughness: 0.78 }));
-    const curbMat = phys(light ? 0xcbd5e1 : 0x2a3345, { rough: 0.7 });
-    const edgeMat = phys(light ? 0xa8b2bf : 0x384256, { rough: 0.6 });
+    const curbMat = phys(light ? 0x7c8ca1 : 0x2a3345, { rough: 0.72 });
+    const edgeMat = phys(light ? 0x64748b : 0x384256, { rough: 0.65 });
 
     // Concrete campus pad + curbs
     const pad = flatPlane(padW, padD, concreteMat, { y: 0.006, uvScale: 8 });
@@ -1414,7 +1481,7 @@ export function createTycoon3DWorld(containerEl, {
     }
     if (shrubPts.length) {
       const planterGeo = cylGeo(0.34, 0.3, 0.24, 16);
-      const planters = new THREE.InstancedMesh(planterGeo, phys(light ? 0x94a3b8 : 0x2b3446, { rough: 0.6 }), shrubPts.length);
+      const planters = new THREE.InstancedMesh(planterGeo, phys(light ? 0x6e7f96 : 0x2b3446, { rough: 0.65 }), shrubPts.length);
       const shrubMat = cached("shrub-mat", () => new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, flatShading: true }));
       const shrubs = new THREE.InstancedMesh(geo("shrub", () => new THREE.IcosahedronGeometry(0.34, 1)), shrubMat, shrubPts.length);
       const col = new THREE.Color();
@@ -1430,7 +1497,7 @@ export function createTycoon3DWorld(containerEl, {
         dummy.scale.set(s, s * 0.95, s);
         dummy.updateMatrix();
         shrubs.setMatrixAt(i, dummy.matrix);
-        col.setHSL(0.28 + r() * 0.06, light ? 0.45 : 0.4, light ? 0.32 + r() * 0.1 : 0.16 + r() * 0.06);
+        col.setHSL(0.28 + r() * 0.06, light ? 0.46 : 0.4, light ? 0.25 + r() * 0.08 : 0.16 + r() * 0.06);
         shrubs.setColorAt(i, col);
       });
       planters.castShadow = true;
@@ -1489,7 +1556,7 @@ export function createTycoon3DWorld(containerEl, {
     });
 
     // Low hedges along the campus edge with entrances
-    const hedgeMat = cached("hedge-mat", () => new THREE.MeshStandardMaterial({ color: light ? 0x4f7f3a : 0x1b3a26, roughness: 0.9, flatShading: true }));
+    const hedgeMat = cached("hedge-mat", () => new THREE.MeshStandardMaterial({ color: light ? 0x3f6e33 : 0x1b3a26, roughness: 0.9, flatShading: true }));
     const hedgeH = 0.55;
     const addHedgeRun = (x1, x2, z, vertical = false) => {
       const len = Math.abs(x2 - x1);
@@ -1608,10 +1675,10 @@ export function createTycoon3DWorld(containerEl, {
         dummy.scale.set(s * 0.68, s * 0.64, s * 0.68);
         dummy.updateMatrix();
         canopyB.setMatrixAt(i, dummy.matrix);
-        if (autumn) col.setHSL(0.09 + r() * 0.04, 0.65, light ? 0.5 : 0.28);
-        else col.setHSL(0.27 + r() * 0.07, light ? 0.48 : 0.42, light ? 0.3 + r() * 0.12 : 0.13 + r() * 0.07);
+        if (autumn) col.setHSL(0.09 + r() * 0.04, 0.65, light ? 0.44 : 0.28);
+        else col.setHSL(0.27 + r() * 0.07, light ? 0.48 : 0.42, light ? 0.24 + r() * 0.09 : 0.13 + r() * 0.07);
         canopyA.setColorAt(i, col);
-        col.offsetHSL(0, 0, light ? 0.06 : 0.03);
+        col.offsetHSL(0, 0, light ? 0.05 : 0.03);
         canopyB.setColorAt(i, col);
       });
       [canopyA, canopyB].forEach((m) => {
@@ -1633,7 +1700,7 @@ export function createTycoon3DWorld(containerEl, {
         dummy.scale.set(s * 0.65, s * 0.75, s * 0.65);
         dummy.updateMatrix();
         coneB.setMatrixAt(i, dummy.matrix);
-        col.setHSL(0.36 + r() * 0.05, light ? 0.42 : 0.38, light ? 0.24 + r() * 0.08 : 0.11 + r() * 0.05);
+        col.setHSL(0.36 + r() * 0.05, light ? 0.44 : 0.38, light ? 0.19 + r() * 0.07 : 0.11 + r() * 0.05);
         coneA.setColorAt(i, col);
         col.offsetHSL(0, 0, 0.04);
         coneB.setColorAt(i, col);
@@ -1663,7 +1730,7 @@ export function createTycoon3DWorld(containerEl, {
 
     // Delivery drones shuttling between the nexus and rooms
     const roomTargets = Object.values(ROOM_BLUEPRINTS);
-    const droneBodyMat = phys(light ? 0xf8fafc : 0x1e293b, { rough: 0.25, metal: 0.4, clear: 1 });
+    const droneBodyMat = phys(light ? 0xdbe3ee : 0x1e293b, { rough: light ? 0.34 : 0.25, metal: 0.4, clear: light ? 0.35 : 1 });
     const rotorMat = cached("rotor-mat", () => new THREE.MeshBasicMaterial({ color: light ? 0x334155 : 0x94a3b8, transparent: true, opacity: 0.45, depthWrite: false }));
     for (let i = 0; i < 4; i += 1) {
       const target = roomTargets[i % roomTargets.length];
@@ -1755,7 +1822,7 @@ export function createTycoon3DWorld(containerEl, {
     bot.scale.setScalar(scale);
 
     const bodyMat = phys(pal.body, { rough: 0.32, clear: 0.9 });
-    const shellMat = phys(light ? 0xffffff : 0xe2e8f0, { rough: 0.26, clear: 1 });
+    const shellMat = phys(light ? 0xe8eef5 : 0xe2e8f0, { rough: light ? 0.32 : 0.26, clear: light ? 0.45 : 1 });
     const visorMat = phys(0x070d1a, { rough: 0.1, metal: 0.5, clear: 1 });
     const eyeMat = working
       ? neon(pal.eye)
@@ -2255,9 +2322,9 @@ export function createTycoon3DWorld(containerEl, {
   function buildNexus() {
     const light = isLight();
     const g = new THREE.Group();
-    const ped = mesh(cylGeo(1.35, 1.65, 0.42, 6), phys(light ? 0xe2e8f0 : 0x1e293b, { rough: 0.28, metal: 0.65, clear: 0.9 }), { cast: true, receive: true });
+    const ped = mesh(cylGeo(1.35, 1.65, 0.42, 6), phys(light ? 0x94a3b8 : 0x1e293b, { rough: light ? 0.36 : 0.28, metal: 0.65, clear: light ? 0.35 : 0.9 }), { cast: true, receive: true });
     ped.position.y = 0.21;
-    const ped2 = mesh(cylGeo(0.95, 1.15, 0.28, 6), phys(light ? 0xffffff : 0x0f172a, { rough: 0.22, metal: 0.5, clear: 1 }), { cast: true, receive: true });
+    const ped2 = mesh(cylGeo(0.95, 1.15, 0.28, 6), phys(light ? 0xcbd5e1 : 0x0f172a, { rough: light ? 0.3 : 0.22, metal: 0.5, clear: light ? 0.4 : 1 }), { cast: true, receive: true });
     ped2.position.y = 0.56;
     const ringTop = mesh(torusGeo(1.02, 0.035, 8, 64), neon(0x38bdf8), { cast: false });
     ringTop.rotation.x = Math.PI / 2;
@@ -2459,7 +2526,7 @@ export function createTycoon3DWorld(containerEl, {
         rec.visible = Math.sin(t * 4) > 0;
       });
     } else if (rm.id === "global-pub") {
-      const ped = mesh(cylGeo(0.7, 0.9, 0.5, 32), phys(light ? 0xe2e8f0 : 0x1e293b, { rough: 0.3, metal: 0.6, clear: 0.8 }), { cast: true, receive: true });
+      const ped = mesh(cylGeo(0.7, 0.9, 0.5, 32), phys(light ? 0x94a3b8 : 0x1e293b, { rough: light ? 0.38 : 0.3, metal: 0.6, clear: light ? 0.35 : 0.8 }), { cast: true, receive: true });
       ped.position.set(0, top + 0.25, -3.5);
       const core = mesh(sphereGeo(0.78, 32, 24), phys(0x0c4a6e, { rough: 0.2, metal: 0.3, clear: 1, emissive: 0x075985, ei: 0.35 }));
       core.position.set(0, top + 1.6, -3.5);
@@ -2508,7 +2575,7 @@ export function createTycoon3DWorld(containerEl, {
     const cg = new THREE.Group();
     cg.position.set(rm.x / 2, 0, rm.z / 2);
     cg.rotation.y = Math.atan2(rm.x, rm.z);
-    const rail = mesh(new THREE.PlaneGeometry(0.7, len), phys(light ? 0xd6dfeb : 0x0c1527, { rough: 0.5, metal: 0.3, clear: 0.4 }), { cast: false, receive: true });
+    const rail = mesh(new THREE.PlaneGeometry(0.7, len), phys(light ? 0x8696ac : 0x0c1527, { rough: light ? 0.62 : 0.5, metal: 0.3, clear: light ? 0.15 : 0.4 }), { cast: false, receive: true });
     rail.rotation.x = -Math.PI / 2;
     rail.position.y = 0.012;
     const flowGeo = new THREE.PlaneGeometry(0.26, len);
@@ -2536,29 +2603,29 @@ export function createTycoon3DWorld(containerEl, {
     const group = new THREE.Group();
     group.position.set(rm.x, 0, rm.z);
     const accent = new THREE.Color(rm.colorHex);
-    const baseCol = new THREE.Color(light ? 0xf8fafc : 0x111a2e);
+    const baseCol = new THREE.Color(light ? 0xd8e1ec : 0x111a2e);
 
     const rimMat = new THREE.MeshStandardMaterial({
       color: rm.colorHex,
       emissive: rm.colorHex,
-      emissiveIntensity: light ? 0.35 : 1.0,
+      emissiveIntensity: light ? 0.25 : 1.0,
       roughness: 0.4,
     });
     const rim = mesh(slabGeo(rm.w + 0.3, rm.d + 0.3, 0.1, 0.95, 0.03), rimMat, { cast: false, receive: true });
     group.add(rim);
 
-    const slab = mesh(slabGeo(rm.w, rm.d, PLAT_TOP, 0.85, 0.07), phys(baseCol.getHex(), { rough: light ? 0.4 : 0.48, metal: light ? 0 : 0.15, clear: 0.6 }), { cast: true, receive: true });
+    const slab = mesh(slabGeo(rm.w, rm.d, PLAT_TOP, 0.85, 0.07), phys(baseCol.getHex(), { rough: light ? 0.56 : 0.48, metal: light ? 0.04 : 0.15, clear: light ? 0.12 : 0.6 }), { cast: true, receive: true });
     slab.userData = { kind: rm.id === "incubator" ? "incubator" : "room", roomId: rm.id };
     group.add(slab);
     interactiveMeshes.push(slab);
 
-    const inlayCol = baseCol.clone().lerp(accent, light ? 0.07 : 0.1);
-    const inlay = mesh(slabGeo(rm.w - 1.0, rm.d - 1.0, 0.012, 0.55, 0), phys(inlayCol.getHex(), { rough: 0.55, clear: 0.4 }), { cast: false, receive: true });
+    const inlayCol = baseCol.clone().lerp(accent, light ? 0.14 : 0.1);
+    const inlay = mesh(slabGeo(rm.w - 1.0, rm.d - 1.0, 0.012, 0.55, 0), phys(inlayCol.getHex(), { rough: light ? 0.62 : 0.55, clear: light ? 0.08 : 0.4 }), { cast: false, receive: true });
     inlay.position.y = PLAT_TOP;
     group.add(inlay);
 
     const wallH = 0.95;
-    const gm = glassMat(light ? 0xffffff : rm.colorHex, light ? 0.3 : 0.1);
+    const gm = glassMat(rm.colorHex, light ? 0.14 : 0.1);
     const back = mesh(boxGeo(rm.w - 0.6, wallH, 0.06), gm, { cast: false });
     back.position.set(0, PLAT_TOP + wallH / 2, -rm.d / 2 + 0.2);
     const left = mesh(boxGeo(0.06, wallH, rm.d - 0.6), gm, { cast: false });
@@ -2570,7 +2637,7 @@ export function createTycoon3DWorld(containerEl, {
     leftTrim.position.set(-rm.w / 2 + 0.2, PLAT_TOP + wallH, 0);
     group.add(back, left, backTrim, leftTrim);
 
-    const postMat = phys(light ? 0x94a3b8 : 0x334155, { rough: 0.3, metal: 0.85 });
+    const postMat = phys(light ? 0x64748b : 0x334155, { rough: 0.32, metal: 0.85 });
     [
       [-rm.w / 2 + 0.2, -rm.d / 2 + 0.2],
       [rm.w / 2 - 0.3, -rm.d / 2 + 0.2],
@@ -2604,7 +2671,7 @@ export function createTycoon3DWorld(containerEl, {
       trimMat,
       rimMat,
       flowMat: conduit.flowMat,
-      baseRimIntensity: light ? 0.35 : 1.0,
+      baseRimIntensity: light ? 0.25 : 1.0,
       banner,
       anchor: new THREE.Vector3(rm.x, PLAT_TOP + wallH + 0.3, rm.z - rm.d / 2 + 0.2),
       spawnAt: firstBuildDone ? -1e9 : now + idx * 90,
@@ -2784,10 +2851,10 @@ export function createTycoon3DWorld(containerEl, {
       }
     } else if (archetype === "broadcast") {
       // Broadcast console + video wall + ON AIR light + rotating satellite dish
-      const consoleMat = phys(light ? 0xf1f5f9 : 0x1e293b, { rough: 0.3, clear: 0.8 });
+      const consoleMat = phys(light ? 0xd8e1ec : 0x1e293b, { rough: light ? 0.45 : 0.3, clear: light ? 0.22 : 0.8 });
       const consoleBase = mesh(boxGeo(2.0, 0.62, 0.7), consoleMat, { cast: true, receive: true });
       consoleBase.position.set(0, 0.31, 0.2);
-      const consoleTop = mesh(boxGeo(2.04, 0.06, 0.8), phys(light ? 0xcbd5e1 : 0x0f172a, { rough: 0.4, metal: 0.4 }));
+      const consoleTop = mesh(boxGeo(2.04, 0.06, 0.8), phys(light ? 0x94a3b8 : 0x0f172a, { rough: 0.45, metal: 0.4 }));
       consoleTop.position.set(0, 0.66, 0.2);
       consoleTop.rotation.x = 0.22;
       g.add(consoleBase, consoleTop);
@@ -2970,7 +3037,7 @@ export function createTycoon3DWorld(containerEl, {
       }
     } else {
       // Code lab: wide desk + triple monitors + blinking server rack
-      addDesk(2.1, 0.92, phys(light ? 0xffffff : 0x1e293b, { rough: 0.32, clear: 0.8 }));
+      addDesk(2.1, 0.92, phys(light ? 0xdce4ef : 0x1e293b, { rough: light ? 0.46 : 0.32, clear: light ? 0.22 : 0.8 }));
       const kb = mesh(slabGeo(0.62, 0.2, 0.03, 0.03, 0.01), phys(0x0f172a, { rough: 0.35, metal: 0.4, clear: 0.6 }));
       kb.position.set(0, 0.75, 0.33);
       g.add(kb);
@@ -3039,13 +3106,13 @@ export function createTycoon3DWorld(containerEl, {
     interactiveMeshes.push(hit);
 
     const padColor = act.isPending
-      ? (light ? 0xfee2e2 : 0x2b1218)
-      : (act.isWorking ? (light ? 0xd1fae5 : 0x0b2520) : (light ? 0xcbd5e1 : 0x050912));
+      ? (light ? 0xf8b4b4 : 0x2b1218)
+      : (act.isWorking ? (light ? 0x8be2b0 : 0x0b2520) : (light ? 0x94a3b8 : 0x050912));
     const pad = mesh(
       slabGeo(3.5, 3.5, 0.05, 0.55, 0.02),
       phys(padColor, {
-        rough: act.isResting ? 0.78 : 0.45,
-        clear: act.isResting ? 0.1 : 0.6,
+        rough: act.isResting ? 0.78 : (light ? 0.58 : 0.45),
+        clear: light ? 0.12 : (act.isResting ? 0.1 : 0.6),
       }),
       { cast: false, receive: true },
     );
@@ -3595,7 +3662,7 @@ export function createTycoon3DWorld(containerEl, {
     const tint = hot ? 0xfbbf24 : (egg.freshnessTier === "warm" ? 0x38bdf8 : 0xa78bfa);
     const g = new THREE.Group();
     g.position.set(egg.x, PLAT_TOP, egg.z);
-    const base = mesh(cylGeo(0.56, 0.68, 0.2, 32), phys(light ? 0xcbd5e1 : 0x1e293b, { rough: 0.3, metal: 0.7, clear: 0.7 }), { cast: true, receive: true });
+    const base = mesh(cylGeo(0.56, 0.68, 0.2, 32), phys(light ? 0x94a3b8 : 0x1e293b, { rough: light ? 0.36 : 0.3, metal: 0.7, clear: light ? 0.3 : 0.7 }), { cast: true, receive: true });
     base.position.y = 0.1;
     const ring = mesh(torusGeo(0.57, 0.02, 6, 48), neon(tint), { cast: false });
     ring.rotation.x = Math.PI / 2;
@@ -3615,7 +3682,7 @@ export function createTycoon3DWorld(containerEl, {
     eggMesh.userData = { kind: "incubator", eggId: egg.id };
     interactiveMeshes.push(eggMesh);
     eggHitMeshes.push(eggMesh);
-    const cap = mesh(geo("egg-cap", () => new THREE.SphereGeometry(0.62, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2)), glassMat(0xffffff, light ? 0.22 : 0.12), { cast: false });
+    const cap = mesh(geo("egg-cap", () => new THREE.SphereGeometry(0.62, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2)), glassMat(light ? tint : 0xffffff, light ? 0.16 : 0.12), { cast: false });
     cap.scale.set(1, 1.7, 1);
     cap.position.y = 0.2;
     const gl = glowSprite(tint, hot ? 1.8 : 1.2, hot ? 0.6 : 0.4);
@@ -4119,22 +4186,22 @@ export function createTycoon3DWorld(containerEl, {
 
   // ------------------------------------------------------------- post-processing
   function syncPostThemeUniforms() {
-    const light = isLight();
+    const { post } = resolveTycoonThemeTuning(currentTheme);
     if (brightMat) {
-      brightMat.uniforms.uThr.value = light ? 0.95 : 0.78;
-      brightMat.uniforms.uKnee.value = light ? 0.45 : 0.58;
+      brightMat.uniforms.uThr.value = post.bloomThr;
+      brightMat.uniforms.uKnee.value = post.bloomKnee;
     }
     if (compMat) {
-      compMat.uniforms.uExposure.value = light ? 1.0 : 1.15;
-      compMat.uniforms.uBloom.value = visPrefs.bloom ? (light ? 0.24 : 0.8) : 0.0;
+      compMat.uniforms.uExposure.value = post.exposure;
+      compMat.uniforms.uBloom.value = visPrefs.bloom ? post.bloomStrength : 0.0;
       compMat.uniforms.uTs.value = visPrefs.tiltShift ? 0.82 : 0.0;
-      compMat.uniforms.uVig.value = light ? 0.16 : 0.42;
+      compMat.uniforms.uVig.value = post.vignette;
     }
     const postActive = !isMobilePerf && (visPrefs.bloom || visPrefs.tiltShift);
     containerEl.classList.toggle("has-webgl-post", postActive);
     if (renderer && THREE) {
       renderer.toneMapping = postActive ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = light ? 1.0 : 1.15;
+      renderer.toneMappingExposure = post.exposure;
     }
   }
 

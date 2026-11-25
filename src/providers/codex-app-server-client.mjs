@@ -171,6 +171,10 @@ export class CodexAppServerClient extends EventEmitter {
     return Boolean(this.#process && this.#process.exitCode === null);
   }
 
+  get pid() {
+    return this.#process && this.#process.exitCode === null ? (this.#process.pid || null) : null;
+  }
+
   async ensureReady() {
     if (this.#closed) throw new Error("Codex App Server 客户端已关闭");
     if (this.#ready) return this.#ready;

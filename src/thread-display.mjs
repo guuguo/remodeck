@@ -1,5 +1,16 @@
 import { stripCodexPromptWrappers } from "./codex-input-clean.mjs";
 
+export const DEFAULT_THREAD_TOOL_TEXT_CHARS = 24 * 1024;
+
+export function truncateToolTextForRead(str, maxChars) {
+  if (typeof str !== "string" || str.length <= maxChars) return str;
+  const cleaned = str
+    .replace(/data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]{256,}/gi, "[图片Base64已省略]")
+    .replace(/"data"\s*:\s*"[A-Za-z0-9+/=\s]{4096,}"/g, '"data":"[Base64已省略]"');
+  if (cleaned.length <= maxChars) return cleaned;
+  return `${cleaned.slice(0, maxChars)}…[已省略 ${cleaned.length - maxChars} 字符]`;
+}
+
 function extractUserRequestTag(text) {
   const match = String(text || "").match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/i);
   return match ? match[1] : text;

@@ -15,18 +15,21 @@ import {
   ANTIGRAVITY_STALE_LIVE_AGE_MS,
   ANTIGRAVITY_TERMINAL_STEP_GRACE_MS,
   countAntigravityNativeQueuedMessages,
+  decodeAntigravityErrorStepPayload,
   decodeAntigravityStepPayload,
   decodeWorkspaceUri,
   isAntigravityDiskLive,
+  isPendingAskQuestionInSteps,
   parseAntigravityContextUsage,
   parseAntigravityTranscript,
   readAntigravityIndexedThreads,
   readAntigravityLiveActivity,
   readAntigravityQueuedMessages,
+  readAntigravityTailErrorSync,
   readAntigravityThreadHistory,
   resolveAntigravityRootConversationId,
 } from "../src/providers/antigravity-history.mjs";
-import { AntigravityProvider } from "../src/providers/antigravity-provider.mjs";
+import { AntigravityProvider, isTransientAntigravityAuth401Error } from "../src/providers/antigravity-provider.mjs";
 import { discoverAntigravityProfiles } from "../src/providers/profile-discovery.mjs";
 import { CodexProvider } from "../src/providers/codex-provider.mjs";
 import { readCodexQueuedCountsByThread, readCodexQueuedItems } from "../src/providers/codex-thread-index.mjs";
@@ -2509,4 +2512,924 @@ test("ProviderHub pins explicit creation cwd against Antigravity multi-workspace
   const listed2 = await hub2.listThreads({ provider: "antigravity" });
   assert.equal(listed2.threads.find((th) => th.id === createdPinned.thread.id)?.cwd, projectA);
   await hub2.close();
+});
+
+test("readAntigravityThreadHistory merges step_type=17 ERROR_MESSAGE from conversation sqlite db", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-agy-errstep-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const convId = "conv-errstep-quota-1";
+  const logsDir = resolve(dir, "brain", convId, ".system_generated", "logs");
+  const convDir = resolve(dir, "conversations");
+  await mkdir(logsDir, { recursive: true });
+  await mkdir(convDir, { recursive: true });
+
+  const transcriptSteps = [
+    {
+      step_index: 0,
+      type: "USER_INPUT",
+      source: "USER_EXPLICIT",
+      status: "DONE",
+      created_at: "2026-11-24T06:54:12Z",
+      content: "<USER_REQUEST>\n你继续做\n</USER_REQUEST>",
+    },
+    {
+      step_index: 1,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      created_at: "2026-11-24T06:54:12Z",
+      model: "claude-opus-5-5-medium",
+      tool_calls: [{ name: "run_command", args: { CommandLine: "git status", toolSummary: "Check status" } }],
+    },
+    {
+      step_index: 2,
+      type: "GENERIC",
+      status: "DONE",
+      created_at: "2026-11-24T06:54:17Z",
+      content: "Command exited with code 0.",
+    },
+    // step_index 3 is omitted from transcript.jsonl by Antigravity (ERROR_MESSAGE only in conversations/<id>.db)
+    {
+      step_index: 4,
+      type: "USER_INPUT",
+      source: "USER_EXPLICIT",
+      status: "DONE",
+      created_at: "2026-11-24T06:54:27Z",
+      content: "<USER_REQUEST>\n继续\n</USER_REQUEST>",
+    },
+    // step_index 5 is omitted from transcript.jsonl as well
+  ];
+  await writeFile(resolve(logsDir, "transcript.jsonl"), transcriptSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+
+  const encodeErrorStep = ({ message, model, tsSec }) => {
+    const errInfoJson = JSON.stringify({
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      reason: "QUOTA_EXHAUSTED",
+      metadata: { model },
+    });
+    const f24_3 = Buffer.concat([
+      encodePbLenField(1, message),
+      encodePbLenField(2, `RESOURCE_EXHAUSTED (code 429): ${message}`),
+      encodePbLenField(10, errInfoJson),
+    ]);
+    const f24 = encodePbLenField(3, f24_3);
+    const payload = Buffer.concat([
+      encodePbVarint((1 << 3) | 0), encodePbVarint(17),
+      encodePbLenField(24, f24),
+    ]);
+    const tsBuf = Buffer.concat([encodePbVarint((1 << 3) | 0), encodePbVarint(tsSec)]);
+    const metadata = encodePbLenField(1, tsBuf);
+    return { payload, metadata };
+  };
+
+  const db = new DatabaseSync(resolve(convDir, `${convId}.db`));
+  db.exec(`
+    CREATE TABLE steps (
+      idx INTEGER PRIMARY KEY,
+      step_type INTEGER NOT NULL DEFAULT 0,
+      status INTEGER NOT NULL DEFAULT 0,
+      metadata BLOB,
+      step_payload BLOB
+    );
+  `);
+  const insert = db.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)");
+  const err3 = encodeErrorStep({
+    message: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 26h41m11s.",
+    model: "claude-opus-5-5-medium",
+    tsSec: 1795503258,
+  });
+  const err5 = encodeErrorStep({
+    message: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 26h41m1s.",
+    model: "claude-opus-5-5-medium",
+    tsSec: 1795503268,
+  });
+  insert.run(3, 17, 3, err3.metadata, err3.payload);
+  insert.run(5, 17, 3, err5.metadata, err5.payload);
+  db.close();
+
+  const hist = await readAntigravityThreadHistory(dir, convId, { detail: "auto", limit: 20 });
+  assert.equal(hist.thread.turns.length, 2);
+  assert.equal(hist.thread.turns[0].status, "failed");
+  assert.match(hist.thread.turns[0].error?.message || "", /Individual quota reached.*26h41m11s/);
+  assert.equal(hist.thread.turns[1].status, "failed");
+  assert.match(hist.thread.turns[1].error?.message || "", /Individual quota reached.*26h41m1s/);
+  assert.equal(hist.thread.turns[1].model, "claude-opus-5-5-medium");
+});
+
+test("isPendingAskQuestionInSteps detects unresolved ask_question across parallel tools and clears on answer", () => {
+  const userStep = { step_index: 1, type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", content: "hi" };
+  const askOnly = {
+    step_index: 2,
+    type: "PLANNER_RESPONSE",
+    status: "DONE",
+    tool_calls: [{ name: "ask_question", args: { questions: "[]" } }],
+  };
+  assert.equal(isPendingAskQuestionInSteps([userStep, askOnly]), true);
+
+  const parallelTools = {
+    step_index: 2,
+    type: "PLANNER_RESPONSE",
+    status: "DONE",
+    tool_calls: [
+      { name: "update_steps", args: {} },
+      { name: "ask_question", args: { questions: "[]" } },
+    ],
+  };
+  const firstGenericDone = { step_index: 3, type: "GENERIC", status: "DONE", content: "OK" };
+  assert.equal(isPendingAskQuestionInSteps([userStep, parallelTools, firstGenericDone]), true);
+
+  const runningGeneric = { step_index: 3, type: "GENERIC", status: "RUNNING", content: "Waiting..." };
+  assert.equal(isPendingAskQuestionInSteps([userStep, askOnly, runningGeneric]), true);
+
+  const answeredGeneric = { step_index: 3, type: "GENERIC", status: "DONE", content: "Created At: ...\nA1: 1" };
+  assert.equal(isPendingAskQuestionInSteps([userStep, askOnly, answeredGeneric]), false);
+
+  const nextUser = { step_index: 3, type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", content: "选 1" };
+  assert.equal(isPendingAskQuestionInSteps([userStep, askOnly, nextUser]), false);
+});
+
+test("Antigravity live ask_question clears fake live state, emits card on hub.readThread, ignores pagination, and clears after desktop answer", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-agy-ask-live-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const desktopDir = resolve(root, "desktop");
+  const dataDir = resolve(root, "data");
+  const convId = "conv-ask-live-1";
+  const logsDir = resolve(desktopDir, "brain", convId, ".system_generated", "logs");
+  await mkdir(logsDir, { recursive: true });
+  await mkdir(dataDir, { recursive: true });
+
+  const nowIso = new Date().toISOString();
+  const db = new DatabaseSync(resolve(desktopDir, "conversation_summaries.db"));
+  db.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id TEXT PRIMARY KEY,
+      title TEXT,
+      preview TEXT,
+      step_count INTEGER,
+      last_modified_time TEXT,
+      workspace_uris TEXT,
+      status TEXT,
+      source TEXT,
+      parent_conversation_id TEXT,
+      not_fully_idle INTEGER,
+      killed INTEGER,
+      app_data_dir TEXT
+    );
+  `);
+  db.prepare(`
+    INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    convId,
+    "提问卡片测试",
+    "提问卡片测试",
+    6,
+    nowIso,
+    JSON.stringify(["file:///tmp/mock-agy-project"]),
+    "CASCADE_RUN_STATUS_IDLE",
+    "",
+    "",
+    1,
+    0,
+    "",
+  );
+  db.close();
+
+  const questionsJson = JSON.stringify([
+    {
+      is_multi_select: false,
+      question: "hotmail 限额了，接下来希望怎么继续？",
+      options: [
+        "(Recommended) 切到本机 iCloud 账号继续",
+        "挂定时任务等重置",
+        "直接由当前模型接手",
+      ],
+    },
+  ]);
+
+  const initialSteps = [
+    { step_index: 1, type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", created_at: nowIso, content: "帮我继续" },
+    { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", created_at: nowIso, tool_calls: [{ name: "run_command", args: { CommandLine: "ls", toolSummary: "Check dir" } }] },
+  ];
+  const transcriptPath = resolve(logsDir, "transcript.jsonl");
+  await writeFile(transcriptPath, initialSteps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
+
+  const provider = new AntigravityProvider({
+    env: {
+      ...process.env,
+      HOME: root,
+      USERPROFILE: root,
+      AGY_BIN: MOCK_AGY_BIN,
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
+    },
+  });
+  const hub = new ProviderHub({
+    dataDir,
+    providers: [provider],
+    enableQueueDrain: false,
+  });
+  await hub.init();
+  t.after(() => hub.close());
+
+  const compositeId = `antigravity:desktop:${convId}`;
+  const act1 = await provider.getActivity("desktop", convId);
+  assert.equal(act1.live, true);
+
+  // Transition transcript to pending ask_question while DB still keeps not_fully_idle = 1
+  const askSteps = [
+    ...initialSteps,
+    { step_index: 3, type: "GENERIC", status: "DONE", created_at: nowIso, content: "ok" },
+    { step_index: 4, type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", created_at: nowIso, content: "再看看" },
+    { step_index: 5, type: "PLANNER_RESPONSE", status: "DONE", created_at: nowIso, tool_calls: [{ name: "ask_question", args: { questions: questionsJson } }] },
+  ];
+  await writeFile(transcriptPath, askSteps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
+  const nextMtime = new Date(Date.now() + 2000);
+  await utimes(transcriptPath, nextMtime, nextMtime);
+
+  const directLive = await readAntigravityLiveActivity(desktopDir, convId, { profileType: "desktop" });
+  assert.equal(directLive.live, false);
+  assert.equal(directLive.pendingAskQuestion, true);
+  assert.equal(directLive.phase, "");
+
+  const indexedList = readAntigravityIndexedThreads(desktopDir, { profileType: "desktop" });
+  assert.equal(indexedList.find((item) => item.id === convId)?.live, false);
+
+  const act2 = await provider.getActivity("desktop", convId, { cursor: act1.cursor });
+  assert.equal(act2.live, false);
+  assert.equal(act2.changed, true);
+
+  const readLatest = await hub.readThread(compositeId, { limit: 12 });
+  assert.equal(readLatest.thread.live, false);
+  assert.equal(readLatest.pendingRequests.length, 1);
+  assert.equal(readLatest.pendingRequests[0].kind, "userInput");
+  assert.equal(readLatest.pendingRequests[0].questions[0].options.length, 3);
+
+  const readOlderPage = await hub.readThread(compositeId, { cursor: "turn:1", limit: 1 });
+  assert.equal(readOlderPage.pendingRequests.length, 1);
+
+  // Simulate user answering in Antigravity Desktop
+  const answeredSteps = [
+    ...askSteps,
+    { step_index: 6, type: "GENERIC", status: "DONE", created_at: nowIso, content: "Created At: ...\nA1: 1" },
+  ];
+  await writeFile(transcriptPath, answeredSteps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
+  const mtime3 = new Date(Date.now() + 4000);
+  await utimes(transcriptPath, mtime3, mtime3);
+
+  const readAfterDesktopAnswer = await hub.readThread(compositeId, { limit: 12 });
+  assert.equal(readAfterDesktopAnswer.pendingRequests.length, 0);
+});
+
+test("Antigravity ask_question supports leading text, dedupes identical signature, and avoids re-emitting right after answer", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-agy-ask-dedupe-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const desktopDir = resolve(root, "desktop");
+  const dataDir = resolve(root, "data");
+  const convId = "conv-ask-dedupe-1";
+  const logsDir = resolve(desktopDir, "brain", convId, ".system_generated", "logs");
+  await mkdir(logsDir, { recursive: true });
+  await mkdir(dataDir, { recursive: true });
+
+  const nowIso = new Date().toISOString();
+  const questionsJson = JSON.stringify([
+    {
+      is_multi_select: false,
+      question: "请选择执行方案",
+      options: ["方案 A", "方案 B"],
+    },
+  ]);
+  const lines = [
+    JSON.stringify({ step_index: 1, type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", created_at: nowIso, content: "开始" }),
+    JSON.stringify({
+      step_index: 2,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      created_at: nowIso,
+      content: "以下是前置说明文字，随后请求确认：",
+      tool_calls: [{ name: "ask_question", args: { questions: questionsJson } }],
+    }),
+  ];
+  await writeFile(resolve(logsDir, "transcript.jsonl"), `${lines.join("\n")}\n`, "utf8");
+
+  const provider = new AntigravityProvider({
+    env: {
+      ...process.env,
+      HOME: root,
+      USERPROFILE: root,
+      AGY_BIN: MOCK_AGY_BIN,
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
+    },
+  });
+  const hub = new ProviderHub({
+    dataDir,
+    providers: [provider],
+    enableQueueDrain: false,
+  });
+  await hub.init();
+  t.after(() => hub.close());
+  const hubEvents = [];
+  hub.subscribe((event, payload) => hubEvents.push({ event, payload }));
+
+  const compositeId = `antigravity:desktop:${convId}`;
+  const res1 = await hub.readThread(compositeId, { limit: 12 });
+  assert.equal(res1.pendingRequests.length, 1);
+  assert.equal(res1.pendingRequests[0].questions[0].question, "请选择执行方案");
+
+  // Responding via card clears it and immediately reading before transcript writes GENERIC must not bounce it back
+  await hub.respondToRequest(res1.pendingRequests[0].id, {
+    decision: "accept",
+    answers: { q_0: { answers: ["方案 A"] } },
+  });
+  const resAfterAnswer = await hub.readThread(compositeId, { limit: 12 });
+  assert.equal(resAfterAnswer.pendingRequests.length, 0);
+  await waitFor(() => hubEvents.some((e) => e.event === "provider_event" && e.payload?.type === "turn_completed"));
+
+  // Dedupe identical askSignature emitted with different itemId (e.g. ACP toolCallId vs transcript itemId)
+  const dedupeEvents = [];
+  let hubCallbacks = null;
+  const mockProvider = {
+    id: "antigravity",
+    setCallbacks(cbs) { hubCallbacks = cbs; },
+    async listProfiles() { return [{ id: "desktop", provider: "antigravity", label: "Antigravity", installed: true }]; },
+    async listThreads() { return []; },
+    async readThread(_profileId, rawId) {
+      return { thread: { id: `antigravity:desktop:${rawId}`, rawId, provider: "antigravity", profileId: "desktop", turns: [] } };
+    },
+    async sendTurn({ rawId }) {
+      return { turn: { id: "turn-manual", status: "inProgress" }, thread: { id: `antigravity:desktop:${rawId}`, rawId, provider: "antigravity", profileId: "desktop" } };
+    },
+  };
+  const dedupeDataDir = resolve(root, "data-dedupe");
+  await mkdir(dedupeDataDir, { recursive: true });
+  const hub2 = new ProviderHub({ dataDir: dedupeDataDir, providers: [mockProvider], enableQueueDrain: false });
+  await hub2.init();
+  t.after(() => hub2.close());
+  hub2.subscribe((event, payload) => dedupeEvents.push({ event, payload }));
+
+  const sharedSig = JSON.stringify([["请选择执行方案", false, ["方案 A", "方案 B"]]]);
+  hubCallbacks.onServerRequest({
+    id: "agy-ask-conv-1-tc-acp",
+    rawId: "agy-ask-conv-1-tc-acp",
+    askSignature: sharedSig,
+    provider: "antigravity",
+    profileId: "desktop",
+    rawThreadId: "conv-1",
+    threadId: "antigravity:desktop:conv-1",
+    kind: "userInput",
+    isPromptFollowUp: true,
+    questions: [{ id: "q_0", header: "问题 1", question: "请选择执行方案", options: [{ label: "方案 A" }, { label: "方案 B" }] }],
+  });
+  hubCallbacks.onServerRequest({
+    id: "agy-ask-conv-1-agy-2-tool-0",
+    rawId: "agy-ask-conv-1-agy-2-tool-0",
+    askSignature: sharedSig,
+    provider: "antigravity",
+    profileId: "desktop",
+    rawThreadId: "conv-1",
+    threadId: "antigravity:desktop:conv-1",
+    kind: "userInput",
+    isPromptFollowUp: true,
+    questions: [{ id: "q_0", header: "问题 1", question: "请选择执行方案", options: [{ label: "方案 A" }, { label: "方案 B" }] }],
+  });
+  assert.equal(hub2.pendingRequestsForThread("antigravity:desktop:conv-1").length, 1);
+
+  // Manual sendTurn clears pending follow-up card
+  await hub2.sendTurn({ threadId: "antigravity:desktop:conv-1", text: "方案 A" });
+  assert.equal(hub2.pendingRequestsForThread("antigravity:desktop:conv-1").length, 0);
+  assert.ok(dedupeEvents.some((e) => e.event === "server_request_resolved" && e.payload?.threadId === "antigravity:desktop:conv-1"));
+});
+
+function buildTestErrorStepBlob({
+  userMessage = "",
+  shortError = "",
+  fullError = "",
+  fallbackError = "",
+  model = "",
+  reason = "",
+  tsSec = Math.floor(Date.now() / 1000),
+} = {}) {
+  const errFields = [];
+  if (userMessage) errFields.push(encodePbLenField(1, userMessage));
+  if (shortError) errFields.push(encodePbLenField(2, shortError));
+  if (fullError) errFields.push(encodePbLenField(3, fullError));
+  if (fallbackError) errFields.push(encodePbLenField(9, fallbackError));
+  if (model || reason) {
+    errFields.push(encodePbLenField(10, JSON.stringify({
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      ...(reason ? { reason } : {}),
+      ...(model ? { metadata: { model } } : {}),
+    })));
+  }
+  const f24 = encodePbLenField(3, Buffer.concat(errFields));
+  const payload = Buffer.concat([
+    encodePbVarint((1 << 3) | 0), encodePbVarint(17),
+    encodePbLenField(24, f24),
+  ]);
+  const tsBuf = Buffer.concat([encodePbVarint((1 << 3) | 0), encodePbVarint(tsSec)]);
+  const metadata = encodePbLenField(1, tsBuf);
+  return { payload, metadata };
+}
+
+test("decodeAntigravityErrorStepPayload exposes f2/f3 details without duplicating 429 text and clears recovered retry errors", async (t) => {
+  const step401 = buildTestErrorStepBlob({
+    userMessage: "Agent execution terminated due to error.",
+    shortError: "UNAUTHENTICATED (code 401): Request had invalid authentication credentials.",
+    fullError: "HTTP 401 Unauthorized\n{\"error\":{\"code\":401,\"status\":\"UNAUTHENTICATED\"}}",
+    tsSec: 1795577313,
+  });
+  const decoded401 = decodeAntigravityErrorStepPayload(step401.payload, step401.metadata);
+  assert.equal(
+    decoded401?.message,
+    "Agent execution terminated due to error.\nUNAUTHENTICATED (code 401): Request had invalid authentication credentials.",
+  );
+  assert.equal(decoded401?.shortError, "UNAUTHENTICATED (code 401): Request had invalid authentication credentials.");
+  assert.match(decoded401?.detail || "", /HTTP 401 Unauthorized/);
+  assert.equal(decoded401?.isRetryAttempt, false);
+
+  const step429 = buildTestErrorStepBlob({
+    userMessage: "Individual quota reached. Resets in 2h.",
+    shortError: "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 2h.",
+    model: "claude-opus-5-5-medium",
+    reason: "QUOTA_EXHAUSTED",
+    tsSec: 1795577320,
+  });
+  const decoded429 = decodeAntigravityErrorStepPayload(step429.payload, step429.metadata);
+  assert.equal(decoded429?.message, "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 2h.");
+  assert.equal(decoded429?.reason, "QUOTA_EXHAUSTED");
+
+  const stepRetry = buildTestErrorStepBlob({
+    shortError: "API error (attempt 1): stream reading error: unexpected EOF",
+    tsSec: 1795577325,
+  });
+  const decodedRetry = decodeAntigravityErrorStepPayload(stepRetry.payload, stepRetry.metadata);
+  assert.equal(decodedRetry?.isRetryAttempt, true);
+
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-agy-errdetail-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const convId = "conv-err-recover-1";
+  const logsDir = resolve(dir, "brain", convId, ".system_generated", "logs");
+  const convDir = resolve(dir, "conversations");
+  await mkdir(logsDir, { recursive: true });
+  await mkdir(convDir, { recursive: true });
+
+  const transcriptSteps = [
+    { step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", created_at: "2026-11-25T03:00:00Z", content: "第一轮重试后恢复" },
+    { step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", created_at: "2026-11-25T03:00:01Z", thinking: "先试试" },
+    // step 2 in DB is retry error
+    { step_index: 3, type: "PLANNER_RESPONSE", status: "DONE", created_at: "2026-11-25T03:00:10Z", content: "网络抖动后已恢复并完成。" },
+    { step_index: 4, type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", created_at: "2026-11-25T03:28:00Z", content: "继续第二轮" },
+    // step 5 in DB is fatal 401
+  ];
+  await writeFile(resolve(logsDir, "transcript.jsonl"), `${transcriptSteps.map((s) => JSON.stringify(s)).join("\n")}\n`);
+
+  const db = new DatabaseSync(resolve(convDir, `${convId}.db`));
+  db.exec(`
+    CREATE TABLE steps (
+      idx INTEGER PRIMARY KEY,
+      step_type INTEGER NOT NULL DEFAULT 0,
+      status INTEGER NOT NULL DEFAULT 0,
+      metadata BLOB,
+      step_payload BLOB
+    );
+  `);
+  const insert = db.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)");
+  insert.run(2, 17, 3, stepRetry.metadata, stepRetry.payload);
+  insert.run(5, 17, 3, step401.metadata, step401.payload);
+  db.close();
+
+  const hist = await readAntigravityThreadHistory(dir, convId, { detail: "auto", limit: 20 });
+  assert.equal(hist.thread.turns.length, 2);
+  assert.equal(hist.thread.turns[0].status, "completed");
+  assert.equal(hist.thread.turns[0].error, null);
+  assert.equal(hist.thread.turns[1].status, "failed");
+  assert.match(hist.thread.turns[1].error?.message || "", /Agent execution terminated due to error\.\nUNAUTHENTICATED \(code 401\)/);
+  assert.match(hist.thread.turns[1].error?.detail || "", /HTTP 401 Unauthorized/);
+});
+
+test("readAntigravityTailErrorSync and readAntigravityIndexedThreads track tail step_type=17 across trailing SYSTEM_MESSAGE and clear on recovery", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-agy-tailerr-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const convId = "conv-tail-err-1";
+  const logsDir = resolve(dir, "brain", convId, ".system_generated", "logs");
+  const convDir = resolve(dir, "conversations");
+  await mkdir(logsDir, { recursive: true });
+  await mkdir(convDir, { recursive: true });
+
+  const nowIso = new Date().toISOString();
+  const sumDb = new DatabaseSync(resolve(dir, "conversation_summaries.db"));
+  sumDb.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id TEXT PRIMARY KEY,
+      title TEXT,
+      preview TEXT,
+      step_count INTEGER,
+      last_modified_time TEXT,
+      workspace_uris TEXT,
+      status TEXT,
+      source TEXT,
+      parent_conversation_id TEXT,
+      not_fully_idle INTEGER,
+      killed INTEGER,
+      app_data_dir TEXT
+    );
+  `);
+  sumDb.prepare("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+    convId,
+    "尾步报错测试",
+    "尾步报错测试",
+    4,
+    nowIso,
+    JSON.stringify(["file:///tmp/mock-agy-project"]),
+    "CASCADE_RUN_STATUS_IDLE",
+    "",
+    "",
+    0,
+    0,
+    "",
+  );
+  sumDb.close();
+
+  await writeFile(
+    resolve(logsDir, "transcript.jsonl"),
+    [
+      JSON.stringify({ step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", created_at: nowIso, content: "跑一下" }),
+      JSON.stringify({ step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", created_at: nowIso, content: "正在处理" }),
+    ].join("\n") + "\n",
+  );
+
+  const err401 = buildTestErrorStepBlob({
+    userMessage: "Agent execution terminated due to error.",
+    shortError: "UNAUTHENTICATED (code 401): invalid_token",
+    fullError: "HTTP 401 Unauthorized",
+    tsSec: Math.floor(Date.now() / 1000),
+  });
+  const convDbPath = resolve(convDir, `${convId}.db`);
+  const db = new DatabaseSync(convDbPath);
+  db.exec(`
+    CREATE TABLE steps (
+      idx INTEGER PRIMARY KEY,
+      step_type INTEGER NOT NULL DEFAULT 0,
+      status INTEGER NOT NULL DEFAULT 0,
+      metadata BLOB,
+      step_payload BLOB
+    );
+  `);
+  const insert = db.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)");
+  insert.run(0, 14, 3, Buffer.alloc(0), Buffer.alloc(0));
+  insert.run(1, 15, 3, Buffer.alloc(0), Buffer.alloc(0));
+  insert.run(2, 17, 3, err401.metadata, err401.payload);
+  insert.run(3, 101, 3, Buffer.alloc(0), Buffer.alloc(0));
+  db.close();
+
+  const tail1 = readAntigravityTailErrorSync(dir, convId);
+  assert.equal(tail1?.stepIndex, 2);
+  assert.match(tail1?.shortError || "", /UNAUTHENTICATED \(code 401\)/);
+
+  const list1 = readAntigravityIndexedThreads(dir, { profileType: "desktop" });
+  const item1 = list1.find((x) => x.id === convId);
+  assert.equal(item1?.lastTurnStatus, "failed");
+  assert.match(item1?.lastError || "", /UNAUTHENTICATED \(code 401\)/);
+
+  const db2 = new DatabaseSync(convDbPath);
+  db2.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(
+    4, 15, 3, Buffer.alloc(0), Buffer.alloc(0),
+  );
+  db2.close();
+  const futureTime = new Date(Date.now() + 2000);
+  await utimes(convDbPath, futureTime, futureTime);
+
+  assert.equal(readAntigravityTailErrorSync(dir, convId), null);
+  const list2 = readAntigravityIndexedThreads(dir, { profileType: "desktop" });
+  const item2 = list2.find((x) => x.id === convId);
+  assert.equal(item2?.lastTurnStatus, undefined);
+  assert.equal(item2?.lastError, undefined);
+});
+
+test("AntigravityProvider.sendTurn emits failed turn_completed when ACP exits end_turn after writing tail step_type=17", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-agy-send-tailerr-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const desktopDir = resolve(root, "desktop");
+  const dataDir = resolve(root, "data");
+  const convId = "conv-send-tailerr-1";
+  const logsDir = resolve(desktopDir, "brain", convId, ".system_generated", "logs");
+  const convDir = resolve(desktopDir, "conversations");
+  await Promise.all([
+    mkdir(logsDir, { recursive: true }),
+    mkdir(convDir, { recursive: true }),
+    mkdir(dataDir, { recursive: true }),
+  ]);
+
+  const nowIso = new Date().toISOString();
+  const sumDb = new DatabaseSync(resolve(desktopDir, "conversation_summaries.db"));
+  sumDb.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id TEXT PRIMARY KEY,
+      title TEXT,
+      preview TEXT,
+      step_count INTEGER,
+      last_modified_time TEXT,
+      workspace_uris TEXT,
+      status TEXT,
+      source TEXT,
+      parent_conversation_id TEXT,
+      not_fully_idle INTEGER,
+      killed INTEGER,
+      app_data_dir TEXT
+    );
+  `);
+  sumDb.prepare("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+    convId,
+    "发送尾部报错检测",
+    "发送尾部报错检测",
+    2,
+    nowIso,
+    JSON.stringify(["file:///tmp/mock-agy-project"]),
+    "CASCADE_RUN_STATUS_IDLE",
+    "",
+    "",
+    0,
+    0,
+    "",
+  );
+  sumDb.close();
+
+  await writeFile(
+    resolve(logsDir, "transcript.jsonl"),
+    [
+      JSON.stringify({ step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", created_at: nowIso, content: "初始化" }),
+      JSON.stringify({ step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", created_at: nowIso, content: "就绪" }),
+    ].join("\n") + "\n",
+  );
+
+  const convDbPath = resolve(convDir, `${convId}.db`);
+  const convDb = new DatabaseSync(convDbPath);
+  convDb.exec(`
+    CREATE TABLE steps (
+      idx INTEGER PRIMARY KEY,
+      step_type INTEGER NOT NULL DEFAULT 0,
+      status INTEGER NOT NULL DEFAULT 0,
+      metadata BLOB,
+      step_payload BLOB
+    );
+  `);
+  convDb.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(0, 14, 3, Buffer.alloc(0), Buffer.alloc(0));
+  convDb.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(1, 15, 3, Buffer.alloc(0), Buffer.alloc(0));
+  convDb.close();
+
+  const provider = new AntigravityProvider({
+    env: {
+      ...process.env,
+      HOME: root,
+      USERPROFILE: root,
+      AGY_BIN: MOCK_AGY_BIN,
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
+    },
+  });
+  const hub = new ProviderHub({ dataDir, providers: [provider], enableQueueDrain: false });
+  await hub.init();
+  t.after(() => hub.close());
+
+  const events = [];
+  hub.subscribe((event, payload) => events.push({ event, payload }));
+  const compositeId = `antigravity:desktop:${convId}`;
+
+  await hub.setSettings({ agyAutoRetryAuth401: false });
+  await hub.sendTurn({ threadId: compositeId, text: "[AGY_PERMISSION]" });
+  const req = await waitFor(() => hub.pendingRequestsForThread(compositeId)[0]);
+
+  const err401 = buildTestErrorStepBlob({
+    userMessage: "Agent execution terminated due to error.",
+    shortError: "UNAUTHENTICATED (code 401): invalid_token",
+    fullError: "HTTP 401 Unauthorized",
+    tsSec: Math.floor(Date.now() / 1000) + 1,
+  });
+  const convDb2 = new DatabaseSync(convDbPath);
+  convDb2.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(
+    2, 17, 3, err401.metadata, err401.payload,
+  );
+  convDb2.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(
+    3, 101, 3, Buffer.alloc(0), Buffer.alloc(0),
+  );
+  convDb2.close();
+  const bumpTime = new Date(Date.now() + 2000);
+  await utimes(convDbPath, bumpTime, bumpTime);
+
+  await hub.respondToRequest(req.id, { decision: "acceptForSession" });
+  const doneEvt = await waitFor(() => events.find((e) => e.event === "provider_event" && e.payload?.type === "turn_completed"));
+  assert.equal(doneEvt.payload.status, "failed");
+  assert.equal(doneEvt.payload.stopReason, "error");
+  assert.match(doneEvt.payload.error?.message || "", /UNAUTHENTICATED \(code 401\)/);
+
+  const listed = await hub.listThreads({ provider: "antigravity" });
+  const threadRow = listed.threads.find((t) => t.id === compositeId);
+  assert.equal(threadRow?.lastTurnStatus, "failed");
+  assert.match(threadRow?.lastError || "", /UNAUTHENTICATED \(code 401\)/);
+});
+
+test("agyAutoRetryAuth401 setting persists and AntigravityProvider auto-continues once on transient 401 without looping", async (t) => {
+  assert.equal(
+    isTransientAntigravityAuth401Error({
+      message: "Agent execution terminated due to error.\nUNAUTHENTICATED (code 401): Request had invalid authentication credentials.",
+      detail: 'Www-Authenticate: Bearer realm="https://accounts.google.com/", error="invalid_token"',
+    }),
+    true,
+  );
+  assert.equal(isTransientAntigravityAuth401Error({ message: "RESOURCE_EXHAUSTED (code 429): Individual quota reached." }), false);
+  assert.equal(isTransientAntigravityAuth401Error({ message: "INVALID_ARGUMENT (code 400): bad media" }), false);
+  assert.equal(isTransientAntigravityAuth401Error({ message: "You are not logged into Antigravity." }), false);
+
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-agy-retry401-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const desktopDir = resolve(root, "desktop");
+  const dataDir = resolve(root, "data");
+  const promptLog = resolve(root, "prompts.jsonl");
+  const convRecover = "conv-retry401-ok";
+  const convStillFail = "conv-retry401-fail";
+
+  const setupConv = async (convId, title) => {
+    const logsDir = resolve(desktopDir, "brain", convId, ".system_generated", "logs");
+    const convDir = resolve(desktopDir, "conversations");
+    await Promise.all([
+      mkdir(logsDir, { recursive: true }),
+      mkdir(convDir, { recursive: true }),
+    ]);
+    const nowIso = new Date().toISOString();
+    const sdb = new DatabaseSync(resolve(desktopDir, "conversation_summaries.db"));
+    sdb.prepare("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      convId, title, title, 2, nowIso, JSON.stringify(["file:///tmp/mock-agy-project"]),
+      "CASCADE_RUN_STATUS_IDLE", "", "", 0, 0, "",
+    );
+    sdb.close();
+    await writeFile(
+      resolve(logsDir, "transcript.jsonl"),
+      [
+        JSON.stringify({ step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", created_at: nowIso, content: "初始化" }),
+        JSON.stringify({ step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", created_at: nowIso, content: "就绪" }),
+      ].join("\n") + "\n",
+    );
+    const dbPath = resolve(convDir, `${convId}.db`);
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE steps (
+        idx INTEGER PRIMARY KEY,
+        step_type INTEGER NOT NULL DEFAULT 0,
+        status INTEGER NOT NULL DEFAULT 0,
+        metadata BLOB,
+        step_payload BLOB
+      );
+    `);
+    db.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(0, 14, 3, Buffer.alloc(0), Buffer.alloc(0));
+    db.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(1, 15, 3, Buffer.alloc(0), Buffer.alloc(0));
+    db.close();
+    return dbPath;
+  };
+
+  await mkdir(desktopDir, { recursive: true });
+  await mkdir(dataDir, { recursive: true });
+  // Recreate summary db inside desktopDir properly after mkdir
+  const sumDbPath = resolve(desktopDir, "conversation_summaries.db");
+  const initSum = new DatabaseSync(sumDbPath);
+  initSum.exec(`
+    CREATE TABLE IF NOT EXISTS conversation_summaries (
+      conversation_id TEXT PRIMARY KEY,
+      title TEXT,
+      preview TEXT,
+      step_count INTEGER,
+      last_modified_time TEXT,
+      workspace_uris TEXT,
+      status TEXT,
+      source TEXT,
+      parent_conversation_id TEXT,
+      not_fully_idle INTEGER,
+      killed INTEGER,
+      app_data_dir TEXT
+    );
+  `);
+  initSum.close();
+
+  const dbPathOk = await setupConv(convRecover, "401 重试成功测试");
+  const dbPathFail = await setupConv(convStillFail, "401 重试仍失败测试");
+
+  const provider = new AntigravityProvider({
+    env: {
+      ...process.env,
+      HOME: root,
+      USERPROFILE: root,
+      AGY_BIN: MOCK_AGY_BIN,
+      MOCK_AGY_PROMPT_LOG: promptLog,
+      MOCK_AGY_ASK_PERMISSION_ON_CONTINUE: "1",
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
+    },
+  });
+  const hub = new ProviderHub({ dataDir, providers: [provider], enableQueueDrain: false });
+  await hub.init();
+  t.after(() => hub.close());
+
+  assert.equal(hub.getSettings().agyAutoRetryAuth401, true);
+  await hub.setSettings({ agyAutoRetryAuth401: false });
+  assert.equal(hub.getSettings().agyAutoRetryAuth401, false);
+  await hub.setSettings({ agyAutoRetryAuth401: true });
+  assert.equal(hub.getSettings().agyAutoRetryAuth401, true);
+
+  const directEvents = [];
+  const directPending = [];
+  const directProvider = new AntigravityProvider({
+    env: {
+      ...process.env,
+      HOME: root,
+      USERPROFILE: root,
+      AGY_BIN: MOCK_AGY_BIN,
+      MOCK_AGY_PROMPT_LOG: promptLog,
+      MOCK_AGY_ASK_PERMISSION_ON_CONTINUE: "1",
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
+    },
+    onEvent: (evt) => directEvents.push(evt),
+    onServerRequest: (req) => directPending.push(req),
+  });
+  t.after(() => directProvider.close());
+
+  // Case A: transient 401 followed by recovery after auto-continue
+  await directProvider.sendTurn({
+    profileId: "desktop",
+    rawId: convRecover,
+    cwd: root,
+    text: "[AGY_PERMISSION]",
+    autoRetryAuth401: { enabled: true, delayMs: 120 },
+  });
+  const reqA1 = await waitFor(() => directPending.shift());
+  const errA = buildTestErrorStepBlob({
+    userMessage: "Agent execution terminated due to error.",
+    shortError: "UNAUTHENTICATED (code 401): invalid_token",
+    fullError: "HTTP 401 Unauthorized",
+    tsSec: Math.floor(Date.now() / 1000) + 1,
+  });
+  const dbA = new DatabaseSync(dbPathOk);
+  dbA.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(2, 17, 3, errA.metadata, errA.payload);
+  dbA.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(3, 101, 3, Buffer.alloc(0), Buffer.alloc(0));
+  dbA.close();
+  await utimes(dbPathOk, new Date(Date.now() + 2000), new Date(Date.now() + 2000));
+  directProvider.respondServerRequest("desktop", reqA1, { decision: "accept" });
+
+  const reqA2 = await waitFor(() => directPending.shift());
+  const dbA2 = new DatabaseSync(dbPathOk);
+  dbA2.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(4, 15, 3, Buffer.alloc(0), Buffer.alloc(0));
+  dbA2.close();
+  await utimes(dbPathOk, new Date(Date.now() + 4000), new Date(Date.now() + 4000));
+  directProvider.respondServerRequest("desktop", reqA2, { decision: "accept" });
+
+  const doneA = await waitFor(() => directEvents.find((e) => e.rawId === convRecover && e.type === "turn_completed"));
+  assert.equal(doneA.status, "completed");
+
+  // Case B: persistent 401 retries at most once and emits failed turn_completed
+  await directProvider.sendTurn({
+    profileId: "desktop",
+    rawId: convStillFail,
+    cwd: root,
+    text: "[AGY_PERMISSION]",
+    autoRetryAuth401: { enabled: true, delayMs: 120 },
+  });
+  const reqB1 = await waitFor(() => directPending.shift());
+  const errB1 = buildTestErrorStepBlob({
+    userMessage: "Agent execution terminated due to error.",
+    shortError: "UNAUTHENTICATED (code 401): invalid_token",
+    fullError: "HTTP 401 Unauthorized",
+    tsSec: Math.floor(Date.now() / 1000) + 1,
+  });
+  const dbB = new DatabaseSync(dbPathFail);
+  dbB.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(2, 17, 3, errB1.metadata, errB1.payload);
+  dbB.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(3, 101, 3, Buffer.alloc(0), Buffer.alloc(0));
+  dbB.close();
+  await utimes(dbPathFail, new Date(Date.now() + 2000), new Date(Date.now() + 2000));
+  directProvider.respondServerRequest("desktop", reqB1, { decision: "accept" });
+
+  const reqB2 = await waitFor(() => directPending.shift());
+  const errB2 = buildTestErrorStepBlob({
+    userMessage: "Agent execution terminated due to error.",
+    shortError: "UNAUTHENTICATED (code 401): invalid_token",
+    fullError: "HTTP 401 Unauthorized (retry)",
+    tsSec: Math.floor(Date.now() / 1000) + 2,
+  });
+  const dbB2 = new DatabaseSync(dbPathFail);
+  dbB2.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(4, 17, 3, errB2.metadata, errB2.payload);
+  dbB2.prepare("INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)").run(5, 101, 3, Buffer.alloc(0), Buffer.alloc(0));
+  dbB2.close();
+  await utimes(dbPathFail, new Date(Date.now() + 4000), new Date(Date.now() + 4000));
+  directProvider.respondServerRequest("desktop", reqB2, { decision: "accept" });
+
+  const doneB = await waitFor(() => directEvents.find((e) => e.rawId === convStillFail && e.type === "turn_completed"));
+  assert.equal(doneB.status, "failed");
+  assert.match(doneB.error?.message || "", /UNAUTHENTICATED \(code 401\)/);
+
+  const loggedPrompts = (await readFile(promptLog, "utf8"))
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    loggedPrompts.filter((p) => p.sessionId === convRecover).map((p) => p.text),
+    ["[AGY_PERMISSION]", "继续"],
+  );
+  assert.deepEqual(
+    loggedPrompts.filter((p) => p.sessionId === convStillFail).map((p) => p.text),
+    ["[AGY_PERMISSION]", "继续"],
+  );
 });

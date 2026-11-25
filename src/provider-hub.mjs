@@ -21,14 +21,16 @@ import { createInflightTurnStore, inflightTurnsPath } from "./inflight-turns.mjs
 import { ExecutionStats } from "./execution-stats.mjs";
 import { ForkStore, buildForkContextPrompt, stripForkContextPrefix } from "./fork-store.mjs";
 import { createManagedProfile, deleteManagedProfile } from "./managed-profiles.mjs";
-import { isInternalVoiceCallThread } from "./thread-access.mjs";
+import { isInternalSubagentThread, isInternalVoiceCallThread } from "./thread-access.mjs";
 import { defaultDataDir } from "./instance-identity.mjs";
 import { CliMaintenanceManager } from "./providers/cli-maintenance.mjs";
 import { QoderProvider } from "./providers/qoder-provider.mjs";
 import { isTurboPermissionMode, normalizePermissionMode } from "./permissions.mjs";
 import { isSubpathOrEqual, isUserHomePath, resolveUserHome } from "./platform.mjs";
+import { readClaudeDesktopSessionsMeta } from "./providers/profile-discovery.mjs";
 import {
   classifyProfileError,
+  isCodexOfficialClientError,
   isIgnorableTurnError,
   normalizeProfileHealth,
   sortProfilesByHealth,
@@ -40,8 +42,15 @@ import {
   suggestFallbackDistinctAliases,
 } from "./profile-auto-alias.mjs";
 import { createQueuedTurnQueue, queuedTurnsPath } from "./queued-turns.mjs";
-import { createThreadMetaStore, threadMetaPath } from "./thread-meta-store.mjs";
-import { stripPromptNoise } from "./thread-display.mjs";
+import { SearchIndexService, splitSearchTerms } from "./search-index.mjs";
+import { createThreadMetaStore, normalizeProjectCwd, threadMetaPath } from "./thread-meta-store.mjs";
+import { DEFAULT_THREAD_TOOL_TEXT_CHARS, stripPromptNoise, truncateToolTextForRead } from "./thread-display.mjs";
+import {
+  isCanonicalDomainTitle,
+  resolveEffectiveTitleMeta,
+  stripForkAndContinueWrappers,
+  validateAgentBaseTitle,
+} from "./thread-title-policy.mjs";
 import { goalStatePath } from "./goal-controller.mjs";
 import { AntigravityProvider } from "./providers/antigravity-provider.mjs";
 import { ClaudeProvider } from "./providers/claude-provider.mjs";
@@ -64,7 +73,6 @@ function extractLastAgentMessageFromCodexParams(params) {
 const DEFAULT_SSE_INLINE_DATA_CHARS = 24 * 1024;
 const DEFAULT_THREAD_SINGLE_IMAGE_CHARS = 2_200_000;
 const DEFAULT_THREAD_TOTAL_IMAGE_CHARS = 4_200_000;
-const DEFAULT_THREAD_TOOL_TEXT_CHARS = 24 * 1024;
 const MAX_PREVIEW_IMAGE_BYTES = 32 * 1024 * 1024;
 const MAX_PREVIEW_OUTPUT_FILE_BYTES = 80 * 1024 * 1024;
 
@@ -452,15 +460,6 @@ export function capOversizedThreadInlineImages(thread, {
   return turnsChanged ? { ...thread, turns: nextTurns } : thread;
 }
 
-function truncateToolTextForRead(str, maxChars) {
-  if (typeof str !== "string" || str.length <= maxChars) return str;
-  const cleaned = str
-    .replace(/data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]{256,}/gi, "[图片Base64已省略]")
-    .replace(/"data"\s*:\s*"[A-Za-z0-9+/=\s]{4096,}"/g, '"data":"[Base64已省略]"');
-  if (cleaned.length <= maxChars) return cleaned;
-  return `${cleaned.slice(0, maxChars)}…[已省略 ${cleaned.length - maxChars} 字符]`;
-}
-
 /**
  * Cap oversized tool-call payloads on initial/summary thread reads (detail !== "full")
  * so megabyte-scale MCP/command outputs or JSON-wrapped base64 images don't bloat /api/thread.
@@ -561,6 +560,7 @@ export class ProviderHub {
   #queue;
   #pendingRequests = new Map();
   #activeTurns = new Map();
+  #threadLastErrors = new Map();
   #recoveringThreads = new Set();
   #startupRecoveryReady = true;
   #lastAssistantText = new Map();
@@ -590,6 +590,7 @@ export class ProviderHub {
   #autoMaintainClis = false;
   #cliUpdateStartupTimer = null;
   #cliUpdateIntervalTimer = null;
+  #searchIndex;
   #closed = false;
 
   constructor({
@@ -604,6 +605,7 @@ export class ProviderHub {
     cliMaintenance = null,
     autoMaintainClis = null,
     enableQueueDrain = true,
+    enableSearchIndex = null,
     callLightweightProfileAi = null,
   } = {}) {
     this.#env = env;
@@ -633,6 +635,12 @@ export class ProviderHub {
         const codex = this.#providers.get("codex");
         return typeof codex?.readRateLimits === "function"
           ? codex.readRateLimits(profile.id, opts)
+          : null;
+      },
+      claudeQuotaReader: (profile, opts) => {
+        const claude = this.#providers.get("claude");
+        return typeof claude?.readRateLimits === "function"
+          ? claude.readRateLimits(profile.id, opts)
           : null;
       },
     });
@@ -701,6 +709,16 @@ export class ProviderHub {
           });
         })();
       },
+    });
+
+    const searchEnabled = typeof enableSearchIndex === "boolean"
+      ? enableSearchIndex
+      : (Boolean(dataDir) && env.AGENT_CONTROL_DISABLE_SEARCH_INDEX !== "1");
+    this.#searchIndex = new SearchIndexService({
+      dataDir,
+      metaStore: this.#metaStore,
+      getProfileDescriptors: () => this.#collectSearchProfileDescriptors(),
+      enabled: searchEnabled,
     });
   }
 
@@ -948,8 +966,16 @@ export class ProviderHub {
         // Provider unavailable; fall through to queuing pending request.
       }
     }
-    if (req.kind === "userInput" && req.isPromptFollowUp && this.#pendingRequests.has(publicId)) {
-      return;
+    if (req.kind === "userInput" && req.isPromptFollowUp) {
+      for (const [existingId, entry] of [...this.#pendingRequests.entries()]) {
+        if (entry.threadId !== threadId) continue;
+        if (entry.publicRequest?.kind !== "userInput" || !entry.publicRequest?.isPromptFollowUp) continue;
+        if (existingId === publicId || (req.askSignature && entry.publicRequest?.askSignature === req.askSignature)) {
+          return;
+        }
+        this.#pendingRequests.delete(existingId);
+        this.#broadcast("server_request_resolved", { requestId: existingId, threadId });
+      }
     }
     const record = {
       ...req,
@@ -988,6 +1014,16 @@ export class ProviderHub {
     }
   }
 
+  #clearFollowUpUserInputRequestsForThread(threadId) {
+    if (!threadId) return;
+    for (const [reqId, entry] of [...this.#pendingRequests.entries()]) {
+      if (entry.threadId !== threadId) continue;
+      if (entry.publicRequest?.kind !== "userInput" || !entry.publicRequest?.isPromptFollowUp) continue;
+      this.#pendingRequests.delete(reqId);
+      this.#broadcast("server_request_resolved", { requestId: reqId, threadId });
+    }
+  }
+
   async #cancelPendingRequestsForThread(threadId) {
     for (const [reqId, entry] of [...this.#pendingRequests.entries()]) {
       if (entry.threadId !== threadId) continue;
@@ -1005,6 +1041,18 @@ export class ProviderHub {
   }
 
   #handleProviderEvent(evt) {
+    if (evt?.type === "ask_question_cleared") {
+      if (evt.threadId) this.#clearFollowUpUserInputRequestsForThread(evt.threadId);
+      return;
+    }
+
+    if (evt?.type === "rate_limit_updated") {
+      if (!this.#closed) {
+        void this.#broadcastProfilesUpdated({ refreshQuotas: true }).catch(() => null);
+      }
+      return;
+    }
+
     if (evt?.type === "profile_auth_updated") {
       const impl = this.#providers.get(evt.provider);
       void (async () => {
@@ -1036,6 +1084,7 @@ export class ProviderHub {
         }
       } else if (threadId && method === "turn/started") {
         this.#activeTurns.set(threadId, { turnId: params?.turn?.id || "", startedAt: Date.now() });
+        this.#threadLastErrors.delete(threadId);
         this.#lastAssistantText.delete(threadId);
       } else if (threadId && (method === "item/agentMessage/delta" || method === "codex/event/agent_message_content_delta")) {
         const delta = String(params?.delta || params?.msg?.delta || "");
@@ -1053,6 +1102,8 @@ export class ProviderHub {
       } else if (threadId && method === "turn/goal/updated" && params?.goalState) {
         void this.#goalController.syncExternal(threadId, { ...params.goalState, backend: "native" });
         this.#broadcast("goal_state", { threadId, goalState: params.goalState });
+      } else if (method === "error" && evt.provider === "codex" && evt.profileId && isCodexOfficialClientError(params?.error)) {
+        void this.#markCodexOfficialClientRestricted(evt.profileId, params.error);
       } else if (threadId && method === "turn/completed") {
         this.#activeTurns.delete(threadId);
         this.#inflightStore.clear(threadId);
@@ -1070,6 +1121,12 @@ export class ProviderHub {
           } else if (turnStatus === "completed") {
             void this.#recordProfileSuccess(evt.provider, evt.profileId);
           }
+        }
+        if (turnStatus === "failed") {
+          const errMsg = String(fatalError?.shortError || fatalError?.message || fatalError || "执行失败").trim();
+          this.#threadLastErrors.set(threadId, { message: errMsg, at: Math.floor(Date.now() / 1000) });
+        } else if (turnStatus === "completed" || turnStatus === "interrupted") {
+          this.#threadLastErrors.delete(threadId);
         }
         void this.#onTurnCompleted(threadId, {
           turnId: params?.turn?.id || "",
@@ -1098,6 +1155,7 @@ export class ProviderHub {
 
     if (evt.type === "turn_started" && threadId) {
       this.#activeTurns.set(threadId, { turnId: evt.turn?.id || "", startedAt: Date.now() });
+      this.#threadLastErrors.delete(threadId);
       this.#lastAssistantText.delete(threadId);
     } else if (evt.type === "stream_delta" && evt.delta && threadId) {
       if (evt.kind === "text") {
@@ -1126,6 +1184,12 @@ export class ProviderHub {
           void this.#recordProfileSuccess(evt.provider, evt.profileId);
         }
       }
+      if (normalizedStatus === "failed") {
+        const errMsg = String(fatalError?.shortError || fatalError?.message || fatalError || "执行失败").trim();
+        this.#threadLastErrors.set(threadId, { message: errMsg, at: Math.floor(Date.now() / 1000) });
+      } else if (normalizedStatus === "completed" || normalizedStatus === "interrupted") {
+        this.#threadLastErrors.delete(threadId);
+      }
       void this.#onTurnCompleted(threadId, {
         turnId: evt.turnId || "",
         status: normalizedStatus,
@@ -1142,14 +1206,17 @@ export class ProviderHub {
       }
     } else if (evt.type === "thread_updated" && threadId && evt.title) {
       const cleanTitle = stripPromptNoise(evt.title);
-      if (cleanTitle) {
+      const isPlaceholderTitle = /^(?:新会话|new chat|new session|untitled|未命名会话)$/i.test(cleanTitle);
+      if (cleanTitle && !isPlaceholderTitle) {
         const meta = this.#metaStore.get(threadId);
-        if (!meta?.customName) {
-          const prevCached = this.#threadTitleCache.get(threadId) || "";
+        const effState = resolveEffectiveTitleMeta(meta).state;
+        const prevCached = this.#threadTitleCache.get(threadId) || "";
+        const hasSettledCachedTitle = Boolean(
+          prevCached && !/^(?:新会话|new chat|new session|untitled|未命名会话)$/i.test(prevCached),
+        );
+        if (!meta?.customName && effState === "none" && !hasSettledCachedTitle) {
           this.#setCachedThreadTitle(threadId, cleanTitle);
-          if (cleanTitle !== prevCached) {
-            this.#broadcast("thread_renamed", { threadId, name: cleanTitle, auto: false });
-          }
+          this.#broadcast("thread_renamed", { threadId, name: cleanTitle, auto: false });
         }
       }
     }
@@ -1159,6 +1226,7 @@ export class ProviderHub {
 
   async #onTurnCompleted(threadId, summary) {
     this.#lastTurnUserText.delete(threadId);
+    this.#searchIndex?.markThreadDirty(threadId);
     const evalResult = await this.#goalController.evaluateAfterTurn(threadId, {
       lastAgentMessage: summary.lastAgentMessage,
       interrupted: summary.interrupted,
@@ -1228,8 +1296,8 @@ export class ProviderHub {
     return result;
   }
 
-  async #broadcastProfilesUpdated() {
-    const payload = await this.listProvidersAndProfiles();
+  async #broadcastProfilesUpdated({ refreshQuotas = false } = {}) {
+    const payload = await this.listProvidersAndProfiles({ refreshQuotas });
     this.#broadcast("profiles_updated", payload);
     return payload;
   }
@@ -1253,17 +1321,50 @@ export class ProviderHub {
     }
   }
 
+  #codexExecutionMode(profileId = "default") {
+    const meta = this.#metaStore.getProfileMeta(formatProfileKey("codex", profileId));
+    return meta?.codexExecMode ? "exec" : "app-server";
+  }
+
+  async #markCodexOfficialClientRestricted(profileId, error) {
+    if (this.#closed || !profileId) return;
+    const key = formatProfileKey("codex", profileId);
+    const prev = this.#metaStore.getProfileMeta(key);
+    if (prev?.codexExecSuggested && prev?.reasonCode === "official_client_only") return;
+    const classified = classifyProfileError(error);
+    await this.#metaStore.setProfileMeta(key, {
+      ...classified,
+      reasonCode: "official_client_only",
+      shortReason: "仅限官方CLI",
+      codexExecSuggested: true,
+      latencyMs: null,
+      checkedAt: Math.floor(Date.now() / 1000),
+    });
+    await this.#broadcastProfilesUpdated().catch(() => null);
+  }
+
   async #recordProfileFailure(provider, profileId, error, { broadcast = true } = {}) {
     if (this.#closed || !provider || !profileId || isIgnorableTurnError(error)) return;
     const key = formatProfileKey(provider, profileId);
     const prev = this.#metaStore.getProfileMeta(key);
     const classified = classifyProfileError(error);
-    await this.#metaStore.setProfileMeta(key, {
+    const patch = {
       ...classified,
+      ...(provider === "codex" && classified.reasonCode === "official_client_only"
+        ? { codexExecSuggested: true }
+        : {}),
       latencyMs: null,
       checkedAt: Math.floor(Date.now() / 1000),
-    });
-    if (broadcast && (prev?.status !== classified.status || prev?.reasonCode !== classified.reasonCode)) {
+    };
+    await this.#metaStore.setProfileMeta(key, patch);
+    if (
+      broadcast
+      && (
+        prev?.status !== classified.status
+        || prev?.reasonCode !== classified.reasonCode
+        || (patch.codexExecSuggested && !prev?.codexExecSuggested)
+      )
+    ) {
       await this.#broadcastProfilesUpdated().catch(() => null);
     }
   }
@@ -1584,7 +1685,7 @@ export class ProviderHub {
     return { ok: true, results, ...payload };
   }
 
-  async updateProfileMeta({ provider = "", profileId = "", disabled, alias } = {}) {
+  async updateProfileMeta({ provider = "", profileId = "", disabled, alias, codexExecMode, codexExecSuggested } = {}) {
     const cleanProvider = String(provider || "").trim();
     const cleanProfileId = String(profileId || "").trim();
     if (!cleanProvider || !cleanProfileId) {
@@ -1598,7 +1699,30 @@ export class ProviderHub {
       patch.alias = String(alias || "");
       patch.autoAliasSource = "manual";
     }
+    if (codexExecMode !== undefined) {
+      patch.codexExecMode = Boolean(codexExecMode);
+      if (patch.codexExecMode) {
+        const prev = this.#metaStore.getProfileMeta(key);
+        if (prev?.reasonCode === "official_client_only" && prev?.status === "unavailable") {
+          patch.status = "unknown";
+          patch.reasonCode = "";
+          patch.shortReason = "";
+          patch.detail = "";
+          patch.cooldownUntil = 0;
+        }
+      }
+    }
+    if (codexExecSuggested !== undefined) {
+      patch.codexExecSuggested = Boolean(codexExecSuggested);
+    }
     await this.#metaStore.setProfileMeta(key, patch);
+    if (cleanProvider === "codex" && patch.codexExecMode) {
+      const prefix = `codex:${cleanProfileId}:`;
+      const hasActiveTurn = [...this.#activeTurns.keys()].some((id) => String(id).startsWith(prefix));
+      if (!hasActiveTurn) {
+        await this.getProvider("codex")?.closeProfile?.(cleanProfileId).catch(() => {});
+      }
+    }
     const payload = await this.#broadcastProfilesUpdated();
     return { ok: true, key, ...payload };
   }
@@ -1781,9 +1905,43 @@ export class ProviderHub {
     const controlQueuedCount = this.#queue.list(titleResolved.id).length;
     const queuedCount = nativeQueuedCount + controlQueuedCount;
     const pendingCount = this.pendingRequestsForThread(titleResolved.id).length;
+    const isLive = Boolean(titleResolved.live || this.#activeTurns.has(titleResolved.id));
+    let lastTurnStatus = "";
+    let lastError = "";
+    let lastErrorAt = 0;
+    if (isLive) {
+      if (titleResolved.id) this.#threadLastErrors.delete(titleResolved.id);
+    } else {
+      const providerErrMsg = String(titleResolved.lastError || "").trim();
+      const providerFailed = titleResolved.lastTurnStatus === "failed" || Boolean(providerErrMsg);
+      const lastTurn = Array.isArray(titleResolved.turns) && titleResolved.turns.length
+        ? titleResolved.turns[titleResolved.turns.length - 1]
+        : null;
+      const historyClearedError = Boolean(lastTurn && lastTurn.status !== "failed");
+      if (providerFailed) {
+        lastTurnStatus = "failed";
+        lastError = providerErrMsg || "执行失败";
+        lastErrorAt = Number(titleResolved.lastErrorAt) || Number(titleResolved.updatedAt) || 0;
+      } else if (historyClearedError) {
+        if (titleResolved.id) this.#threadLastErrors.delete(titleResolved.id);
+      } else if (titleResolved.id && this.#threadLastErrors.has(titleResolved.id)) {
+        const memErr = this.#threadLastErrors.get(titleResolved.id);
+        const threadUpdated = Number(titleResolved.updatedAt) || 0;
+        if (threadUpdated > 0 && memErr.at > 0 && threadUpdated > memErr.at + 5) {
+          this.#threadLastErrors.delete(titleResolved.id);
+        } else {
+          lastTurnStatus = "failed";
+          lastError = memErr.message || "执行失败";
+          lastErrorAt = memErr.at || 0;
+        }
+      }
+    }
     return {
       ...titleResolved,
-      live: Boolean(titleResolved.live || this.#activeTurns.has(titleResolved.id)),
+      live: isLive,
+      lastTurnStatus,
+      lastError,
+      lastErrorAt,
       goalState,
       queuedCount,
       pendingCount,
@@ -1846,6 +2004,151 @@ export class ProviderHub {
       threads: filtered.slice(0, Math.max(1, Number(limit) || 300)),
       projectsMeta: this.#metaStore.listProjects(),
       warnings,
+    };
+  }
+
+  async #collectSearchProfileDescriptors() {
+    const descriptors = [];
+    for (const provider of this.providerList()) {
+      const profiles = await provider.listProfiles?.().catch(() => []) || [];
+      if (provider.id === "claude") {
+        const desktopMetas = new Map();
+        for (const p of profiles) {
+          if (p?.isDesktopInstance) {
+            const meta = await readClaudeDesktopSessionsMeta(p).catch(() => ({ claimedIds: new Set() }));
+            desktopMetas.set(p.id, meta.claimedIds || new Set());
+          }
+        }
+        for (const p of profiles) {
+          const histDir = p.historyDir || p.home || "";
+          const excludedIds = new Set();
+          let claimedIds = null;
+          if (p?.isDesktopInstance) {
+            claimedIds = [...(desktopMetas.get(p.id) || [])];
+          } else {
+            const resolvedHist = histDir ? resolve(histDir) : "";
+            for (const sibling of profiles) {
+              if (sibling.id === p.id || !sibling.isDesktopInstance) continue;
+              const sibHist = sibling.historyDir || sibling.home || "";
+              if (sibHist && resolve(sibHist) === resolvedHist) {
+                for (const cid of desktopMetas.get(sibling.id) || []) {
+                  excludedIds.add(cid);
+                }
+              }
+            }
+          }
+          descriptors.push({
+            provider: "claude",
+            profileId: p.id,
+            profileLabel: p.label || PROVIDER_LABELS.claude,
+            home: p.home || "",
+            historyDir: p.historyDir || p.home || "",
+            cliConfigDir: p.cliConfigDir || p.home || "",
+            ...(claimedIds ? { claimedIds } : {}),
+            ...(excludedIds.size > 0 ? { excludedIds: [...excludedIds] } : {}),
+          });
+        }
+        continue;
+      }
+
+      for (const p of profiles) {
+        descriptors.push({
+          provider: provider.id,
+          profileId: p.id,
+          profileLabel: p.label || PROVIDER_LABELS[provider.id] || provider.label,
+          home: p.home || p.grokHome || "",
+          profileType: p.profileType || p.id,
+          ...(provider.id === "qoder" ? { dataDir: this.#dataDir } : {}),
+        });
+      }
+    }
+    return descriptors;
+  }
+
+  startSearchIndex() {
+    this.#searchIndex?.start();
+  }
+
+  async syncSearchIndexNow() {
+    return this.#searchIndex ? this.#searchIndex.syncNow() : { ready: false, indexing: false };
+  }
+
+  getSearchIndexStatus() {
+    return this.#searchIndex ? this.#searchIndex.getStatus() : { ready: false, indexing: false };
+  }
+
+  async searchThreads({
+    query = "",
+    provider = "",
+    profileId = "",
+    archived = "0",
+    cwd = "",
+    limit = 60,
+  } = {}) {
+    await this.#metaStore.load().catch(() => {});
+    const projectsMeta = this.#metaStore.listProjects();
+    const res = this.#searchIndex
+      ? this.#searchIndex.search({ query, provider, profileId, archived, cwd, limit, projectsMeta })
+      : { query: String(query || ""), terms: splitSearchTerms(query), hits: [], indexStatus: { ready: false, indexing: false } };
+
+    const seenIds = new Set();
+    const threads = [];
+    for (const hit of res.hits || []) {
+      const base = hit.thread;
+      if (!base?.id || seenIds.has(base.id)) continue;
+      if (isInternalSubagentThread(base) || isInternalVoiceCallThread(base)) continue;
+      seenIds.add(base.id);
+      const enriched = this.#enrichThread(base);
+      if (archived === "0" && enriched.archived) continue;
+      if (archived === "1" && !enriched.archived) continue;
+      threads.push({
+        ...enriched,
+        searchMatch: hit.searchMatch,
+      });
+    }
+
+    const terms = res.terms || [];
+    const normFilterCwd = cwd ? (normalizeProjectCwd(cwd) || cwd) : "";
+    if (terms.length > 0) {
+      const lowerTerms = terms.map((t) => t.toLowerCase());
+      for (const forkEntry of this.#forkStore.listPending()) {
+        if (!forkEntry?.id || seenIds.has(forkEntry.id)) continue;
+        if (provider && provider !== "all" && forkEntry.provider !== provider) continue;
+        if (profileId && profileId !== "all" && forkEntry.profileId !== profileId) continue;
+        const enriched = this.#enrichThread(forkEntry);
+        if (archived === "0" && enriched.archived) continue;
+        if (archived === "1" && !enriched.archived) continue;
+        const normCwd = normalizeProjectCwd(enriched.cwd) || enriched.cwd;
+        if (normFilterCwd && normCwd !== normFilterCwd) continue;
+        const alias = String(projectsMeta?.[normCwd]?.alias || "").trim();
+        const hay = [
+          enriched.title,
+          enriched.preview,
+          enriched.cwd,
+          alias,
+          enriched.provider,
+          enriched.profileLabel,
+        ].join(" ").toLowerCase();
+        if (lowerTerms.every((t) => hay.includes(t))) {
+          seenIds.add(enriched.id);
+          threads.unshift({
+            ...enriched,
+            searchMatch: {
+              matchSource: "meta",
+              matchRole: "",
+              matchSnippet: "",
+              matchCount: 1,
+            },
+          });
+        }
+      }
+    }
+
+    return {
+      query: res.query,
+      terms,
+      threads: threads.slice(0, Math.max(1, Number(limit) || 60)),
+      indexStatus: res.indexStatus,
     };
   }
 
@@ -2100,6 +2403,9 @@ export class ProviderHub {
 
   async readThread(compositeId, { cursor = null, detail = "auto", limit = 20 } = {}) {
     const forkDraft = this.#forkStore.get(compositeId);
+    if (forkDraft?.materializedThreadId) {
+      return this.readThread(forkDraft.materializedThreadId, { cursor, detail, limit });
+    }
     if (forkDraft && !forkDraft.materializedThreadId) {
       const enriched = this.#enrichThread({
         ...forkDraft,
@@ -2172,6 +2478,9 @@ export class ProviderHub {
 
   async getActivity(compositeId, { cursor = null } = {}) {
     const forkDraft = this.#forkStore.get(compositeId);
+    if (forkDraft?.materializedThreadId) {
+      return this.getActivity(forkDraft.materializedThreadId, { cursor });
+    }
     if (forkDraft && !forkDraft.materializedThreadId) {
       return {
         live: false,
@@ -2300,6 +2609,8 @@ export class ProviderHub {
         model,
         effort,
         permissionMode: cleanPerm,
+        ...(provider === "codex" ? { executionMode: this.#codexExecutionMode(profileId) } : {}),
+        ...(provider === "antigravity" ? { autoRetryAuth401: this.#agyAutoRetryAuth401Enabled() } : {}),
       });
     } catch (error) {
       void this.#recordProfileFailure(provider, profileId, error);
@@ -2430,7 +2741,19 @@ export class ProviderHub {
     const keptTurns = cutIndex >= 0 ? turns.slice(0, cutIndex + 1) : [];
     const isTruncated = cutIndex >= 0 && cutIndex < turns.length - 1;
     const lastTurnId = String(keptTurns[keptTurns.length - 1]?.id || "");
-    const baseName = String(origThread.name || origThread.title || "新会话").replace(/\s*\(分叉(?:\s*\d+)?\)\s*$/i, "").trim() || "新会话";
+    const origMeta = this.#metaStore.get(cleanThreadId);
+    const origEff = resolveEffectiveTitleMeta(origMeta);
+    const rawBaseName = origEff.base || origThread.name || origThread.title || "新会话";
+    const baseName = stripForkAndContinueWrappers(rawBaseName) || "新会话";
+    const isGoodInherited = Boolean(
+      origEff.state === "user"
+      || origEff.source === "domain"
+      || isCanonicalDomainTitle(baseName)
+      || validateAgentBaseTitle(baseName).ok,
+    );
+    const inheritedSource = origEff.state === "user"
+      ? "user"
+      : (origEff.source === "domain" ? "domain" : "fork");
     const parsed = parseCompositeThreadId(cleanThreadId);
     const providerId = targetProvider || parsed.provider;
     const provider = this.getProvider(providerId);
@@ -2463,7 +2786,12 @@ export class ProviderHub {
           permissionMode: origThread.permissionMode || "workspace",
         });
         if (nativeRes?.thread?.id) {
-          await this.#metaStore.setCustomName(nativeRes.thread.id, forkName);
+          await this.#metaStore.setForkInheritedName(nativeRes.thread.id, forkName, {
+            inheritedBase: baseName,
+            suffixes: origEff.suffixes,
+            lock: isGoodInherited,
+            source: inheritedSource,
+          });
           await this.#metaStore.setThreadPrefs(nativeRes.thread.id, {
             ...(origThread.cwd ? { cwd: origThread.cwd } : {}),
             ...(origThread.model ? { model: origThread.model } : {}),
@@ -2495,7 +2823,12 @@ export class ProviderHub {
       },
       turns: keptTurns,
     });
-    await this.#metaStore.setCustomName(forkEntry.id, forkName);
+    await this.#metaStore.setForkInheritedName(forkEntry.id, forkName, {
+      inheritedBase: baseName,
+      suffixes: origEff.suffixes,
+      lock: isGoodInherited,
+      source: inheritedSource,
+    });
     await this.#metaStore.setThreadPrefs(forkEntry.id, {
       ...(origThread.cwd ? { cwd: origThread.cwd } : {}),
       ...(forkEntry.model ? { model: forkEntry.model } : {}),
@@ -2524,6 +2857,29 @@ export class ProviderHub {
     resumeAttempts = 0,
   } = {}) {
     const forkDraft = this.#forkStore.get(threadId);
+    if (forkDraft?.materializedThreadId) {
+      const redirected = await this.sendTurn({
+        threadId: forkDraft.materializedThreadId,
+        cwd,
+        text,
+        images,
+        model,
+        effort,
+        permissionMode,
+        steer,
+        expectedTurnId,
+        runMode,
+        goalMode,
+        writerConflictPolicy,
+        isSystemResume,
+        resumeAttempts,
+      });
+      return {
+        ...redirected,
+        forkedFromId: threadId,
+        redirectedThreadId: forkDraft.materializedThreadId,
+      };
+    }
     if (forkDraft && !forkDraft.materializedThreadId) {
       const promptWithContext = buildForkContextPrompt(forkDraft.prefixTurns || [], text);
       const started = await this.startThread({
@@ -2539,9 +2895,17 @@ export class ProviderHub {
         goalMode,
       });
       if (started?.thread?.id) {
-        const displayName = this.#metaStore.get(threadId)?.customName || forkDraft.name;
+        const draftMeta = this.#metaStore.get(threadId);
+        const draftEff = resolveEffectiveTitleMeta(draftMeta);
+        const displayName = draftMeta?.customName || forkDraft.name;
         if (displayName) {
-          await this.#metaStore.setCustomName(started.thread.id, displayName);
+          const cleanBase = draftEff.base || stripForkAndContinueWrappers(displayName) || displayName;
+          await this.#metaStore.setForkInheritedName(started.thread.id, displayName, {
+            inheritedBase: cleanBase,
+            suffixes: draftEff.suffixes,
+            lock: draftEff.state === "locked" || draftEff.state === "user",
+            source: draftEff.source || "fork",
+          });
           started.thread.name = displayName;
           started.thread.title = displayName;
         }
@@ -2571,6 +2935,9 @@ export class ProviderHub {
       ...(effectiveEffort ? { reasoningEffort: effectiveEffort } : {}),
       permissionMode: cleanPerm,
     });
+    if (!isSystemResume && cleanText) {
+      await this.#metaStore.recordUserTurnForTitle(threadId);
+    }
     if (isTurboPermissionMode(cleanPerm)) {
       await this.#autoApprovePendingPermissions(threadId);
     }
@@ -2593,6 +2960,7 @@ export class ProviderHub {
       this.#lastTurnUserText.set(threadId, cleanText);
     }
     let res;
+    this.#threadLastErrors.delete(threadId);
     try {
       res = await provider.sendTurn({
         profileId: parsed.profileId,
@@ -2606,7 +2974,11 @@ export class ProviderHub {
         steer,
         expectedTurnId,
         writerConflictPolicy,
-        ...(parsed.provider === "antigravity" ? { autoCompact: this.#agyAutoCompactOptions() } : {}),
+        ...(parsed.provider === "codex" ? { executionMode: this.#codexExecutionMode(parsed.profileId) } : {}),
+        ...(parsed.provider === "antigravity" ? {
+          autoCompact: this.#agyAutoCompactOptions(),
+          autoRetryAuth401: this.#agyAutoRetryAuth401Enabled(),
+        } : {}),
       });
     } catch (error) {
       if (!isSystemResume && cleanText) {
@@ -2616,6 +2988,7 @@ export class ProviderHub {
       void this.#recordProfileFailure(parsed.provider, parsed.profileId, error);
       throw error;
     }
+    this.#clearFollowUpUserInputRequestsForThread(threadId);
     if (!res.steered) this.#executionStats.context(threadId, res.turn?.id || "", {
       model: effectiveModel || res.thread?.model || "", effort: effectiveEffort || res.thread?.reasoningEffort || "",
       internal: isInternalVoiceCallThread({ cwd: res.thread?.cwd || effectiveCwd, preview: cleanText }),
@@ -2885,17 +3258,51 @@ export class ProviderHub {
     throw Object.assign(new Error(`未找到匹配的会话: ${cleanRaw}`), { status: 404 });
   }
 
-  async renameThread(compositeId, name) {
+  async renameThread(compositeId, name, { source = "user", action = "set", suffix = "", lock = false } = {}) {
     const parsed = parseCompositeThreadId(compositeId);
-    const meta = await this.#metaStore.setCustomName(compositeId, name);
-    this.#setCachedThreadTitle(compositeId, meta.customName);
-    await this.#forkStore.rename(compositeId, meta.customName);
+    const result = await this.#metaStore.applyThreadTitleMutation(compositeId, {
+      source,
+      action,
+      name,
+      suffix,
+      lock,
+    });
+    if (result.skipped) {
+      return {
+        ok: true,
+        threadId: compositeId,
+        skipped: true,
+        locked: Boolean(result.locked),
+        reason: result.reason,
+        name: result.name,
+        titleState: result.titleState,
+        base: result.base,
+        suffixes: result.suffixes,
+      };
+    }
+    this.#setCachedThreadTitle(compositeId, result.name);
+    this.#searchIndex?.updateThreadMeta(compositeId, { title: result.name });
+    await this.#forkStore.rename(compositeId, result.name);
     const provider = this.getProvider(parsed.provider);
     if (!this.#forkStore.get(compositeId)) {
-      await provider.renameThread?.(parsed.profileId, parsed.rawId, meta.customName).catch(() => {});
+      await provider.renameThread?.(parsed.profileId, parsed.rawId, result.name).catch(() => {});
     }
-    this.#broadcast("thread_renamed", { threadId: compositeId, name: meta.customName });
-    return { ok: true, threadId: compositeId, name: meta.customName };
+    this.#broadcast("thread_renamed", {
+      threadId: compositeId,
+      name: result.name,
+      auto: source !== "user",
+      titleState: result.titleState,
+    });
+    return {
+      ok: true,
+      threadId: compositeId,
+      skipped: false,
+      locked: result.titleState === "locked" || result.titleState === "user",
+      name: result.name,
+      titleState: result.titleState,
+      base: result.titleMeta?.base || result.name,
+      suffixes: result.titleMeta?.suffixes || [],
+    };
   }
 
   async pinThread(compositeId, pinned = true) {
@@ -2916,6 +3323,11 @@ export class ProviderHub {
       enabled: settings.agyAutoCompact !== false,
       thresholdTokens: settings.agyAutoCompactTokens,
     };
+  }
+
+  #agyAutoRetryAuth401Enabled() {
+    const settings = this.#metaStore.getSettings?.() || {};
+    return settings.agyAutoRetryAuth401 !== false;
   }
 
   async setSettings(patch = {}) {
@@ -2972,6 +3384,7 @@ export class ProviderHub {
     await this.#metaStore.setArchivedMany(cleanIds, nextArchived);
     for (const id of cleanIds) {
       await this.#forkStore.archive(id, nextArchived);
+      this.#searchIndex?.updateThreadMeta(id, { archived: nextArchived });
     }
 
     const syncNative = async () => {
@@ -3044,6 +3457,7 @@ export class ProviderHub {
       this.#inflightStore.flush(),
       this.#metaStore.flush(),
       this.#goalController.flush(),
+      this.#searchIndex?.close().catch(() => {}),
       ...this.providerList().map((p) => p.close?.().catch(() => {})),
     ]);
     await this.#executionStats.flush();

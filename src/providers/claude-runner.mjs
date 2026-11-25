@@ -720,6 +720,20 @@ export class ClaudeTurnManager extends EventEmitter {
         return;
       }
 
+      if (msg.type === "rate_limit_event") {
+        const rateLimitInfo = msg.rate_limit_info && typeof msg.rate_limit_info === "object"
+          ? msg.rate_limit_info
+          : msg;
+        this.emit("rateLimitEvent", {
+          profileId,
+          rawId,
+          turnId,
+          rateLimitInfo,
+          observedAtMs: Date.now(),
+        });
+        return;
+      }
+
       if (msg.type === "result") {
         run.resultSeen = true;
         if (typeof msg.result === "string" && msg.result) {
@@ -1034,11 +1048,12 @@ export async function probeClaudeProfile({
   timeoutMs = 12_000,
   model = "claude-haiku-4-5",
   profile = null,
+  sendMessage = false,
 } = {}) {
   const started = Date.now();
   const hasGateway = configDir ? await hasClaudeGatewayEnvConfig(configDir) : false;
 
-  if (!hasGateway) {
+  if (!hasGateway && !sendMessage) {
     const auth = await readClaudeCliAuthStatus({
       configDir,
       env,
@@ -1109,6 +1124,7 @@ export async function probeClaudeProfile({
   return new Promise((resolveProbe, rejectProbe) => {
     let settled = false;
     let resultEvent = null;
+    let rateLimitInfo = null;
     const stderrTail = [];
     const timer = setTimeout(() => {
       if (settled) return;
@@ -1125,6 +1141,7 @@ export async function probeClaudeProfile({
       resolveProbe({
         ok: true,
         latencyMs: Math.max(1, Date.now() - started),
+        rateLimitInfo,
       });
     };
 
@@ -1140,7 +1157,11 @@ export async function probeClaudeProfile({
       if (!line.trim()) return;
       try {
         const msg = JSON.parse(line);
-        if (msg?.type === "result") {
+        if (msg?.type === "rate_limit_event") {
+          rateLimitInfo = msg.rate_limit_info && typeof msg.rate_limit_info === "object"
+            ? msg.rate_limit_info
+            : msg;
+        } else if (msg?.type === "result") {
           resultEvent = msg;
           if (msg.is_error || msg.subtype === "error_during_execution") {
             finishErr(msg.result || msg.error || "Claude 返回错误");

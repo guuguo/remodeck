@@ -5,6 +5,7 @@ import {
   computePerspectiveRigPose,
   readTycoonVisualPrefs,
   resolveLabelCollisionLayout,
+  resolveTycoonThemeTuning,
   resolveWorkstationLodMode,
   shortestAngleDelta,
   writeTycoonVisualPrefs,
@@ -122,4 +123,37 @@ test("renderTycoonHudHtml includes visual toggles and Space pending shortcut hin
   assert.match(html, /data-tycoon-toggle-vis="bloom"/);
   assert.match(html, /泛光/);
   assert.match(html, /tycoon-space-kbd">Space<\/kbd>/);
+});
+
+test("resolveTycoonThemeTuning preserves dark mode baseline and prevents light mode overexposure", () => {
+  const dark = resolveTycoonThemeTuning("dark");
+  assert.deepEqual(dark.post, {
+    exposure: 1.15,
+    bloomThr: 0.78,
+    bloomKnee: 0.58,
+    bloomStrength: 0.8,
+    vignette: 0.42,
+  });
+  assert.deepEqual(dark.lights, {
+    hemiSky: 0x7f9cd6,
+    hemiGround: 0x0a1410,
+    hemiIntensity: 0.5,
+    keyColor: 0xc7d8ff,
+    keyIntensity: 1.5,
+    rimColor: 0x60a5fa,
+    rimIntensity: 1.5,
+  });
+
+  const light = resolveTycoonThemeTuning("light");
+  assert.ok(light.post.exposure < 1.0, `expected light exposure < 1.0, got ${light.post.exposure}`);
+  assert.ok(light.post.bloomThr >= 1.3, `expected light bloomThr >= 1.3, got ${light.post.bloomThr}`);
+  assert.ok(light.post.bloomStrength <= 0.2, `expected light bloomStrength <= 0.2, got ${light.post.bloomStrength}`);
+  assert.ok(light.lights.hemiIntensity <= 0.4, `expected light hemiIntensity <= 0.4, got ${light.lights.hemiIntensity}`);
+  assert.ok(
+    light.lights.keyIntensity / light.lights.hemiIntensity >= 5,
+    `expected key/hemi contrast >= 5, got ${light.lights.keyIntensity / light.lights.hemiIntensity}`,
+  );
+  for (const rgb of light.env.softboxes) {
+    assert.ok(rgb.every((c) => c <= 1.5), `expected light softbox RGB <= 1.5, got ${rgb}`);
+  }
 });

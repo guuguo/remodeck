@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { formatCompositeThreadId } from "../composite-id.mjs";
 import { resolveUserHome } from "../platform.mjs";
@@ -52,6 +52,72 @@ function applescriptQuote(value) {
   return `"${String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+function normalizeClaudeWindowSnapshot(raw, observedAtMs = null) {
+  if (!raw || typeof raw !== "object") return null;
+  const out = {};
+  if (typeof raw.status === "string" && raw.status.trim()) out.status = raw.status.trim();
+  if (typeof raw.rateLimitType === "string" && raw.rateLimitType.trim()) out.rateLimitType = raw.rateLimitType.trim();
+  const resetsNum = Number(raw.resetsAt);
+  if (Number.isFinite(resetsNum) && resetsNum > 0) out.resetsAt = resetsNum;
+  const utilNum = Number(raw.utilization);
+  if (Number.isFinite(utilNum)) out.utilization = utilNum;
+  const remNum = Number(raw.remainingPercent);
+  if (Number.isFinite(remNum)) out.remainingPercent = remNum;
+  const obsNum = Number(raw.observedAtMs ?? observedAtMs);
+  if (Number.isFinite(obsNum) && obsNum > 0) out.observedAtMs = obsNum;
+  const hasQuotaSignal = Boolean(
+    out.status
+    || out.resetsAt !== undefined
+    || out.utilization !== undefined
+    || out.remainingPercent !== undefined,
+  );
+  return hasQuotaSignal ? out : null;
+}
+
+export function normalizeClaudeRateLimitInfo(raw, observedAtMs = Date.now()) {
+  if (!raw || typeof raw !== "object") return null;
+  const src = raw.rate_limit_info && typeof raw.rate_limit_info === "object"
+    ? raw.rate_limit_info
+    : raw;
+  const uw = src.unifiedWindows && typeof src.unifiedWindows === "object" ? src.unifiedWindows : null;
+
+  let fiveHour = uw?.five_hour ? normalizeClaudeWindowSnapshot(uw.five_hour, observedAtMs) : null;
+  let sevenDay = (uw?.seven_day || uw?.weekly)
+    ? normalizeClaudeWindowSnapshot(uw.seven_day || uw.weekly, observedAtMs)
+    : null;
+
+  const single = normalizeClaudeWindowSnapshot(src, observedAtMs);
+  if (single) {
+    const rType = String(src.rateLimitType || "").toLowerCase();
+    if (rType === "seven_day" || rType === "weekly") {
+      if (!sevenDay) sevenDay = single;
+    } else if (!fiveHour) {
+      fiveHour = single;
+    }
+  }
+
+  if (!fiveHour && !sevenDay) return null;
+
+  const normalized = {};
+  if (typeof src.status === "string" && src.status.trim()) normalized.status = src.status.trim();
+  if (typeof src.rateLimitType === "string" && src.rateLimitType.trim()) normalized.rateLimitType = src.rateLimitType.trim();
+  const resetsNum = Number(src.resetsAt);
+  if (Number.isFinite(resetsNum) && resetsNum > 0) normalized.resetsAt = resetsNum;
+  const utilNum = Number(src.utilization);
+  if (Number.isFinite(utilNum)) normalized.utilization = utilNum;
+  const remNum = Number(src.remainingPercent);
+  if (Number.isFinite(remNum)) normalized.remainingPercent = remNum;
+  if (fiveHour || sevenDay) {
+    normalized.unifiedWindows = {
+      ...(fiveHour ? { five_hour: fiveHour } : {}),
+      ...(sevenDay ? { seven_day: sevenDay } : {}),
+    };
+  }
+  return { normalized, fiveHour, sevenDay };
+}
+
+const CLAUDE_QUOTA_PROBE_MIN_INTERVAL_MS = 5 * 60 * 1000;
+
 export class ClaudeProvider {
   id = "claude";
   label = "Claude Code";
@@ -62,6 +128,10 @@ export class ClaudeProvider {
   #profiles = [];
   #knownSessions = new Map();
   #defaultModelByProfile = new Map();
+  #rateLimitsByProfile = new Map();
+  #quotaProbeInflight = new Map();
+  #rateLimitsLoaded = false;
+  #rateLimitsLoadPromise = null;
   #onEvent;
   #onServerRequest;
 
@@ -181,6 +251,10 @@ export class ClaudeProvider {
       });
     });
 
+    this.#runner.on("rateLimitEvent", ({ profileId, rateLimitInfo, observedAtMs }) => {
+      void this.#recordRateLimitEvent(profileId, rateLimitInfo, observedAtMs);
+    });
+
     this.#runner.on("turnCompleted", ({ profileId, rawId, turnId, status, lastAgentMessage, error, durationMs, result }) => {
       this.#onEvent({
         type: "turn_completed",
@@ -196,6 +270,134 @@ export class ClaudeProvider {
         usage: result?.usage || null,
       });
     });
+  }
+
+  #rateLimitsFilePath() {
+    return this.#dataDir ? resolve(this.#dataDir, "claude-rate-limits.json") : "";
+  }
+
+  async #ensureRateLimitsLoaded() {
+    if (this.#rateLimitsLoaded) return;
+    if (this.#rateLimitsLoadPromise) {
+      await this.#rateLimitsLoadPromise;
+      return;
+    }
+    this.#rateLimitsLoadPromise = (async () => {
+      const filePath = this.#rateLimitsFilePath();
+      if (!filePath) {
+        this.#rateLimitsLoaded = true;
+        return;
+      }
+      try {
+        const raw = await readFile(filePath, "utf8");
+        const parsed = JSON.parse(raw);
+        const byProfile = parsed?.profiles && typeof parsed.profiles === "object" ? parsed.profiles : null;
+        if (byProfile) {
+          for (const [profileId, entry] of Object.entries(byProfile)) {
+            if (!profileId || !entry || typeof entry !== "object" || this.#rateLimitsByProfile.has(profileId)) continue;
+            const entryMs = Number(entry.updatedAtMs) || (Number(entry.updatedAt) ? Number(entry.updatedAt) * 1000 : Date.now());
+            const fiveHour = normalizeClaudeWindowSnapshot(entry.fiveHour, entryMs);
+            const sevenDay = normalizeClaudeWindowSnapshot(entry.sevenDay, entryMs);
+            const normInfo = normalizeClaudeRateLimitInfo(entry.rateLimitInfo, entryMs)?.normalized
+              || { unifiedWindows: { ...(fiveHour ? { five_hour: fiveHour } : {}), ...(sevenDay ? { seven_day: sevenDay } : {}) } };
+            if (fiveHour || sevenDay) {
+              this.#rateLimitsByProfile.set(profileId, {
+                fiveHour,
+                sevenDay,
+                rateLimitInfo: normInfo,
+                updatedAtMs: entryMs,
+                updatedAt: Math.floor(entryMs / 1000),
+                source: "claude-cli-stream",
+              });
+            }
+          }
+        }
+      } catch {
+        // Ignore missing or corrupt persisted quota cache.
+      } finally {
+        this.#rateLimitsLoaded = true;
+      }
+    })();
+    await this.#rateLimitsLoadPromise;
+  }
+
+  async #persistRateLimits() {
+    const filePath = this.#rateLimitsFilePath();
+    if (!filePath) return;
+    try {
+      await mkdir(dirname(filePath), { recursive: true });
+      const payload = {
+        version: 1,
+        updatedAt: Math.floor(Date.now() / 1000),
+        profiles: Object.fromEntries(this.#rateLimitsByProfile.entries()),
+      };
+      const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+      await writeFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+      await rename(tmpPath, filePath);
+    } catch {
+      // Persistence errors must never interrupt CLI execution.
+    }
+  }
+
+  async #recordRateLimitEvent(profileId, rawInfo, observedAtMs = Date.now()) {
+    if (!profileId || !rawInfo || typeof rawInfo !== "object") return null;
+    await this.#ensureRateLimitsLoaded();
+    const tsMs = Number.isFinite(Number(observedAtMs)) && Number(observedAtMs) > 0
+      ? Number(observedAtMs)
+      : Date.now();
+    const nowSec = Math.floor(tsMs / 1000);
+    const parsed = normalizeClaudeRateLimitInfo(rawInfo, tsMs);
+    if (!parsed) return null;
+
+    const prev = this.#rateLimitsByProfile.get(profileId) || null;
+    const prevFiveHour = prev?.fiveHour && (!prev.fiveHour.resetsAt || prev.fiveHour.resetsAt > nowSec)
+      ? prev.fiveHour
+      : null;
+    const prevSevenDay = prev?.sevenDay && (!prev.sevenDay.resetsAt || prev.sevenDay.resetsAt > nowSec)
+      ? prev.sevenDay
+      : null;
+
+    const fiveHour = parsed.fiveHour || prevFiveHour;
+    const sevenDay = parsed.sevenDay || prevSevenDay;
+    const mergedUnified = {
+      ...(fiveHour ? { five_hour: fiveHour } : {}),
+      ...(sevenDay ? { seven_day: sevenDay } : {}),
+    };
+    const entry = {
+      fiveHour,
+      sevenDay,
+      rateLimitInfo: {
+        ...parsed.normalized,
+        unifiedWindows: mergedUnified,
+      },
+      updatedAtMs: tsMs,
+      updatedAt: nowSec,
+      source: "claude-cli-stream",
+    };
+    this.#rateLimitsByProfile.set(profileId, entry);
+    await this.#persistRateLimits();
+    this.#onEvent({
+      type: "rate_limit_updated",
+      provider: "claude",
+      profileId,
+      observedAtMs: tsMs,
+    });
+    return entry;
+  }
+
+  async readRateLimits(profileId = "default", { refresh = false } = {}) {
+    await this.#ensureRateLimitsLoaded();
+    const cached = this.#rateLimitsByProfile.get(profileId) || null;
+    const staleMs = Date.now() - (Number(cached?.updatedAtMs) || 0);
+    if (refresh && staleMs > CLAUDE_QUOTA_PROBE_MIN_INTERVAL_MS) {
+      // 登录态测通不发消息，拿不到 rate_limit_event；手动刷新额度时发一条最小请求补采。
+      const profile = await this.#getProfile(profileId).catch(() => null);
+      if (profile) {
+        await this.#quotaProbeInflight.get(profileId)
+          ?? await this.#probeQuota(profile);
+      }
+    }
+    return this.#rateLimitsByProfile.get(profileId) || cached;
   }
 
   async refreshProfiles() {
@@ -346,14 +548,35 @@ export class ClaudeProvider {
     }));
   }
 
+  #probeQuota(profile) {
+    const task = probeClaudeProfile({
+      configDir: this.#configDirFor(profile),
+      env: this.#env,
+      timeoutMs: 20_000,
+      profile,
+      sendMessage: true,
+    })
+      .then((res) => (res?.rateLimitInfo
+        ? this.#recordRateLimitEvent(profile.id, res.rateLimitInfo, Date.now())
+        : null))
+      .catch(() => null)
+      .finally(() => this.#quotaProbeInflight.delete(profile.id));
+    this.#quotaProbeInflight.set(profile.id, task);
+    return task;
+  }
+
   async probeProfile(profileId = "default", { timeoutMs = 12_000 } = {}) {
     const profile = await this.#getProfile(profileId);
-    return probeClaudeProfile({
+    const res = await probeClaudeProfile({
       configDir: this.#configDirFor(profile),
       env: this.#env,
       timeoutMs,
       profile,
     });
+    if (res?.rateLimitInfo) {
+      await this.#recordRateLimitEvent(profile.id, res.rateLimitInfo, Date.now());
+    }
+    return res;
   }
 
   #normalizeThread(profile, summary) {

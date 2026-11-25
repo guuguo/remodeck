@@ -106,9 +106,11 @@ import {
 import {
   THREAD_EXPAND_STEP,
   buildProjectGroups,
+  compactThreadErrorSummary,
   computeProjectGroupSelectionState,
   dedupeThreadPreview,
   isSameProjectCwd,
+  isThreadFailed,
   isUserHomeCwd,
   normalizeProjectCwd,
   partitionSidebarProjectGroups,
@@ -1369,6 +1371,7 @@ test("compact mobile visual helpers and index.html preserve all existing IDs and
     "autoUpdateCliToggle",
     "agyAutoCompactToggle",
     "agyAutoCompactTokensSelect",
+    "agyAutoRetryAuth401Toggle",
     "cliUpdateCard",
     "checkCliUpdatesBtn",
     "cliVersionsList",
@@ -2746,7 +2749,7 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     nowMs: nowSec * 1000,
     searchText: "旧副标题",
   });
-  assert.match(searchSidebarHtml, /class="thread-item-sub "[^>]*>额外旧副标题关键词</);
+  assert.match(searchSidebarHtml, /class="thread-item-sub "[^>]*>额外<mark class="search-hit-mark">旧副标题<\/mark>关键词</);
 });
 
 test("markdown renders GFM tables, headerless pipe tables, alerts, task lists, nested lists, math, details, copyable code, and blocks XSS", () => {
@@ -4171,10 +4174,70 @@ test("renderTurnHtml, cleanStreamingAgentText, and markdown bare URLs handle hea
     renderTurnHtml,
   } = await import("../public/markdown.js");
 
-  // 1. Bare URL stops cleanly before CJK fullwidth comma/text
+  // 1. Bare URL stops cleanly before CJK fullwidth comma/text and Markdown emphasis delimiters
   const urlHtml = renderMarkdown("后台https://fanqienovel.com/main/writer/chapter-manage/7662800007338134553，台账");
   assert.match(urlHtml, /href="https:\/\/fanqienovel\.com\/main\/writer\/chapter-manage\/7662800007338134553"/);
   assert.match(urlHtml, />https:\/\/fanqienovel\.com\/main\/writer\/chapter-manage\/7662800007338134553<\/a>，台账/);
+
+  const boldTrialHtml = renderMarkdown("试跑链接: **https://demo.example.com/16/** (实测)");
+  assert.match(
+    boldTrialHtml,
+    /试跑链接: <strong><a href="https:\/\/demo\.example\.com\/16\/" target="_blank" rel="noopener noreferrer">https:\/\/demo\.example\.com\/16\/<\/a><\/strong> \(实测\)/,
+  );
+
+  const boldRootHtml = renderMarkdown("原站保留: **https://demo.example.com/** (HTTP/2 200)");
+  assert.match(
+    boldRootHtml,
+    /原站保留: <strong><a href="https:\/\/demo\.example\.com\/" target="_blank" rel="noopener noreferrer">https:\/\/demo\.example\.com\/<\/a><\/strong> \(HTTP\/2 200\)/,
+  );
+
+  const adjacentBoldHtml = renderMarkdown("**https://demo.example.com/16/**(实测)和**https://demo.example.com/**测试");
+  assert.match(
+    adjacentBoldHtml,
+    /<strong><a href="https:\/\/demo\.example\.com\/16\/" target="_blank" rel="noopener noreferrer">https:\/\/demo\.example\.com\/16\/<\/a><\/strong>\(实测\)和<strong><a href="https:\/\/demo\.example\.com\/" target="_blank" rel="noopener noreferrer">https:\/\/demo\.example\.com\/<\/a><\/strong>测试/,
+  );
+
+  assert.match(
+    renderMarkdown("*https://demo.example.com/*"),
+    /<em><a href="https:\/\/demo\.example\.com\/" target="_blank" rel="noopener noreferrer">https:\/\/demo\.example\.com\/<\/a><\/em>/,
+  );
+  assert.match(
+    renderMarkdown("***https://demo.example.com/***"),
+    /<strong><em><a href="https:\/\/demo\.example\.com\/" target="_blank" rel="noopener noreferrer">https:\/\/demo\.example\.com\/<\/a><\/em><\/strong>/,
+  );
+  assert.match(
+    renderMarkdown("~~https://demo.example.com/~~"),
+    /<del><a href="https:\/\/demo\.example\.com\/" target="_blank" rel="noopener noreferrer">https:\/\/demo\.example\.com\/<\/a><\/del>/,
+  );
+  assert.match(
+    renderMarkdown("__https://demo.example.com/__"),
+    /<strong><a href="https:\/\/demo\.example\.com\/" target="_blank" rel="noopener noreferrer">https:\/\/demo\.example\.com\/<\/a><\/strong>/,
+  );
+  assert.match(
+    renderMarkdown("_https://demo.example.com/_"),
+    /<em><a href="https:\/\/demo\.example\.com\/" target="_blank" rel="noopener noreferrer">https:\/\/demo\.example\.com\/<\/a><\/em>/,
+  );
+  assert.match(
+    renderMarkdown("(**https://demo.example.com/16/**)"),
+    /\(<strong><a href="https:\/\/demo\.example\.com\/16\/" target="_blank" rel="noopener noreferrer">https:\/\/demo\.example\.com\/16\/<\/a><\/strong>\)/,
+  );
+  assert.match(
+    renderMarkdown("**(https://demo.example.com/16/)**"),
+    /<strong>\(<a href="https:\/\/demo\.example\.com\/16\/" target="_blank" rel="noopener noreferrer">https:\/\/demo\.example\.com\/16\/<\/a>\)<\/strong>/,
+  );
+  assert.match(
+    renderMarkdown("**https://en.wikipedia.org/wiki/A*_search_algorithm**"),
+    /<strong><a href="https:\/\/en\.wikipedia\.org\/wiki\/A\*_search_algorithm" target="_blank" rel="noopener noreferrer">https:\/\/en\.wikipedia\.org\/wiki\/A\*_search_algorithm<\/a><\/strong>/,
+  );
+  assert.match(
+    renderMarkdown("https://example.com/~user/file_name"),
+    /<a href="https:\/\/example\.com\/~user\/file_name" target="_blank" rel="noopener noreferrer">https:\/\/example\.com\/~user\/file_name<\/a>/,
+  );
+  assert.match(
+    renderMarkdown("(https://en.wikipedia.org/wiki/Function_(mathematics))"),
+    /\(<a href="https:\/\/en\.wikipedia\.org\/wiki\/Function_\(mathematics\)" target="_blank" rel="noopener noreferrer">https:\/\/en\.wikipedia\.org\/wiki\/Function_\(mathematics\)<\/a>\)/,
+  );
+  assert.doesNotMatch(renderMarkdown("*https://*"), /<a href=/);
 
   // 2. Consecutive DONT_NOTIFY heartbeats collapse cleanly without raw XML or fake "你" bubble; NOTIFY stays visible with tag
   const silentHbPrompt = "<heartbeat>\n  <automation_id>automation-8</automation_id>\n  <current_time_iso>2026-11-16T04:14:15.535Z</current_time_iso>\n  <instructions>\nAsia/Taipei每天12:00—13:59随机续发番茄《发错给总裁》三章。\n</instructions>\n</heartbeat>";
@@ -4878,6 +4941,153 @@ test("deferred viewport image loading, anti-snapback upward wheel handling, and 
   assert.match(appCss, /\.msg-image\.is-deferred-image\s*\{\s*display:\s*none;/);
   assert.match(appCss, /\.msg-reveal-thread-images-btn\s*\{/);
   assert.match(appCss, /\.md-inline-img-trigger\s*\{/);
+});
+
+test("captureViewportAnchor, restoreViewportAnchor, and turn open-key preservation distinguish duplicate turn IDs across forked threads", async () => {
+  const vm = await import("node:vm");
+  const appJs = await readFile(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
+  const openKeysSrc = appJs.slice(
+    appJs.indexOf("function captureTurnListOpenKeys("),
+    appJs.indexOf("function activeDisplayTurns("),
+  );
+  const anchorSrc = appJs.slice(
+    appJs.indexOf("function captureViewportAnchor("),
+    appJs.indexOf("function parseTurnBlockElement("),
+  );
+
+  let turnListEl = null;
+  const {
+    captureTurnListOpenKeys,
+    restoreTurnListOpenKeys,
+    captureViewportAnchor,
+    restoreViewportAnchor,
+  } = vm.runInNewContext(`${openKeysSrc}\n${anchorSrc}\n({ captureTurnListOpenKeys, restoreTurnListOpenKeys, captureViewportAnchor, restoreViewportAnchor });`, {
+    state: { autoFollow: false },
+    $: (id) => (id === "turnList" ? turnListEl : null),
+    Map,
+    Set,
+    Number,
+    Math,
+  });
+
+  const makeMockBlock = (turnId, docTop, height, vp, { children = [], detailsOpen = false } = {}) => {
+    const details = [{ open: detailsOpen }];
+    const block = {
+      docTop,
+      height,
+      parentElement: null,
+      children: [],
+      getAttribute: (attr) => (attr === "data-turn-id" ? turnId : null),
+      querySelectorAll: () => details,
+      getBoundingClientRect: () => ({
+        top: block.docTop - vp.scrollTop,
+        bottom: block.docTop + block.height - vp.scrollTop,
+        height: block.height,
+      }),
+      _details: details,
+    };
+    block.children = children.map((c) => {
+      const child = {
+        docTop: c.docTop,
+        height: c.height,
+        parentElement: block,
+        getBoundingClientRect: () => ({
+          top: child.docTop - vp.scrollTop,
+          bottom: child.docTop + child.height - vp.scrollTop,
+          height: child.height,
+        }),
+      };
+      return child;
+    });
+    return block;
+  };
+
+  const mountBlocks = (listEl, blocks) => {
+    for (const prev of listEl.children) prev.parentElement = null;
+    listEl.children = blocks;
+    for (const b of blocks) b.parentElement = listEl;
+  };
+
+  const vp = {
+    scrollTop: 50150,
+    getBoundingClientRect: () => ({ top: 0, bottom: 800, height: 800 }),
+  };
+  turnListEl = { hidden: false, children: [] };
+
+  const buildForkedDom = (extraTopShift = 0, prependOlderSameId = false) => {
+    const blocks = [];
+    if (prependOlderSameId) {
+      blocks.push(makeMockBlock("agy-step-0", 0, 2000, vp));
+    }
+    const baseOffset = prependOlderSameId ? 2000 : 0;
+    blocks.push(makeMockBlock("agy-step-0", baseOffset + 0, 1000, vp));
+    for (let i = 1; i < 58; i += 1) {
+      blocks.push(makeMockBlock(`agy-step-${i * 40}`, baseOffset + i * 850, 800, vp));
+    }
+    const childTurnTop = baseOffset + 50000 + extraTopShift;
+    blocks.push(
+      makeMockBlock("agy-step-0", childTurnTop, 600, vp, {
+        children: [
+          { docTop: childTurnTop, height: 100 },
+          { docTop: childTurnTop + 100, height: 500 },
+        ],
+      }),
+    );
+    return blocks;
+  };
+
+  // 场景 A：用户停留在索引 58（子会话首轮，data-turn-id="agy-step-0"），原 DOM 节点仍挂载时不得跳回索引 0
+  const initialBlocks = buildForkedDom(0);
+  mountBlocks(turnListEl, initialBlocks);
+  const anchorMounted = captureViewportAnchor(vp);
+  assert.equal(anchorMounted.turnId, "agy-step-0");
+  assert.equal(anchorMounted.childIdx, 1);
+  assert.equal(anchorMounted.occurrenceFromEnd, 0);
+  initialBlocks[58].docTop += 40;
+  initialBlocks[58].children[1].docTop += 40;
+  restoreViewportAnchor(vp, anchorMounted);
+  assert.equal(vp.scrollTop, 50190);
+
+  // 场景 B：整表重建（blockEl 已脱离 turnListEl）时按 occurrenceFromEnd 精确区分索引 58 与索引 0
+  vp.scrollTop = 50150;
+  mountBlocks(turnListEl, buildForkedDom(0));
+  const anchorForChild = captureViewportAnchor(vp);
+  const rebuiltBlocks = buildForkedDom(120);
+  mountBlocks(turnListEl, rebuiltBlocks);
+  restoreViewportAnchor(vp, anchorForChild);
+  assert.equal(vp.scrollTop, 50270);
+
+  vp.scrollTop = 20;
+  const anchorForTop = captureViewportAnchor(vp);
+  assert.equal(anchorForTop.occurrenceFromEnd, 1);
+  const rebuiltTopShift = buildForkedDom(0);
+  rebuiltTopShift[0].docTop += 30;
+  mountBlocks(turnListEl, rebuiltTopShift);
+  restoreViewportAnchor(vp, anchorForTop);
+  assert.equal(vp.scrollTop, 50);
+
+  // 场景 C：顶部加载更早历史（前置新增一个 agy-step-0）导致整表重建，原索引 58 仍稳在原位置
+  vp.scrollTop = 50150;
+  mountBlocks(turnListEl, buildForkedDom(0));
+  const anchorBeforePrepend = captureViewportAnchor(vp);
+  const prependedBlocks = buildForkedDom(0, true);
+  mountBlocks(turnListEl, prependedBlocks);
+  restoreViewportAnchor(vp, anchorBeforePrepend);
+  assert.equal(vp.scrollTop, 52150);
+
+  // 场景 D：captureTurnListOpenKeys / restoreTurnListOpenKeys 不会在同名 agy-step-0 块之间串扰 <details>
+  const blocksWithDetails = [
+    makeMockBlock("agy-step-0", 0, 500, vp, { detailsOpen: false }),
+    makeMockBlock("agy-step-0", 500, 500, vp, { detailsOpen: true }),
+  ];
+  const openKeys = captureTurnListOpenKeys(blocksWithDetails, 0);
+  const freshBlocks = [
+    makeMockBlock("agy-step-0", 0, 500, vp, { detailsOpen: false }),
+    makeMockBlock("agy-step-0", 500, 500, vp, { detailsOpen: false }),
+  ];
+  restoreTurnListOpenKeys(freshBlocks, openKeys, 0);
+  assert.equal(freshBlocks[0]._details[0].open, false);
+  assert.equal(freshBlocks[1]._details[0].open, true);
 });
 
 test("expanded telemetry cards show reset dates inline without duplicate drawer grid, and distinct owners keep account handle priority", async (t) => {
@@ -5991,4 +6201,116 @@ test("mobile composer guards prevent soft-keyboard dismiss or Return key from au
     }),
     false,
   );
+});
+
+test("renderTurnHtml renders multiline turn-error with expandable raw detail and inline retry button only on latest turn", () => {
+  const errTurn = {
+    id: "turn-err-401",
+    status: "failed",
+    error: {
+      message: "Agent execution terminated due to error.\nUNAUTHENTICATED (code 401): invalid_token",
+      detail: "HTTP 401 Unauthorized\n{\"error\":{\"code\":401}}",
+    },
+    items: [
+      { type: "userMessage", id: "u-err-1", content: [{ type: "text", text: "继续提交" }] },
+    ],
+  };
+
+  const latestHtml = renderTurnHtml(errTurn, {
+    agentLabel: "Antigravity",
+    threadId: "antigravity:desktop:t-err-1",
+    supersededByNextTurn: false,
+  });
+  assert.match(latestHtml, /class="turn-error-main"[^>]*>Agent execution terminated due to error\.\nUNAUTHENTICATED \(code 401\): invalid_token<\/div>/);
+  assert.match(latestHtml, /<button type="button" class="turn-resume-inline-btn is-error-retry" data-resume-interrupted-turn="1">▶ 重试继续<\/button>/);
+  assert.match(latestHtml, /<details class="turn-error-details"><summary>查看原始错误详情<\/summary><pre class="turn-error-pre">HTTP 401 Unauthorized/);
+
+  const goalHtml = renderTurnHtml(errTurn, {
+    agentLabel: "Antigravity",
+    threadId: "antigravity:desktop:t-err-1",
+    supersededByNextTurn: false,
+    goalSuspended: true,
+  });
+  assert.match(goalHtml, /data-resume-interrupted-turn="1">▶ 恢复 Goal<\/button>/);
+
+  const oldHtml = renderTurnHtml(errTurn, {
+    agentLabel: "Antigravity",
+    threadId: "antigravity:desktop:t-err-1",
+    supersededByNextTurn: true,
+  });
+  assert.doesNotMatch(oldHtml, /data-resume-interrupted-turn="1"/);
+  assert.match(oldHtml, /<details class="turn-error-details">/);
+});
+
+test("sidebar, project board, and task strip highlight failed threads with red error badges, summaries, and top banner", () => {
+  const nowSec = 1_795_590_000;
+  const cwd = "/tmp/demo-err-proj";
+  const failedThread = {
+    id: "antigravity:desktop:err-1",
+    provider: "antigravity",
+    profileId: "desktop",
+    cwd,
+    title: "Play Store Link Request",
+    preview: "正在填写商店设置",
+    live: false,
+    lastTurnStatus: "failed",
+    lastError: "Agent execution terminated due to error.\nUNAUTHENTICATED (code 401): invalid_token",
+    lastErrorAt: nowSec - 60,
+    updatedAt: nowSec - 86400 * 3,
+  };
+  const okThread = {
+    id: "antigravity:desktop:ok-1",
+    provider: "antigravity",
+    profileId: "desktop",
+    cwd,
+    title: "正常任务",
+    preview: "已完成",
+    live: false,
+    updatedAt: nowSec - 30,
+  };
+
+  assert.equal(isThreadFailed(failedThread), true);
+  assert.equal(isThreadFailed({ ...failedThread, live: true }), false);
+  assert.equal(compactThreadErrorSummary(failedThread), "UNAUTHENTICATED (code 401): invalid_token");
+
+  const groups = buildProjectGroups([okThread, failedThread], {
+    projectsMeta: { [cwd]: { alias: "图片翻译" } },
+  });
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].errorCount, 1);
+
+  const partitioned = partitionSidebarProjectGroups(groups, { nowMs: nowSec * 1000 });
+  assert.equal(partitioned.primaryGroups.length, 1);
+  assert.equal(partitioned.staleGroups.length, 0);
+
+  const sidebarHtml = renderSidebarThreadListHtml(groups, {
+    activeThreadId: okThread.id,
+    nowMs: nowSec * 1000,
+    staleThreadAgeSec: 3600,
+  });
+  assert.match(sidebarHtml, /project-group[^"]*has-error/);
+  assert.match(sidebarHtml, /group-stat-pill is-error"[^>]*>报错 1<\/span>/);
+  assert.match(sidebarHtml, /thread-item[^"]*is-error/);
+  assert.match(sidebarHtml, /thread-status-dot is-error is-agent-marker/);
+  assert.match(sidebarHtml, /thread-error-pill"[^>]*>报错<\/span>/);
+  assert.match(sidebarHtml, /thread-item-sub is-error-sub"[^>]*>UNAUTHENTICATED \(code 401\): invalid_token<\/span>/);
+
+  const boardHtml = renderProjectBoardHtml({
+    groups,
+    activeThreadId: okThread.id,
+  });
+  assert.match(boardHtml, /board-attention-banner is-error/);
+  assert.match(boardHtml, /有 1 个任务因报错中断/);
+  assert.match(boardHtml, /board-status-pill is-error"[^>]*>报错 1<\/span>/);
+  assert.match(boardHtml, /board-status-pill is-error"[^>]*>报错中断<\/span>/);
+  assert.match(boardHtml, /board-task-row[^"]*is-error/);
+  assert.match(boardHtml, /board-task-preview is-error"[^>]*>UNAUTHENTICATED \(code 401\): invalid_token<\/div>/);
+
+  const stripHtml = renderProjectTaskStripHtml({
+    projectGroup: groups[0],
+    activeThreadId: okThread.id,
+  });
+  assert.match(stripHtml, /strip-task-pill[^"]*is-error/);
+  assert.match(stripHtml, /strip-status-dot[^"]*is-error/);
+  assert.match(stripHtml, /thread-error-pill"[^>]*>报错<\/span>/);
 });

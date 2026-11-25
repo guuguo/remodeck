@@ -22,6 +22,7 @@ import {
   readAntigravityIndexedThreads,
   readAntigravityLiveActivity,
   readAntigravityQueuedMessages,
+  readAntigravityTailErrorSync,
   readAntigravityThreadHistory,
   resolveAntigravityRootConversationId,
 } from "./antigravity-history.mjs";
@@ -29,6 +30,33 @@ import { discoverAntigravityProfiles } from "./profile-discovery.mjs";
 
 export const DEFAULT_AGY_AUTO_COMPACT_TOKENS = 60_000;
 const AGY_AUTO_COMPACT_COOLDOWN_MS = 90_000;
+export const AGY_AUTH_401_RETRY_DELAY_MS = 2_500;
+const AGY_AUTH_401_RETRY_COOLDOWN_MS = 60_000;
+
+export function isTransientAntigravityAuth401Error(errLike) {
+  const text = [
+    errLike?.shortError,
+    errLike?.message,
+    errLike?.detail,
+    typeof errLike === "string" ? errLike : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  if (!text || /not logged into antigravity/i.test(text)) return false;
+  return /\bUNAUTHENTICATED\b|\bcode\s*401\b|\bHTTP\s*401\b|\binvalid_token\b|invalid authentication credentials/i.test(text);
+}
+
+function normalizeAutoRetryAuth401Config(raw) {
+  if (!raw) return { enabled: false, delayMs: AGY_AUTH_401_RETRY_DELAY_MS };
+  if (typeof raw === "object") {
+    const delayRaw = Number(raw.delayMs);
+    return {
+      enabled: raw.enabled !== false,
+      delayMs: Number.isFinite(delayRaw) && delayRaw >= 0 ? delayRaw : AGY_AUTH_401_RETRY_DELAY_MS,
+    };
+  }
+  return { enabled: true, delayMs: AGY_AUTH_401_RETRY_DELAY_MS };
+}
 
 function buildAcpPromptBlocks(text, images = []) {
   const blocks = [];
@@ -43,6 +71,19 @@ function buildAcpPromptBlocks(text, images = []) {
     }
   }
   return blocks;
+}
+
+function buildAskQuestionSignature(questions = []) {
+  if (!Array.isArray(questions) || !questions.length) return "";
+  return JSON.stringify(
+    questions.map((q) => [
+      String(q?.question || q?.prompt || "").trim(),
+      Boolean(q?.multiSelect ?? q?.is_multi_select),
+      (Array.isArray(q?.options) ? q.options : [])
+        .map((opt) => (typeof opt === "string" ? opt.trim() : String(opt?.label || opt?.name || opt?.value || "").trim()))
+        .filter(Boolean),
+    ]),
+  );
 }
 
 export class AntigravityProvider {
@@ -61,7 +102,10 @@ export class AntigravityProvider {
   #sessionPermissionModes = new Map();
   #sessionClients = new Map();
   #resolvedAskKeys = new Set();
+  #resolvedAskSignatures = new Map();
+  #closed = false;
   #autoCompactedAt = new Map();
+  #autoRetriedAuth401At = new Map();
   #onEvent;
   #onServerRequest;
 
@@ -156,6 +200,9 @@ export class AntigravityProvider {
   }
 
   async #getClient(profileId, { skipPermissions = false } = {}) {
+    if (this.#closed) {
+      throw Object.assign(new Error("Antigravity 提供方已关闭"), { status: 409 });
+    }
     const profile = await this.#getProfile(profileId);
     const resolvedProfileId = profile.id;
     const key = this.#clientKey(resolvedProfileId, Boolean(skipPermissions));
@@ -268,6 +315,7 @@ export class AntigravityProvider {
       }
       const resolvedTitle = update.title || (toolCallId && active?.toolTitles?.get(toolCallId)) || "";
       if (active && (update.rawInput?.questions || /ask_question/i.test(String(resolvedTitle || update.name || "")))) {
+        active.sawAskQuestion = true;
         const parsedQuestions = normalizeAntigravityAskQuestions(update.rawInput);
         if (parsedQuestions.length) {
           active.pendingAskQuestions = {
@@ -445,11 +493,21 @@ export class AntigravityProvider {
     if (!rawId || !Array.isArray(questions) || !questions.length) return false;
     const askKey = `${profileId}:${rawId}:${itemId || turnId || questions[0]?.question || "ask"}`;
     if (this.#resolvedAskKeys.has(askKey)) return false;
+    const askSignature = buildAskQuestionSignature(questions);
+    const sigKey = askSignature ? `${profileId}:${rawId}:${askSignature}` : "";
+    if (sigKey && this.#resolvedAskSignatures.has(sigKey)) {
+      const entry = this.#resolvedAskSignatures.get(sigKey);
+      if (entry?.skipped || (Date.now() - Number(entry?.at || 0)) < 30_000) {
+        return false;
+      }
+      this.#resolvedAskSignatures.delete(sigKey);
+    }
     const reqId = `agy-ask-${rawId}-${itemId || turnId || "latest"}`;
     this.#onServerRequest({
       id: reqId,
       rawId: reqId,
       askKey,
+      askSignature,
       provider: "antigravity",
       profileId,
       rawThreadId: rawId,
@@ -468,6 +526,13 @@ export class AntigravityProvider {
     if (rawRequest?.kind === "userInput" && rawRequest?.isPromptFollowUp) {
       if (rawRequest.askKey) this.#resolvedAskKeys.add(rawRequest.askKey);
       const decision = String(input?.decision || "accept");
+      const sig = rawRequest.askSignature || buildAskQuestionSignature(rawRequest.questions);
+      if (rawRequest.rawThreadId && sig) {
+        this.#resolvedAskSignatures.set(`${rawRequest.profileId || profileId}:${rawRequest.rawThreadId}:${sig}`, {
+          at: Date.now(),
+          skipped: decision === "decline" || decision === "cancel",
+        });
+      }
       if (decision === "decline" || decision === "cancel") {
         return { ok: true, skipped: true };
       }
@@ -560,6 +625,8 @@ export class AntigravityProvider {
     const active = this.#activePrompts.get(rawId);
     const known = this.#knownSessions.get(`${profile.id}:${rawId}`);
     const permMode = this.#sessionPermissionModes.get(`${profile.id}:${rawId}`) || rawThread.permissionMode || "";
+    const live = Boolean(active || (rawThread.live && !this.#isStalePostTurnDiskLive(profile, rawId)));
+    const hasError = !live && Boolean(rawThread.lastTurnStatus === "failed" || rawThread.lastError);
     return {
       id: formatCompositeThreadId("antigravity", profile.id, rawId),
       rawId,
@@ -585,7 +652,12 @@ export class AntigravityProvider {
       turns: rawThread.turns,
       largeHistory: Boolean(rawThread.largeHistory),
       archived: false,
-      live: Boolean(active || (rawThread.live && !this.#isStalePostTurnDiskLive(profile, rawId))),
+      live,
+      ...(hasError ? {
+        lastTurnStatus: "failed",
+        lastError: String(rawThread.lastError || ""),
+        lastErrorAt: Number(rawThread.lastErrorAt) || 0,
+      } : {}),
       nativeQueuedCount: Number(rawThread.nativeQueuedCount) || 0,
     };
   }
@@ -678,7 +750,7 @@ export class AntigravityProvider {
       profileType,
     });
     const diskLive = this.#suppressStalePostTurnDiskLive(profile, rawId, rawDiskLive);
-    const payload = this.#buildActivityPayload(active, diskLive);
+    let payload = this.#buildActivityPayload(active, diskLive);
 
     const { thread, nextCursor } = await readAntigravityThreadHistory(profile.home, rawId, {
       indexedThread: indexed,
@@ -690,21 +762,62 @@ export class AntigravityProvider {
 
     thread.turns = mergeActiveTurnIntoHistory(thread.turns, active, { liveItemSuffix: "agent" });
 
+    const pendingAsk = !cursor ? extractPendingAskQuestionFromTurns(thread.turns) : null;
+    if (!active && pendingAsk) {
+      if (payload.live) {
+        payload = {
+          live: false,
+          cursor: String(payload.cursor || "noacp|idle").replace(/\|1:/, "|0:"),
+          activity: null,
+          streaming: null,
+        };
+      }
+      const lastTurn = thread.turns.at(-1);
+      if (lastTurn && lastTurn.status === "inProgress") {
+        lastTurn.status = "completed";
+      }
+    }
+
     const compositeId = formatCompositeThreadId("antigravity", profile.id, rawId);
     const nativeQueuedTurns = (Array.isArray(diskLive.nativeQueuedTurns) ? diskLive.nativeQueuedTurns : [])
       .map((item) => ({ ...item, threadId: compositeId }));
 
+    const lastHistoryTurn = Array.isArray(thread?.turns) && thread.turns.length
+      ? thread.turns[thread.turns.length - 1]
+      : null;
+    const historyErrorFields = lastHistoryTurn
+      ? (lastHistoryTurn.status === "failed" && lastHistoryTurn.error?.message
+        ? {
+          lastTurnStatus: "failed",
+          lastError: String(lastHistoryTurn.error.shortError || lastHistoryTurn.error.message || ""),
+          lastErrorAt: Number(lastHistoryTurn.completedAt || indexed?.lastErrorAt || 0),
+        }
+        : { lastTurnStatus: "", lastError: "", lastErrorAt: 0 })
+      : {};
+
     const normalized = this.#normalizeThread(profile, {
       ...indexed,
       ...thread,
+      ...historyErrorFields,
       live: payload.live,
       nativeQueuedCount: nativeQueuedTurns.length,
       updatedAt: Math.max(Number(indexed?.updatedAt) || 0, Number(thread?.updatedAt) || 0, diskLive.updatedAt || 0),
     });
-    if (!normalized.live) {
-      const pendingAsk = extractPendingAskQuestionFromTurns(normalized.turns);
-      if (pendingAsk) {
+    if (!cursor) {
+      if (!normalized.live && pendingAsk) {
         this.#emitAskQuestionRequest(profile.id, rawId, pendingAsk);
+      } else if (!pendingAsk && !active) {
+        const recentEnd = this.#recentlyEndedPrompts.get(`${profile.id}:${rawId}`);
+        const justFinishedAcp = Boolean(recentEnd && (Date.now() - recentEnd.endedAtMs) < 3_000);
+        if (!justFinishedAcp) {
+          this.#onEvent({
+            type: "ask_question_cleared",
+            provider: "antigravity",
+            profileId: profile.id,
+            rawId,
+            threadId: compositeId,
+          });
+        }
       }
     }
     return {
@@ -749,6 +862,7 @@ export class AntigravityProvider {
     model = "",
     effort = "",
     permissionMode = "workspace",
+    autoRetryAuth401 = false,
   } = {}) {
     const profile = await this.#getProfile(profileId);
     const cleanPerm = normalizePermissionMode(permissionMode);
@@ -785,6 +899,7 @@ export class AntigravityProvider {
         model: effectiveModel,
         effort,
         permissionMode: cleanPerm,
+        autoRetryAuth401,
       });
       return { thread, turn: sent.turn };
     }
@@ -802,7 +917,11 @@ export class AntigravityProvider {
     permissionMode = "workspace",
     steer = false,
     autoCompact = null,
+    autoRetryAuth401 = false,
   } = {}) {
+    if (this.#closed) {
+      throw Object.assign(new Error("Antigravity 提供方已关闭"), { status: 409 });
+    }
     const profile = await this.#getProfile(profileId);
     const resolvedProfileId = profile.id;
     if (steer && this.#activePrompts.has(rawId)) {
@@ -820,6 +939,12 @@ export class AntigravityProvider {
       });
     }
     this.#recentlyEndedPrompts.delete(`${resolvedProfileId}:${rawId}`);
+    const sigPrefix = `${resolvedProfileId}:${rawId}:`;
+    for (const [sigKey, entry] of this.#resolvedAskSignatures.entries()) {
+      if (sigKey.startsWith(sigPrefix) && entry?.skipped === true) {
+        this.#resolvedAskSignatures.delete(sigKey);
+      }
+    }
     const cleanPerm = normalizePermissionMode(permissionMode);
     const skipPermissions = isBypassPermissionMode(cleanPerm);
     const clientKey = this.#clientKey(resolvedProfileId, skipPermissions);
@@ -922,14 +1047,15 @@ export class AntigravityProvider {
         lastAgentMessage: activeEntry.lastText,
         error,
       });
-      if (status === "completed" && !String(activeEntry.lastText || "").trim()) {
-        if (activeEntry.pendingAskQuestions?.questions?.length) {
+      if (status === "completed") {
+        const hasReplyText = Boolean(String(activeEntry.lastText || "").trim());
+        if (!hasReplyText && activeEntry.pendingAskQuestions?.questions?.length) {
           this.#emitAskQuestionRequest(resolvedProfileId, rawId, {
             turnId,
             itemId: activeEntry.pendingAskQuestions.itemId,
             questions: activeEntry.pendingAskQuestions.questions,
           });
-        } else {
+        } else if (!hasReplyText || activeEntry.sawAskQuestion || activeEntry.pendingAskQuestions?.questions?.length) {
           void readAntigravityThreadHistory(profile.home, rawId, {
             detail: "full",
             limit: 4,
@@ -943,6 +1069,7 @@ export class AntigravityProvider {
     };
 
     const promptBlocks = buildAcpPromptBlocks(text, images);
+    const retryAuth401Cfg = normalizeAutoRetryAuth401Config(autoRetryAuth401);
     const runPrompt = async () => {
       if (compactPlan) {
         try {
@@ -962,12 +1089,57 @@ export class AntigravityProvider {
         }
         if (activeEntry.interrupted) return { stopReason: "cancelled" };
       }
-      return client.sendPrompt(rawId, promptBlocks);
+      const primaryRes = await client.sendPrompt(rawId, promptBlocks);
+      const primaryStopReason = String(primaryRes?.stopReason || "end_turn");
+      if (!activeEntry.interrupted && primaryStopReason !== "cancelled" && retryAuth401Cfg.enabled) {
+        const tailErr = readAntigravityTailErrorSync(profile.home, rawId);
+        if (
+          tailErr?.message
+          && (!tailErr.createdAtSec || tailErr.createdAtSec >= startedAt - 2)
+          && isTransientAntigravityAuth401Error(tailErr)
+          && this.#canAutoRetryAuth401(prepKey)
+        ) {
+          this.#autoRetriedAuth401At.set(prepKey, Date.now());
+          activeEntry.phase = "检测到瞬时 401 鉴权失效，正在自动续发继续…";
+          activeEntry.detail = "";
+          activeEntry.lastText = "";
+          activeEntry.lastThought = "";
+          activeEntry.updatedAt = Math.floor(Date.now() / 1000);
+          activeEntry.seq = (activeEntry.seq || 0) + 1;
+
+          const waitDeadline = Date.now() + retryAuth401Cfg.delayMs;
+          while (Date.now() < waitDeadline) {
+            if (activeEntry.interrupted) return { stopReason: "cancelled" };
+            const remaining = waitDeadline - Date.now();
+            await new Promise((r) => setTimeout(r, Math.min(100, Math.max(1, remaining))));
+          }
+          if (activeEntry.interrupted) return { stopReason: "cancelled" };
+
+          return client.sendPrompt(rawId, [{ type: "text", text: "继续" }]);
+        }
+      }
+      return primaryRes;
     };
     const promptPromise = runPrompt().then((res) => {
       const stopReason = String(res?.stopReason || "end_turn");
-      const status = activeEntry.interrupted || stopReason === "cancelled" ? "interrupted" : "completed";
-      finalizePrompt({ status, stopReason, error: null });
+      if (activeEntry.interrupted || stopReason === "cancelled") {
+        finalizePrompt({ status: "interrupted", stopReason, error: null });
+        return res;
+      }
+      const tailErr = readAntigravityTailErrorSync(profile.home, rawId);
+      if (tailErr?.message && (!tailErr.createdAtSec || tailErr.createdAtSec >= startedAt - 2)) {
+        finalizePrompt({
+          status: "failed",
+          stopReason: "error",
+          error: {
+            message: tailErr.message,
+            ...(tailErr.shortError ? { shortError: tailErr.shortError } : {}),
+            ...(tailErr.detail ? { detail: tailErr.detail } : {}),
+          },
+        });
+        return res;
+      }
+      finalizePrompt({ status: "completed", stopReason, error: null });
       return res;
     }).catch((error) => {
       const status = activeEntry.interrupted || error?.aborted ? "interrupted" : "failed";
@@ -984,6 +1156,11 @@ export class AntigravityProvider {
       thread: this.#normalizeThread(profile, indexed || { id: rawId, cwd: resolvedCwd }),
       ...(compactPlan ? { autoCompact: compactPlan } : {}),
     };
+  }
+
+  #canAutoRetryAuth401(key) {
+    const lastAt = this.#autoRetriedAuth401At.get(key) || 0;
+    return (Date.now() - lastAt) >= AGY_AUTH_401_RETRY_COOLDOWN_MS;
   }
 
   async #planAutoCompact(profile, rawId, text, autoCompact, { steer = false } = {}) {
@@ -1034,6 +1211,7 @@ export class AntigravityProvider {
   }
 
   async close() {
+    this.#closed = true;
     for (const client of this.#clients.values()) {
       await client.close();
     }
@@ -1042,5 +1220,9 @@ export class AntigravityProvider {
     this.#recentlyEndedPrompts.clear();
     this.#legacyProfiles.clear();
     this.#sessionClients.clear();
+    this.#resolvedAskKeys.clear();
+    this.#resolvedAskSignatures.clear();
+    this.#autoCompactedAt.clear();
+    this.#autoRetriedAuth401At.clear();
   }
 }

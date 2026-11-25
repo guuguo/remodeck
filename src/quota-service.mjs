@@ -15,6 +15,8 @@ const MAX_GROK_USAGE_FILES = 80;
 const FIVE_HOURS_MS = 5 * 3600 * 1000;
 const SEVEN_DAYS_MS = 7 * 24 * 3600 * 1000;
 const CLAUDE_LOOKBACK_MS = SEVEN_DAYS_MS;
+const CLAUDE_PLAN_WEEKLY_MAX_AGE_MS = 24 * 3600 * 1000;
+const CLAUDE_PLAN_STALE_DETAIL_AGE_MS = 2 * 3600 * 1000;
 
 const MONTH_NAMES = Object.freeze({
   jan: 1,
@@ -327,12 +329,86 @@ function buildQuotaWindows(buckets = []) {
   };
 }
 
+function hasClaudeWindowSignal(win) {
+  return Boolean(
+    win
+    && typeof win === "object"
+    && (
+      win.status
+      || win.rateLimitType
+      || win.resetsAt !== undefined
+      || win.utilization !== undefined
+      || win.remainingPercent !== undefined
+    ),
+  );
+}
+
+function mergeWindowObjects(baseWin, extraWin) {
+  if (!baseWin && !extraWin) return null;
+  if (!baseWin) return extraWin;
+  if (!extraWin) return baseWin;
+  return { ...extraWin, ...baseWin };
+}
+
+export function extractClaudeRateLimitWindows(obj) {
+  if (!obj || typeof obj !== "object") {
+    return { fiveHour: null, sevenDay: null };
+  }
+
+  let fiveHour = null;
+  let sevenDay = null;
+
+  const containers = [
+    obj.rate_limit_info,
+    obj.rateLimitInfo,
+    obj.apiErrorParams?.rate_limit_info,
+    obj.quotaLimits,
+    obj.rate_limit_event,
+    obj,
+  ];
+
+  for (const c of containers) {
+    if (!c || typeof c !== "object") continue;
+    const uw = c.unifiedWindows && typeof c.unifiedWindows === "object" ? c.unifiedWindows : null;
+    if (uw) {
+      if (!fiveHour && hasClaudeWindowSignal(uw.five_hour)) {
+        fiveHour = uw.five_hour;
+      }
+      const uwWeekly = uw.seven_day || uw.weekly;
+      if (!sevenDay && hasClaudeWindowSignal(uwWeekly)) {
+        sevenDay = uwWeekly;
+      }
+    }
+    const cand5h = c.five_hour || c.fiveHour;
+    if (!fiveHour && hasClaudeWindowSignal(cand5h)) {
+      fiveHour = cand5h;
+    }
+    const cand7d = c.seven_day || c.sevenDay || c.weekly;
+    if (!sevenDay && hasClaudeWindowSignal(cand7d)) {
+      sevenDay = cand7d;
+    }
+  }
+
+  for (const c of containers) {
+    if (!hasClaudeWindowSignal(c)) continue;
+    const rType = String(c.rateLimitType || "").toLowerCase();
+    if (rType === "seven_day" || rType === "weekly") {
+      sevenDay = mergeWindowObjects(sevenDay, c);
+    } else {
+      fiveHour = mergeWindowObjects(fiveHour, c);
+    }
+  }
+
+  return { fiveHour, sevenDay };
+}
+
 export class QuotaService {
   #env;
   #homeDir;
   #cockpitDir;
   #grokAppDir;
   #codexQuotaReader;
+  #claudeQuotaReader;
   #ttlMs;
   #nowFn;
   #cache = null;
@@ -344,6 +420,7 @@ export class QuotaService {
     cockpitDir = "",
     grokAppDir = "",
     codexQuotaReader = null,
+    claudeQuotaReader = null,
     ttlMs = 30_000,
     nowFn = () => Date.now(),
   } = {}) {
@@ -352,6 +429,7 @@ export class QuotaService {
     this.#cockpitDir = resolve(cockpitDir || join(this.#homeDir, ".antigravity_cockpit"));
     this.#grokAppDir = resolve(grokAppDir || join(this.#homeDir, "Library", "Application Support", "com.grokapp.grok-app"));
     this.#codexQuotaReader = codexQuotaReader;
+    this.#claudeQuotaReader = claudeQuotaReader;
     this.#ttlMs = Math.max(0, Number(ttlMs) || 30_000);
     this.#nowFn = nowFn;
   }
@@ -905,31 +983,22 @@ export class QuotaService {
             recent5hTokens += outTokens;
           }
         }
-        const ql = obj?.quotaLimits || obj?.rate_limit_event || (obj?.type === "rate_limit_event" ? obj : null);
-        if (ql && typeof ql === "object") {
-          const nested5h = ql.five_hour && typeof ql.five_hour === "object" ? ql.five_hour : null;
-          const nested7d = (ql.seven_day && typeof ql.seven_day === "object" ? ql.seven_day : null)
-            || (ql.weekly && typeof ql.weekly === "object" ? ql.weekly : null);
-          if (nested5h || nested7d) {
-            if (nested5h && tsMs >= latestFiveHourTsMs) {
-              latestFiveHour = nested5h;
-              latestFiveHourTsMs = tsMs;
-            }
-            if (nested7d && tsMs >= latestSevenDayTsMs) {
-              latestSevenDay = nested7d;
-              latestSevenDayTsMs = tsMs;
-            }
-          } else if (ql.status || ql.rateLimitType || ql.resetsAt || ql.utilization !== undefined || ql.remainingPercent !== undefined) {
-            const rType = String(ql.rateLimitType || "").toLowerCase();
-            if (rType === "seven_day" || rType === "weekly") {
-              if (tsMs >= latestSevenDayTsMs) {
-                latestSevenDay = ql;
-                latestSevenDayTsMs = tsMs;
-              }
-            } else if (tsMs >= latestFiveHourTsMs) {
-              latestFiveHour = ql;
-              latestFiveHourTsMs = tsMs;
-            }
+        const hasRateSignal = Boolean(
+          obj?.quotaLimits
+          || obj?.rate_limit_event
+          || obj?.rate_limit_info
+          || obj?.apiErrorParams?.rate_limit_info
+          || obj?.type === "rate_limit_event",
+        );
+        if (hasRateSignal) {
+          const extracted = extractClaudeRateLimitWindows(obj);
+          if (extracted.fiveHour && tsMs >= latestFiveHourTsMs) {
+            latestFiveHour = extracted.fiveHour;
+            latestFiveHourTsMs = tsMs;
+          }
+          if (extracted.sevenDay && tsMs >= latestSevenDayTsMs) {
+            latestSevenDay = extracted.sevenDay;
+            latestSevenDayTsMs = tsMs;
           }
         }
       }
@@ -1064,7 +1133,7 @@ export class QuotaService {
     windowMs = FIVE_HOURS_MS,
     msgCount = 0,
     tokCount = 0,
-    fallbackDetail = "充足",
+    fallbackDetail = "未限流",
     nowSec,
     nowMs,
   }) {
@@ -1111,7 +1180,13 @@ export class QuotaService {
     const planSec = Number.isFinite(planSampleTsMs) && planSampleTsMs > 0 ? Math.floor(planSampleTsMs / 1000) : 0;
     const planRolledOverByReset = knownResetSec > planSec && knownResetSec <= nowSec;
     const planUnconfirmedExhausted = id === "five_hour" && planUsedPct === 100 && !activeResetSec;
-    const effectivePlanWindowMs = planUnconfirmedExhausted ? Math.min(windowMs, 15 * 60_000) : windowMs;
+    let effectivePlanWindowMs = windowMs;
+    if (id === "seven_day") {
+      effectivePlanWindowMs = Math.min(effectivePlanWindowMs, CLAUDE_PLAN_WEEKLY_MAX_AGE_MS);
+    }
+    if (planUnconfirmedExhausted) {
+      effectivePlanWindowMs = Math.min(effectivePlanWindowMs, 15 * 60_000);
+    }
     const planFresh = planUsedPct !== null
       && Number.isFinite(planSampleTsMs)
       && planSampleTsMs > 0
@@ -1122,9 +1197,14 @@ export class QuotaService {
       const remainingPercent = clampPercent(100 - planUsedPct);
       const tag = windowKind === "weekly" ? "近7d" : "近5h";
       const usageSuffix = tokCount >= 1000 ? ` · ${Math.round(tokCount / 1000)}k` : "";
-      const detail = msgCount > 0
+      const ageMs = nowMs - planSampleTsMs;
+      const staleNote = ageMs >= CLAUDE_PLAN_STALE_DETAIL_AGE_MS
+        ? `缓存${Math.max(2, Math.round(ageMs / 3600_000))}h前`
+        : "";
+      const baseDetail = msgCount > 0
         ? `${tag} ${msgCount}条${usageSuffix}`
         : (remainingPercent === 0 ? "限流中" : "");
+      const detail = [baseDetail, staleNote].filter(Boolean).join(" · ");
       return {
         bucket: {
           id,
@@ -1269,6 +1349,32 @@ export class QuotaService {
       }
     }
 
+    const cliRateLimit = this.#claudeQuotaReader
+      ? await this.#claudeQuotaReader(profile, { refresh: ctx.refresh }).catch(() => null)
+      : null;
+    const cliWindows = extractClaudeRateLimitWindows(cliRateLimit);
+    const cliBaseTsMs = Number(cliRateLimit?.updatedAtMs)
+      || (Number(cliRateLimit?.updatedAt) > 0 ? Number(cliRateLimit.updatedAt) * 1000 : -1);
+    const cli5hTsMs = Number(cliWindows.fiveHour?.observedAtMs) || (cliWindows.fiveHour ? cliBaseTsMs : -1);
+    const cli7dTsMs = Number(cliWindows.sevenDay?.observedAtMs) || (cliWindows.sevenDay ? cliBaseTsMs : -1);
+
+    const hasNumericPct = (win) => Boolean(
+      win && typeof win === "object"
+      && (typeof win.utilization === "number" || typeof win.remainingPercent === "number"),
+    );
+    const pickClaudeSource = (telQl, telTsMs, cliQl, cliTsMs) => {
+      if (cliQl && (!telQl || cliTsMs > telTsMs || (cliTsMs === telTsMs && (hasNumericPct(cliQl) || !hasNumericPct(telQl))))) {
+        return { ql: cliQl, tsMs: cliTsMs, from: "cli" };
+      }
+      if (telQl) {
+        return { ql: telQl, tsMs: telTsMs, from: "telemetry" };
+      }
+      return { ql: null, tsMs: -1, from: "none" };
+    };
+
+    const picked5h = pickClaudeSource(telemetry.latestFiveHour, telemetry.latestFiveHourTsMs, cliWindows.fiveHour, cli5hTsMs);
+    const picked7d = pickClaudeSource(telemetry.latestSevenDay, telemetry.latestSevenDayTsMs, cliWindows.sevenDay, cli7dTsMs);
+
     const planSample = await this.#readClaudePlanUsageSample(profile, orgUuid, {
       allowUnscoped: (ctx.claudeProfileCount || 1) <= 1,
     });
@@ -1277,15 +1383,15 @@ export class QuotaService {
       id: "five_hour",
       windowKind: "five_hour",
       label: "5h 窗口",
-      ql: telemetry.latestFiveHour,
-      qlTsMs: telemetry.latestFiveHourTsMs,
+      ql: picked5h.ql,
+      qlTsMs: picked5h.tsMs,
       desktopError: desktop5hError,
       planUsedPct: planSample?.fiveHourUsedPct ?? null,
       planSampleTsMs: planSample?.tMs ?? -1,
       windowMs: FIVE_HOURS_MS,
       msgCount: telemetry.recent5hMsgs,
       tokCount: telemetry.recent5hTokens,
-      fallbackDetail: telemetry.recent5hMsgs > 0 ? `近5h ${telemetry.recent5hMsgs}条` : "充足",
+      fallbackDetail: telemetry.recent5hMsgs > 0 ? `近5h ${telemetry.recent5hMsgs}条` : "未限流",
       nowSec: ctx.nowSec,
       nowMs: ctx.nowMs,
     });
@@ -1294,15 +1400,15 @@ export class QuotaService {
       id: "seven_day",
       windowKind: "weekly",
       label: "周限额",
-      ql: telemetry.latestSevenDay,
-      qlTsMs: telemetry.latestSevenDayTsMs,
+      ql: picked7d.ql,
+      qlTsMs: picked7d.tsMs,
       desktopError: desktop7dError,
       planUsedPct: planSample?.sevenDayUsedPct ?? null,
       planSampleTsMs: planSample?.tMs ?? -1,
       windowMs: SEVEN_DAYS_MS,
       msgCount: telemetry.recent7dMsgs,
       tokCount: telemetry.recent7dTokens,
-      fallbackDetail: telemetry.recent7dMsgs > 0 ? `近7d ${telemetry.recent7dMsgs}条` : "充足",
+      fallbackDetail: telemetry.recent7dMsgs > 0 ? `近7d ${telemetry.recent7dMsgs}条` : "未限流",
       nowSec: ctx.nowSec,
       nowMs: ctx.nowMs,
     });
@@ -1333,12 +1439,22 @@ export class QuotaService {
     const latestTs = Math.max(
       telemetry.latestFiveHourTsMs,
       telemetry.latestSevenDayTsMs,
+      cli5hTsMs,
+      cli7dTsMs,
       desktop5hError?.tsMs || -1,
       desktop7dError?.tsMs || -1,
       planSample?.tMs || -1,
     );
+    const usedCliStream = (
+      (picked5h.from === "cli" && fiveHourBucket.remainingPercent !== null && !merged5h.usedPlanSample)
+      || (picked7d.from === "cli" && weeklyBucket.remainingPercent !== null && !merged7d.usedPlanSample)
+    );
     let source = "claude-jsonl";
-    if (merged5h.usedPlanSample || merged7d.usedPlanSample) {
+    if (usedCliStream) {
+      source = (merged5h.usedPlanSample || merged7d.usedPlanSample || desktop5hError || desktop7dError)
+        ? "claude-cli-stream+cockpit"
+        : "claude-cli-stream";
+    } else if (merged5h.usedPlanSample || merged7d.usedPlanSample) {
       source = (telemetry.latestFiveHour || telemetry.latestSevenDay) ? "claude-jsonl+cockpit" : "cockpit-usage-history";
     } else if (desktop5hError || desktop7dError) {
       source = "claude-desktop+jsonl";

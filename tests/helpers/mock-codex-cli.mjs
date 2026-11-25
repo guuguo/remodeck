@@ -1,7 +1,145 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
+
+async function runMockExecCli(argv) {
+  const isResume = argv[0] === "resume";
+  const rest = isResume ? argv.slice(1) : argv;
+  let cwd = process.cwd();
+  let model = "";
+  let sandbox = "";
+  let bypass = false;
+  const configs = [];
+  const images = [];
+  const positionals = [];
+
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i];
+    if (arg === "--json" || arg === "--skip-git-repo-check") continue;
+    if (arg === "--dangerously-bypass-approvals-and-sandbox") {
+      bypass = true;
+      continue;
+    }
+    if (arg === "-C" || arg === "--cd") {
+      cwd = rest[++i] || cwd;
+      continue;
+    }
+    if (arg === "-m" || arg === "--model") {
+      model = rest[++i] || "";
+      continue;
+    }
+    if (arg === "-s" || arg === "--sandbox") {
+      sandbox = rest[++i] || "";
+      continue;
+    }
+    if (arg === "-c" || arg === "--config") {
+      configs.push(rest[++i] || "");
+      continue;
+    }
+    if (arg === "-i" || arg === "--image") {
+      images.push(rest[++i] || "");
+      continue;
+    }
+    positionals.push(arg);
+  }
+
+  let rawId = "";
+  let promptArg = "";
+  if (isResume) {
+    rawId = positionals[0] || "";
+    promptArg = positionals[1] || "";
+  } else {
+    promptArg = positionals[0] || "";
+  }
+
+  let prompt = promptArg;
+  if (!prompt || prompt === "-") {
+    prompt = await new Promise((resolveStdin) => {
+      let data = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => { data += chunk; });
+      process.stdin.on("end", () => resolveStdin(data));
+      process.stdin.resume();
+    });
+  }
+
+  const threadId = rawId || `01900000-0000-7000-8000-${String(Date.now()).slice(-12).padStart(12, "0")}`;
+  const codexHome = process.env.CODEX_HOME || "";
+  if (codexHome) {
+    appendFileSync(
+      resolve(codexHome, ".mock-exec-invocations.jsonl"),
+      `${JSON.stringify({
+        argv,
+        isResume,
+        cwd,
+        model,
+        sandbox,
+        bypass,
+        configs,
+        images,
+        rawId,
+        threadId,
+        prompt,
+        hasOriginatorOverride: Object.hasOwn(process.env, "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"),
+      })}\n`,
+      "utf8",
+    );
+  }
+
+  const writeEv = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
+  writeEv({ type: "thread.started", thread_id: threadId });
+  writeEv({
+    type: "item.completed",
+    item: {
+      id: "item_0",
+      type: "error",
+      message: `Model metadata for \`${model || "gpt-5.4"}\` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.`,
+    },
+  });
+  writeEv({ type: "turn.started" });
+
+  if (prompt.includes("[SLOW]")) {
+    await new Promise((resolveSlow) => {
+      const timer = setTimeout(() => {
+        const reply = `Codex exec 慢任务完成: ${prompt}`;
+        writeEv({ type: "item.completed", item: { id: "item_1", type: "agent_message", text: reply } });
+        writeEv({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } });
+        resolveSlow();
+      }, 15_000);
+      process.on("SIGTERM", () => {
+        clearTimeout(timer);
+        process.exit(143);
+      });
+    });
+    process.exit(0);
+  }
+
+  if (prompt.includes("[EXEC_FAIL]")) {
+    writeEv({ type: "turn.failed", error: { message: "mock exec failure" } });
+    process.exit(1);
+  }
+
+  const reply = `Codex exec 已处理: ${prompt}`;
+  if (codexHome) {
+    appendFileSync(
+      resolve(codexHome, ".mock-exec-turns.jsonl"),
+      `${JSON.stringify({ threadId, prompt, reply })}\n`,
+      "utf8",
+    );
+  }
+  writeEv({ type: "item.completed", item: { id: "item_1", type: "agent_message", text: reply } });
+  writeEv({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } });
+  process.exit(0);
+}
+
+if (process.argv[2] === "exec") {
+  void runMockExecCli(process.argv.slice(3));
+} else {
+  runMockAppServer();
+}
+
+function runMockAppServer() {
 
 function readMockProbeError() {
   const home = process.env.CODEX_HOME || "";
@@ -139,6 +277,27 @@ async function runTurnBehavior(thread, turn, text) {
     return;
   }
 
+  if (text.includes("[OFFICIAL_CLIENT_ONLY]")) {
+    const errDetail = "unexpected status 403 Forbidden: This account only allows Codex official clients, url: http://127.0.0.1:3425/v1/responses";
+    send({
+      method: "error",
+      params: {
+        error: {
+          message: "Reconnecting... 1/5",
+          codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 403 } },
+          additionalDetails: errDetail,
+        },
+        willRetry: true,
+        threadId: thread.id,
+        turnId: turn.id,
+      },
+    });
+    turn.status = "failed";
+    turn.error = { message: errDetail };
+    send({ method: "turn/completed", params: { threadId: thread.id, turn } });
+    return;
+  }
+
   const isGoalContinuation = text.includes("[Goal 自动推进");
   let reply = `Codex 已处理: ${text}`;
   if (text.includes("[GOAL_TWO_STEPS]") && !isGoalContinuation) {
@@ -256,6 +415,24 @@ rl.on("line", (line) => {
 
   if (method === "thread/read") {
     const thread = ensureThread(params.threadId);
+    const execTurnsFile = resolve(process.env.CODEX_HOME || "", ".mock-exec-turns.jsonl");
+    if (thread.turns.length === 0 && process.env.CODEX_HOME && existsSync(execTurnsFile)) {
+      const execRows = readFileSync(execTurnsFile, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .filter((row) => row.threadId === params.threadId);
+      if (execRows.length) {
+        thread.turns = execRows.map((row, idx) => ({
+          id: `exec-recorded-${idx + 1}`,
+          status: "completed",
+          items: [
+            { type: "userMessage", id: `u-exec-${idx + 1}`, content: [{ type: "text", text: row.prompt }] },
+            { type: "agentMessage", id: `a-exec-${idx + 1}`, text: row.reply, phase: "final_answer" },
+          ],
+        }));
+      }
+    }
     send({ id, result: { thread } });
     return;
   }
@@ -366,3 +543,4 @@ rl.on("line", (line) => {
 
   send({ id, error: { code: -32601, message: `Method not found: ${method}` } });
 });
+}

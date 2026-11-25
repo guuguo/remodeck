@@ -776,6 +776,85 @@ export async function handleDemoApiRequest(rawPath, { method = "GET", body = nul
     };
   }
 
+  if (pathname === "api/threads/search") {
+    const q = String(params.get("q") || "").trim();
+    const provider = String(params.get("provider") || "").trim();
+    const archived = params.get("archived") || "0";
+    const cwd = String(params.get("cwd") || "").trim();
+    const limit = Math.max(1, Math.min(150, Number(params.get("limit") || 60)));
+    const terms = [...new Set(q.split(/\s+/).filter(Boolean))].slice(0, 6);
+    const lowerTerms = terms.map((t) => t.toLowerCase());
+    const matchedThreads = [];
+
+    if (lowerTerms.length > 0 && archived !== "1") {
+      for (const item of DEMO_THREADS) {
+        if (provider && provider !== "all" && item.provider !== provider) continue;
+        if (cwd && item.cwd !== cwd) continue;
+        const detail = buildDemoThreadDetail(item.id);
+        const msgCandidates = [];
+        for (const turn of detail?.thread?.turns || []) {
+          for (const entry of turn?.items || []) {
+            if (entry?.type === "userMessage" && entry.text) {
+              msgCandidates.push({ role: "user", text: entry.text });
+            } else if (entry?.type === "agentMessage" && entry.text) {
+              msgCandidates.push({ role: "assistant", text: entry.text });
+            }
+          }
+        }
+        const metaHay = [item.title, item.preview, item.cwd, item.provider].join(" ").toLowerCase();
+        const msgMatches = msgCandidates.filter((m) => lowerTerms.every((t) => m.text.toLowerCase().includes(t)));
+        const crossMatches = msgCandidates.filter((m) => lowerTerms.some((t) => m.text.toLowerCase().includes(t)));
+        const metaAny = lowerTerms.some((t) => metaHay.includes(t));
+        const allSatisfied = lowerTerms.every(
+          (t) => metaHay.includes(t) || msgCandidates.some((m) => m.text.toLowerCase().includes(t)),
+        );
+        if (!allSatisfied) continue;
+        const chosen = msgMatches[0] || crossMatches[0] || null;
+        let snippet = "";
+        if (chosen) {
+          const clean = chosen.text.replace(/\s+/g, " ").trim();
+          const lowerClean = clean.toLowerCase();
+          let hitIdx = -1;
+          let hitLen = 0;
+          for (const t of lowerTerms) {
+            const idx = lowerClean.indexOf(t);
+            if (idx >= 0 && (hitIdx < 0 || idx < hitIdx)) {
+              hitIdx = idx;
+              hitLen = t.length;
+            }
+          }
+          if (hitIdx >= 0) {
+            const start = Math.max(0, hitIdx - 24);
+            const end = Math.min(clean.length, hitIdx + hitLen + 64);
+            snippet = `${start > 0 ? "…" : ""}${clean.slice(start, end).trim()}${end < clean.length ? "…" : ""}`;
+          }
+        }
+        matchedThreads.push({
+          ...item,
+          searchMatch: {
+            matchSource: chosen ? (metaAny ? "both" : "content") : "meta",
+            matchRole: chosen ? chosen.role : "",
+            matchSnippet: snippet,
+            matchCount: Math.max(1, msgMatches.length || crossMatches.length),
+          },
+        });
+      }
+    }
+
+    return {
+      ok: true,
+      query: q,
+      terms,
+      threads: matchedThreads.slice(0, limit),
+      indexStatus: {
+        ready: true,
+        indexing: false,
+        indexedThreads: DEMO_THREADS.length,
+        totalThreads: DEMO_THREADS.length,
+      },
+    };
+  }
+
   if (pathname === "api/thread") {
     const id = params.get("id") || DEMO_THREADS[0].id;
     return { ok: true, ...buildDemoThreadDetail(id) };

@@ -4,6 +4,7 @@ import {
   normalizeCodexAgentMessageItem,
   normalizeCodexUserMessageItem,
 } from "../codex-input-clean.mjs";
+import { DEFAULT_THREAD_TOOL_TEXT_CHARS, truncateToolTextForRead } from "../thread-display.mjs";
 
 const DEFAULT_TAIL_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_SCAN_BYTES = 64 * 1024 * 1024;
@@ -11,10 +12,17 @@ const FALLBACK_NO_TURN_MAX_SCAN_BYTES = 256 * 1024 * 1024;
 const LARGE_PREVIEW_CACHE_MAX = 64;
 const CURSOR_PREFIX = "tail:";
 const DUPLICATE_MESSAGE_WINDOW_MS = 2_000;
+// Leave space for the omission marker so the API limit does not truncate it again.
+const MAX_PREVIEW_TOOL_TEXT_CHARS = DEFAULT_THREAD_TOOL_TEXT_CHARS - 64;
 const BUF_TYPE_EVENT_MSG = Buffer.from('"type":"event_msg"');
 const BUF_TYPE_RESPONSE_ITEM = Buffer.from('"type":"response_item"');
 const BUF_PAYLOAD_MESSAGE = Buffer.from('"payload":{"type":"message"');
+const BUF_PAYLOAD_FUNCTION_CALL = Buffer.from('"payload":{"type":"function_call"');
+const BUF_PAYLOAD_FUNCTION_CALL_OUTPUT = Buffer.from('"payload":{"type":"function_call_output"');
+const BUF_CLOCK_SLEEP_NAME = Buffer.from('"name":"sleep"');
+const BUF_CLOCK_SLEEP_FULL_NAME = Buffer.from('"name":"clock.sleep"');
 const BUF_TYPE_TURN_CONTEXT = Buffer.from('"type":"turn_context"');
+const MAX_FUNCTION_CALL_OUTPUT_LINE_BYTES = 4096;
 const largePreviewCache = new Map();
 const PREVIEW_EVENT_TYPES = new Set([
   "task_started",
@@ -23,6 +31,19 @@ const PREVIEW_EVENT_TYPES = new Set([
   "user_message",
   "agent_message",
 ]);
+const PREVIEW_PROCESS_ITEM_TYPES = new Set([
+  "CommandExecution",
+  "FileChange",
+  "McpToolCall",
+  "Extension",
+  "Reasoning",
+]);
+
+function isClockSleepCallPayload(payload = {}) {
+  const name = String(payload?.name || "").trim();
+  const namespace = String(payload?.namespace || "").trim();
+  return (name === "sleep" && (!namespace || namespace === "clock")) || name === "clock.sleep";
+}
 
 function previewRecordType(record) {
   const payload = record?.payload || {};
@@ -31,14 +52,120 @@ function previewRecordType(record) {
     if (payload.type === "item_completed") {
       if (payload.item?.type === "UserMessage") return "item_user_message";
       if (payload.item?.type === "AgentMessage") return "item_agent_message";
+      if (PREVIEW_PROCESS_ITEM_TYPES.has(payload.item?.type)) return "item_process";
     }
   }
-  if (record?.type === "response_item" && payload.type === "message") {
-    if (payload.role === "user") return "response_user_message";
-    if (payload.role === "assistant") return "response_agent_message";
+  if (record?.type === "response_item") {
+    if (payload.type === "message") {
+      if (payload.role === "user") return "response_user_message";
+      if (payload.role === "assistant") return "response_agent_message";
+    }
+    if (payload.type === "function_call" && isClockSleepCallPayload(payload)) {
+      return "response_clock_sleep";
+    }
+    if (payload.type === "function_call_output" && payload.call_id) {
+      return "response_function_call_output";
+    }
   }
   if (record?.type === "turn_context") return "turn_context";
   return "";
+}
+
+function previewProcessItem(item, payload = null) {
+  const { id, status } = item;
+  switch (item.type) {
+    case "CommandExecution":
+      return {
+        type: "commandExecution",
+        id,
+        status,
+        command: Array.isArray(item.command) ? item.command.join(" ") : item.command,
+        aggregatedOutput: truncateToolTextForRead(item.aggregated_output || "", MAX_PREVIEW_TOOL_TEXT_CHARS),
+      };
+    case "FileChange":
+      return {
+        type: "fileChange",
+        id,
+        status,
+        changes: Object.keys(item.changes || {}).map((path) => ({ path })),
+        ...(status === "failed" && item.stderr
+          ? { error: { message: truncateToolTextForRead(item.stderr, MAX_PREVIEW_TOOL_TEXT_CHARS) } }
+          : {}),
+      };
+    case "McpToolCall":
+      return {
+        type: "mcpToolCall",
+        id,
+        status,
+        tool: item.tool,
+        arguments: item.arguments,
+        error: item.error,
+      };
+    case "Extension": {
+      const rawDuration = Number(item.durationMs ?? item.duration_ms);
+      const durationMs = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : null;
+      const startedAtMs = Number(payload?.started_at_ms);
+      const completedAtMs = Number(payload?.completed_at_ms);
+      return {
+        type: "mcpToolCall",
+        id,
+        status: status || "completed",
+        tool: item.kind,
+        ...(durationMs ? { durationMs, arguments: { duration_ms: durationMs } } : {}),
+        ...(Number.isFinite(startedAtMs) && startedAtMs > 0 ? { startedAtMs } : {}),
+        ...(Number.isFinite(completedAtMs) && completedAtMs > 0 ? { completedAtMs } : {}),
+      };
+    }
+    case "Reasoning":
+      return item.summary_text?.length ? { type: "reasoning", id, summary: item.summary_text } : null;
+    default:
+      return null;
+  }
+}
+
+function extractFunctionCallOutputText(output) {
+  if (typeof output === "string") return output;
+  if (Array.isArray(output)) {
+    return output
+      .map((part) => (typeof part === "string" ? part : (typeof part?.text === "string" ? part.text : "")))
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (output && typeof output === "object" && typeof output.text === "string") {
+    return output.text;
+  }
+  return "";
+}
+
+function parseClockSleepCallItem(record) {
+  const payload = record?.payload || {};
+  const callId = String(payload.call_id || payload.id || "").trim();
+  if (!callId) return null;
+  let parsedArgs = {};
+  if (typeof payload.arguments === "string" && payload.arguments.trim()) {
+    try {
+      parsedArgs = JSON.parse(payload.arguments);
+    } catch {
+      parsedArgs = {};
+    }
+  } else if (payload.arguments && typeof payload.arguments === "object") {
+    parsedArgs = payload.arguments;
+  }
+  const rawDuration = Number(parsedArgs?.duration_ms ?? parsedArgs?.durationMs);
+  const durationMs = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : null;
+  const parsedTs = Date.parse(record?.timestamp || "");
+  const startedAtMs = Number.isFinite(parsedTs) && parsedTs > 0 ? parsedTs : null;
+  const namespace = String(payload.namespace || "").trim();
+  const name = String(payload.name || "sleep").trim();
+  const tool = name.includes(".") ? name : (namespace ? `${namespace}.${name}` : "clock.sleep");
+  return {
+    type: "mcpToolCall",
+    id: callId,
+    status: "inProgress",
+    tool,
+    ...(durationMs ? { durationMs, arguments: { duration_ms: durationMs } } : {}),
+    ...(startedAtMs ? { startedAtMs } : {}),
+  };
 }
 
 function responseMessageText(payload) {
@@ -201,6 +328,7 @@ function isMessageRecordType(type) {
 function previewTurns(records, limit, { automationNames = null } = {}) {
   const turns = [];
   const turnById = new Map();
+  const pendingSleepCalls = new Map();
   let current = null;
   let pendingTurnCtx = null;
   let previousMessage = null;
@@ -269,13 +397,65 @@ function previewTurns(records, limit, { automationNames = null } = {}) {
         }
       }
       sequence += 1;
+    } else if (type === "response_clock_sleep") {
+      const callTurnId = String(payload.internal_chat_message_metadata_passthrough?.turn_id || payload.turn_id || "").trim();
+      const targetTurn = (callTurnId && turnById.get(callTurnId)) || current;
+      const sleepItem = parseClockSleepCallItem(record);
+      if (targetTurn && sleepItem && !pendingSleepCalls.has(sleepItem.id)) {
+        const index = targetTurn.items.length;
+        targetTurn.items.push(sleepItem);
+        pendingSleepCalls.set(sleepItem.id, { turn: targetTurn, index });
+      }
+    } else if (type === "item_process") {
+      const targetTurn = payload.turn_id ? turnById.get(payload.turn_id) : current;
+      const item = previewProcessItem(payload.item, payload);
+      if (targetTurn && item) {
+        const pending = item.id ? pendingSleepCalls.get(item.id) : null;
+        if (pending && pending.turn === targetTurn) {
+          targetTurn.items[pending.index] = item;
+          pendingSleepCalls.delete(item.id);
+        } else {
+          targetTurn.items.push(item);
+        }
+      }
+    } else if (type === "response_function_call_output") {
+      const callId = String(payload.call_id || "").trim();
+      const pending = callId ? pendingSleepCalls.get(callId) : null;
+      if (!pending) continue;
+      const targetItem = pending.turn.items[pending.index];
+      const outText = extractFunctionCallOutputText(payload.output).trim();
+      if (targetItem) {
+        targetItem.status = /^aborted\b/i.test(outText) ? "interrupted" : "completed";
+        if (outText) {
+          targetItem.resultText = truncateToolTextForRead(outText, MAX_PREVIEW_TOOL_TEXT_CHARS);
+        }
+      }
+      pendingSleepCalls.delete(callId);
     } else if (type === "task_complete" && payload.turn_id === current.id) {
       current.status = "completed";
       current.completedAt = payload.completed_at || timestampSeconds(record);
       current.durationMs = payload.duration_ms || null;
+      for (const [callId, pending] of pendingSleepCalls.entries()) {
+        if (pending.turn === current) {
+          const targetItem = pending.turn.items[pending.index];
+          if (targetItem && targetItem.status === "inProgress") {
+            targetItem.status = "completed";
+          }
+          pendingSleepCalls.delete(callId);
+        }
+      }
     } else if (type === "turn_aborted" && (!payload.turn_id || payload.turn_id === current.id)) {
       current.status = "interrupted";
       current.completedAt = timestampSeconds(record);
+      for (const [callId, pending] of pendingSleepCalls.entries()) {
+        if (pending.turn === current) {
+          const targetItem = pending.turn.items[pending.index];
+          if (targetItem && targetItem.status === "inProgress") {
+            targetItem.status = "interrupted";
+          }
+          pendingSleepCalls.delete(callId);
+        }
+      }
     }
   }
   return collapseSilentHeartbeatTurns(turns).slice(-Math.max(1, Number(limit) || 1));
@@ -383,10 +563,17 @@ export async function readLargeThreadPreview(path, {
         position = newline + 1;
 
         const mayBeEvent = lineBuf.includes(BUF_TYPE_EVENT_MSG);
-        const mayBeMessage = lineBuf.includes(BUF_TYPE_RESPONSE_ITEM)
+        const mayBeResponseItem = lineBuf.includes(BUF_TYPE_RESPONSE_ITEM);
+        const mayBeMessage = mayBeResponseItem
           && lineBuf.includes(BUF_PAYLOAD_MESSAGE);
+        const mayBeClockSleepCall = mayBeResponseItem
+          && lineBuf.includes(BUF_PAYLOAD_FUNCTION_CALL)
+          && (lineBuf.includes(BUF_CLOCK_SLEEP_NAME) || lineBuf.includes(BUF_CLOCK_SLEEP_FULL_NAME));
+        const mayBeShortFunctionCallOutput = lineBuf.length <= MAX_FUNCTION_CALL_OUTPUT_LINE_BYTES
+          && mayBeResponseItem
+          && lineBuf.includes(BUF_PAYLOAD_FUNCTION_CALL_OUTPUT);
         const mayBeTurnCtx = lineBuf.includes(BUF_TYPE_TURN_CONTEXT);
-        if (!mayBeEvent && !mayBeMessage && !mayBeTurnCtx) continue;
+        if (!mayBeEvent && !mayBeMessage && !mayBeClockSleepCall && !mayBeShortFunctionCallOutput && !mayBeTurnCtx) continue;
 
         const line = lineBuf.toString("utf8");
         let record;

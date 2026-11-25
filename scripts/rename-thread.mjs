@@ -3,11 +3,28 @@
  * Rename the current Agent Control session from inside an AI agent turn.
  *
  * Usage:
- *   node scripts/rename-thread.mjs "新会话标题" [--id <threadIdOrRawId>] [--provider <provider>] [--cwd <cwd>] [--url <baseUrl>]
+ *   node scripts/rename-thread.mjs "对象｜主旨" [--lock] [--id <threadIdOrRawId>] [--provider <provider>] [--cwd <cwd>] [--url <baseUrl>]
+ *   node scripts/rename-thread.mjs --append "短后缀" [--id <threadIdOrRawId>] [--provider <provider>] [--cwd <cwd>] [--url <baseUrl>]
+ *   node scripts/rename-thread.mjs "【客户｜提出人｜模块｜机型】异常" --domain [...]
  */
 
+import {
+  isCanonicalDomainTitle,
+  validateAgentBaseTitle,
+  validateAgentSuffix,
+} from "../src/thread-title-policy.mjs";
+
 function parseArgs(argv) {
-  const out = { name: "", id: "", provider: "", cwd: "", url: "" };
+  const out = {
+    name: "",
+    append: "",
+    lock: false,
+    domain: false,
+    id: "",
+    provider: "",
+    cwd: "",
+    url: "",
+  };
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -19,6 +36,12 @@ function parseArgs(argv) {
       out.cwd = argv[++i];
     } else if (arg === "--url" && i + 1 < argv.length) {
       out.url = argv[++i];
+    } else if (arg === "--append" && i + 1 < argv.length) {
+      out.append = argv[++i];
+    } else if (arg === "--lock") {
+      out.lock = true;
+    } else if (arg === "--domain") {
+      out.domain = true;
     } else if (arg === "--help" || arg === "-h") {
       out.help = true;
     } else if (!arg.startsWith("-")) {
@@ -27,6 +50,15 @@ function parseArgs(argv) {
   }
   out.name = positional.join(" ").trim();
   return out;
+}
+
+function printUsage() {
+  console.error([
+    "用法:",
+    '  node scripts/rename-thread.mjs "对象｜主旨" [--lock] [--id <id>] [--provider <p>] [--cwd <dir>] [--url <url>]',
+    '  node scripts/rename-thread.mjs --append "短后缀" [--id <id>] [--provider <p>] [--cwd <dir>] [--url <url>]',
+    '  node scripts/rename-thread.mjs "【客户｜提出人｜模块｜机型】异常" --domain [--id <id>]',
+  ].join("\n"));
 }
 
 function detectEnvSession() {
@@ -66,9 +98,34 @@ async function resolveUniqueLiveThreadId(baseUrl, { provider, cwd }) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (args.help || !args.name) {
-    console.error('用法: node scripts/rename-thread.mjs "新会话标题" [--id <threadIdOrRawId>] [--provider <provider>] [--cwd <cwd>] [--url <baseUrl>]');
+  if (args.help || (!args.name && !args.append)) {
+    printUsage();
     process.exit(args.help ? 0 : 1);
+  }
+  if (args.append && args.name) {
+    console.error("--append 模式只需传入后缀，不要同时传入新主标题");
+    process.exit(1);
+  }
+
+  let effectiveName = args.name;
+  let effectiveSuffix = "";
+  const source = args.domain ? "domain" : "agent";
+  const action = args.append ? "append" : "set";
+
+  if (action === "append") {
+    const sv = validateAgentSuffix(args.append);
+    if (!sv.ok) {
+      console.error(`后缀未通过格式校验：${sv.error}`);
+      process.exit(1);
+    }
+    effectiveSuffix = sv.value;
+  } else if (!args.domain && !isCanonicalDomainTitle(args.name)) {
+    const bv = validateAgentBaseTitle(args.name);
+    if (!bv.ok) {
+      console.error(`标题未通过格式校验：${bv.error}`);
+      process.exit(1);
+    }
+    effectiveName = bv.value;
   }
 
   const baseUrl = (args.url || process.env.AGENT_CONTROL_URL || "http://127.0.0.1:43310").replace(/\/+$/, "");
@@ -88,8 +145,10 @@ async function main() {
     ...(targetId.includes(":") ? { threadId: targetId } : { rawId: targetId }),
     provider: effectiveProvider,
     cwd: effectiveCwd,
-    source: "agent",
-    name: args.name,
+    source,
+    action,
+    ...(action === "append" ? { suffix: effectiveSuffix } : { name: effectiveName }),
+    ...(args.lock ? { lock: true } : {}),
   };
 
   const res = await fetch(`${baseUrl}/api/thread/name`, {

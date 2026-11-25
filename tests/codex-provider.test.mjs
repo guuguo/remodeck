@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -7,13 +7,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { crc32, deflateSync } from "node:zlib";
 import { readLargeThreadPreview } from "../src/providers/codex-large-preview.mjs";
+import { buildCodexExecArgs } from "../src/providers/codex-exec-runner.mjs";
 import { CodexProvider } from "../src/providers/codex-provider.mjs";
+import { CodexThreadWriterRegistry } from "../src/providers/codex-thread-writer.mjs";
 import { readRolloutActivitySnapshot } from "../src/providers/codex-thread-activity.mjs";
 import { loadCodexThreadHistory } from "../src/providers/codex-thread-history.mjs";
 import { parseCodexQueuedPayload, readIndexedThreadById, readIndexedThreads } from "../src/providers/codex-thread-index.mjs";
 import { ProviderHub } from "../src/provider-hub.mjs";
 import { createAgentControlServer } from "../src/server.mjs";
-import { renderMarkdown } from "../public/markdown.js";
+import { renderMarkdown, renderTurnHtml } from "../public/markdown.js";
 
 const MOCK_CODEX_BIN = fileURLToPath(new URL("./helpers/mock-codex-cli.mjs", import.meta.url));
 
@@ -882,6 +884,63 @@ test("CodexProvider detects external running Codex turns from response_item tail
   assert.equal(listedDone.find((th) => th.rawId === threadId)?.live, false);
 });
 
+test("large Codex history renders recorded execution details while running and after completion", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-codex-preview-process-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const rolloutPath = resolve(dir, "rollout.jsonl");
+  const turnId = "turn-process";
+  const event = (type, fields = {}) => JSON.stringify({
+    type: "event_msg",
+    payload: { type, turn_id: turnId, ...fields },
+  });
+  const completed = (item) => event("item_completed", { item });
+  const lines = [
+    event("task_started"),
+    event("user_message", { message: "检查执行结果" }),
+    event("agent_message", { message: "正在检查", phase: "commentary" }),
+    completed({ type: "Reasoning", id: "reasoning", summary_text: ["查看输出摘要"] }),
+    completed({
+      type: "CommandExecution",
+      id: "command",
+      command: ["npm", "test"],
+      status: "failed",
+      aggregated_output: `2 tests failed\ndata:image/png;base64,${"A".repeat(32 * 1024)}`,
+    }),
+    completed({ type: "FileChange", id: "edit", changes: { "/repo/src/app.js": { type: "update", unified_diff: "diff contents" } }, status: "completed" }),
+    completed({ type: "McpToolCall", id: "mcp", tool: "read_file", arguments: { path: "/repo/src/config.js" }, status: "completed" }),
+    completed({ type: "Extension", id: "sleep", kind: "clock.sleep", durationMs: 60_000 }),
+    completed({ type: "ContextCompaction", id: "compact" }),
+  ];
+  const load = async () => {
+    const result = await loadCodexThreadHistory({
+      rawId: "thread-process",
+      indexedThread: { rolloutPath },
+      largeBytesThreshold: 1,
+    });
+    assert.equal(result.thread.largeHistory, true);
+    return result.thread.turns[0];
+  };
+  await writeFile(rolloutPath, `${lines.join("\n")}\n`);
+
+  const liveTurn = await load();
+  assert.equal(liveTurn.status, "inProgress");
+  assert.deepEqual(liveTurn.items.map((item) => item.type), [
+    "userMessage", "agentMessage", "reasoning", "commandExecution", "fileChange", "mcpToolCall", "mcpToolCall",
+  ]);
+  const liveHtml = renderTurnHtml(liveTurn);
+  assert.match(liveHtml, /live-progress-feed/);
+  assert.match(liveHtml, /npm test/);
+
+  lines.push(event("agent_message", { message: "检查完成", phase: "final_answer" }), event("task_complete"));
+  await writeFile(rolloutPath, `${lines.join("\n")}\n`);
+  const finishedTurn = await load();
+  assert.equal(finishedTurn.status, "completed");
+  const finishedHtml = renderTurnHtml(finishedTurn);
+  for (const text of ["展开明细", "npm test", "2 tests failed", "图片Base64已省略", "app.js", "config.js", "clock.sleep", "查看输出摘要", "检查完成"]) {
+    assert.ok(finishedHtml.includes(text), `missing ${text}`);
+  }
+});
+
 test("codex-thread-history and codex-large-preview enrich per-turn model and effort from turn_context", async (t) => {
   const dir = await mkdtemp(resolve(os.tmpdir(), "ac-codex-turn-model-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -1306,4 +1365,493 @@ test("archived Codex threads return thread_archived error on send, unarchive via
   assert.equal(r2.ok, true);
   assert.equal(r2.alreadyUnarchived, true);
   await fallbackProvider.close();
+});
+
+test("buildCodexExecArgs builds compliant new and resume arguments without -C/-s on resume", () => {
+  const freshArgs = buildCodexExecArgs({
+    cwd: "/tmp/proj",
+    model: "gpt-5.4",
+    effort: "high",
+    permissionMode: "workspace",
+    imagePaths: ["/tmp/a.png"],
+  });
+  assert.deepEqual(freshArgs, [
+    "exec",
+    "--json",
+    "--skip-git-repo-check",
+    "-C",
+    "/tmp/proj",
+    "-m",
+    "gpt-5.4",
+    "-s",
+    "workspace-write",
+    "-c",
+    'model_reasoning_effort="high"',
+    "-i",
+    "/tmp/a.png",
+    "-",
+  ]);
+
+  const resumeArgs = buildCodexExecArgs({
+    rawId: "01900000-0000-7000-8000-000000000011",
+    cwd: "/tmp/proj",
+    model: "gpt-5.4",
+    effort: "medium",
+    permissionMode: "safe",
+  });
+  assert.equal(resumeArgs.includes("-C"), false);
+  assert.equal(resumeArgs.includes("-s"), false);
+  assert.deepEqual(resumeArgs, [
+    "exec",
+    "resume",
+    "--json",
+    "--skip-git-repo-check",
+    "-m",
+    "gpt-5.4",
+    "-c",
+    'sandbox_mode="read-only"',
+    "-c",
+    'model_reasoning_effort="medium"',
+    "01900000-0000-7000-8000-000000000011",
+    "-",
+  ]);
+
+  const turboResume = buildCodexExecArgs({
+    rawId: "01900000-0000-7000-8000-000000000011",
+    permissionMode: "turbo",
+  });
+  assert.ok(turboResume.includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.equal(turboResume.some((a) => String(a).startsWith("sandbox_mode=")), false);
+});
+
+test("official-client-only 403 triggers codexExecSuggested, toggles codexExecMode via /api/profile/meta, and runs native codex exec/resume + interrupt", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-codex-exec-compat-"));
+  const homeDir = resolve(root, "home");
+  const dataDir = resolve(root, "data");
+  const codexHome = resolve(homeDir, ".codex");
+  await Promise.all([
+    mkdir(dataDir, { recursive: true }),
+    mkdir(codexHome, { recursive: true }),
+  ]);
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    CODEX_HOME: codexHome,
+    CODEX_BIN: MOCK_CODEX_BIN,
+    AGENT_CONTROL_NO_HOST_OPEN: "1",
+    AGENT_CONTROL_AUTO_INSTALL_CLI: "0",
+  };
+  const codexProvider = new CodexProvider({ env, dataDir });
+  const srv = await createAgentControlServer({
+    port: 0,
+    env,
+    dataDir,
+    providers: [codexProvider],
+    disableRelay: true,
+    disableTunnel: true,
+    disableUpdateCheck: true,
+  });
+  await srv.start();
+  t.after(async () => {
+    await srv.close().catch(() => {});
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const baseUrl = srv.url;
+  const headers = { "Content-Type": "application/json" };
+  const sseEvents = [];
+  const sseAbort = new AbortController();
+  const sseRes = await fetch(`${baseUrl}/api/events`, { signal: sseAbort.signal });
+  assert.equal(sseRes.status, 200);
+  const sseReader = sseRes.body.getReader();
+  const ssePump = (async () => {
+    const decoder = new TextDecoder();
+    let buf = "";
+    try {
+      while (true) {
+        const { done, value } = await sseReader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) >= 0) {
+          const block = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          let evName = "message";
+          const dataLines = [];
+          for (const line of block.split("\n")) {
+            if (line.startsWith("event:")) evName = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+          }
+          if (dataLines.length) {
+            try {
+              sseEvents.push({ event: evName, data: JSON.parse(dataLines.join("\n")) });
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+  })();
+  t.after(async () => {
+    sseAbort.abort();
+    await ssePump.catch(() => {});
+  });
+
+  const pollUntil = async (fn, timeoutMs = 6_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const val = await fn();
+      if (val) return val;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error("等待异步条件超时");
+  };
+
+  // 1. Trigger 403 official-client-only via app-server
+  const failRes = await fetch(`${baseUrl}/api/thread/new`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      provider: "codex",
+      profileId: "default",
+      cwd: root,
+      text: "触发仅官方客户端校验 [OFFICIAL_CLIENT_ONLY]",
+      memoryBrief: false,
+    }),
+  });
+  assert.equal(failRes.status, 200);
+
+  await pollUntil(async () => {
+    const prov = await fetch(`${baseUrl}/api/providers`).then((r) => r.json());
+    const def = (prov.profiles || []).find((p) => p.provider === "codex" && p.id === "default");
+    return def?.health?.reasonCode === "official_client_only" ? def : null;
+  });
+
+  const provBefore = await fetch(`${baseUrl}/api/providers`).then((r) => r.json());
+  const defBefore = provBefore.profiles.find((p) => p.provider === "codex" && p.id === "default");
+  assert.equal(defBefore.health.codexExecSuggested, true);
+  assert.equal(defBefore.health.codexExecMode, false);
+
+  // 2. Enable codexExecMode via /api/profile/meta -> clears unavailable status back to unknown
+  const enableRes = await fetch(`${baseUrl}/api/profile/meta`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      provider: "codex",
+      profileId: "default",
+      codexExecMode: true,
+    }),
+  });
+  assert.equal(enableRes.status, 200);
+  const enableJson = await enableRes.json();
+  const defEnabled = enableJson.profiles.find((p) => p.provider === "codex" && p.id === "default");
+  assert.equal(defEnabled.health.codexExecMode, true);
+  assert.equal(defEnabled.health.status, "unknown");
+
+  // 3. Start new thread in codex exec mode (despite non-fatal item.type==="error" warning)
+  const execNewRes = await fetch(`${baseUrl}/api/thread/new`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      provider: "codex",
+      profileId: "default",
+      cwd: root,
+      text: "用原生 exec 首轮测试",
+      model: "gpt-5.4",
+      effort: "medium",
+      permissionMode: "workspace",
+      memoryBrief: false,
+    }),
+  });
+  assert.equal(execNewRes.status, 200);
+  const execNewJson = await execNewRes.json();
+  const execThreadId = execNewJson.thread.id;
+  const execRawId = execNewJson.thread.rawId;
+
+  const firstCompleted = await pollUntil(() => sseEvents.find(
+    (e) => e.event === "provider_event"
+      && e.data?.threadId === execThreadId
+      && e.data?.method === "turn/completed",
+  ));
+  assert.equal(firstCompleted.data.params.turn.status, "completed");
+  assert.ok(sseEvents.some(
+    (e) => e.event === "provider_event"
+      && e.data?.threadId === execThreadId
+      && e.data?.method === "item/agentMessage/delta"
+      && String(e.data?.params?.delta || "").includes("Codex exec 已处理"),
+  ));
+
+  // 4. Resume same thread in codex exec mode
+  const turn2Res = await fetch(`${baseUrl}/api/turn`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      threadId: execThreadId,
+      text: "继续第二轮 exec 恢复",
+      permissionMode: "workspace",
+    }),
+  });
+  assert.equal(turn2Res.status, 200);
+  await pollUntil(() => sseEvents.filter(
+    (e) => e.event === "provider_event"
+      && e.data?.threadId === execThreadId
+      && e.data?.method === "turn/completed",
+  ).length >= 2);
+
+  const invocationsRaw = await readFile(resolve(codexHome, ".mock-exec-invocations.jsonl"), "utf8");
+  const invocations = invocationsRaw.trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(invocations.length, 2);
+  assert.equal(invocations[0].isResume, false);
+  assert.equal(invocations[0].hasOriginatorOverride, false);
+  assert.equal(invocations[0].prompt, "用原生 exec 首轮测试");
+  assert.equal(invocations[1].isResume, true);
+  assert.equal(invocations[1].rawId, execRawId);
+  assert.equal(invocations[1].hasOriginatorOverride, false);
+  assert.equal(invocations[1].prompt, "继续第二轮 exec 恢复");
+
+  // 5. Slow exec turn + interrupt
+  const slowRes = await fetch(`${baseUrl}/api/turn`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      threadId: execThreadId,
+      text: "执行慢任务 [SLOW]",
+    }),
+  });
+  assert.equal(slowRes.status, 200);
+  await pollUntil(() => sseEvents.some(
+    (e) => e.event === "provider_event"
+      && e.data?.threadId === execThreadId
+      && e.data?.method === "turn/started"
+      && sseEvents.filter((x) => x.event === "provider_event" && x.data?.threadId === execThreadId && x.data?.method === "turn/started").length >= 3,
+  ));
+  const intRes = await fetch(`${baseUrl}/api/interrupt`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ threadId: execThreadId }),
+  });
+  assert.equal(intRes.status, 200);
+  const interruptedEv = await pollUntil(() => sseEvents.find(
+    (e) => e.event === "provider_event"
+      && e.data?.threadId === execThreadId
+      && e.data?.method === "turn/completed"
+      && e.data?.params?.turn?.status === "interrupted",
+  ));
+  assert.equal(interruptedEv.data.params.turn.status, "interrupted");
+
+  // 6. Toggle back to default app-server mode
+  const disableRes = await fetch(`${baseUrl}/api/profile/meta`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      provider: "codex",
+      profileId: "default",
+      codexExecMode: false,
+    }),
+  });
+  assert.equal(disableRes.status, 200);
+  const disableJson = await disableRes.json();
+  assert.equal(disableJson.profiles.find((p) => p.provider === "codex" && p.id === "default")?.health?.codexExecMode, false);
+
+  const appServerTurnRes = await fetch(`${baseUrl}/api/turn`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      threadId: execThreadId,
+      text: "切回 app-server 正常执行 [COMPLETE_NOW]",
+    }),
+  });
+  assert.equal(appServerTurnRes.status, 200);
+  await pollUntil(() => sseEvents.filter(
+    (e) => e.event === "provider_event"
+      && e.data?.threadId === execThreadId
+      && e.data?.method === "turn/completed",
+  ).length >= 4);
+
+  // Check exec invocations did not increase on app-server turn
+  const invocationsAfter = (await readFile(resolve(codexHome, ".mock-exec-invocations.jsonl"), "utf8"))
+    .trim().split("\n");
+  assert.equal(invocationsAfter.length, 3);
+
+  // 7. Static chat-window compatibility banner assertions in public/index.html & public/app.css
+  const [indexHtml, appCss] = await Promise.all([
+    readFile(resolve(process.cwd(), "public/index.html"), "utf8"),
+    readFile(resolve(process.cwd(), "public/app.css"), "utf8"),
+  ]);
+  assert.match(indexHtml, /id="codexCompatBanner"/);
+  assert.match(appCss, /\.codex-compat-banner\b/);
+  assert.match(appCss, /\.codex-compat-new-btn\b/);
+  assert.match(appCss, /:root\[data-theme="light"\]\s+\.codex-compat-banner\b/);
+});
+
+test("CodexThreadWriterRegistry ignores own app-server PID while flagging external writers", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-codex-ignore-pid-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const rolloutPath = resolve(dir, "rollout.jsonl");
+  await writeFile(rolloutPath, "{}\n", "utf8");
+
+  const ownOnly = new CodexThreadWriterRegistry({
+    lsofImpl: async () => ["4242"],
+  });
+  const resOwn = await ownOnly.detectExternalWriter({ rolloutPath, ignorePids: [4242] });
+  assert.equal(resOwn.busy, false);
+
+  const externalAlso = new CodexThreadWriterRegistry({
+    lsofImpl: async () => ["4242", "9999"],
+  });
+  const resExt = await externalAlso.detectExternalWriter({ rolloutPath, ignorePids: [4242] });
+  assert.equal(resExt.busy, true);
+  assert.equal(resExt.source, "external_writer");
+  assert.deepEqual(resExt.pids, ["9999"]);
+});
+
+test("codex-large-preview, rollout activity, and renderTurnHtml show live, completed, and aborted clock.sleep waits", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-codex-sleep-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const turnId = "turn-sleep-1";
+  const startIso = "2026-11-23T09:40:18.590Z";
+  const startMs = Date.parse(startIso);
+  const doneIso = "2026-11-23T09:41:17.596Z";
+  const callId = "call_sleep_59s";
+
+  const baseLines = [
+    JSON.stringify({
+      timestamp: "2026-11-23T09:40:00.000Z",
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: turnId, started_at: Math.floor(startMs / 1000) },
+    }),
+    JSON.stringify({
+      timestamp: "2026-11-23T09:40:01.000Z",
+      type: "event_msg",
+      payload: { type: "user_message", message: "观测预发日志窗口" },
+    }),
+    JSON.stringify({
+      timestamp: startIso,
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        status: "completed",
+        name: "sleep",
+        namespace: "clock",
+        arguments: "{\"duration_ms\":59000}",
+        call_id: callId,
+        internal_chat_message_metadata_passthrough: { turn_id: turnId },
+      },
+    }),
+  ];
+
+  // 1. Live sleeping state in rollout activity and large preview
+  const liveRollout = resolve(dir, "rollout-live.jsonl");
+  await writeFile(liveRollout, `${baseLines.join("\n")}\n`, "utf8");
+
+  const actLive = await readRolloutActivitySnapshot(liveRollout, null, { nowMs: startMs + 22_000 });
+  assert.equal(actLive.activity?.status, "running");
+  assert.equal(actLive.activity?.phase, "定时等待 59s");
+  assert.equal(actLive.activity?.text, "已等待 22s / 59s");
+
+  const previewLive = await readLargeThreadPreview(liveRollout, { limit: 5 });
+  assert.equal(previewLive.turns.length, 1);
+  const liveSleepItems = previewLive.turns[0].items.filter((it) => it.type === "mcpToolCall");
+  assert.equal(liveSleepItems.length, 1);
+  assert.equal(liveSleepItems[0].id, callId);
+  assert.equal(liveSleepItems[0].status, "inProgress");
+  assert.equal(liveSleepItems[0].tool, "clock.sleep");
+  assert.equal(liveSleepItems[0].durationMs, 59_000);
+
+  const liveHtml = renderTurnHtml(previewLive.turns[0], {
+    forceRunning: true,
+    livePhase: `${actLive.activity.phase} · ${actLive.activity.text}`,
+  });
+  for (const expected of ["等待", "clock.sleep · 定时等待 59s", "进行中", "已等待 22s / 59s"]) {
+    assert.ok(liveHtml.includes(expected), `missing live sleep text: ${expected}`);
+  }
+
+  // 2. Completed sleep deduplicates call + Extension and clears stale wait text in activity
+  const doneRollout = resolve(dir, "rollout-done.jsonl");
+  const doneLines = [
+    ...baseLines,
+    JSON.stringify({
+      timestamp: doneIso,
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        turn_id: turnId,
+        item: { type: "Extension", kind: "clock.sleep", id: callId, durationMs: 59_000 },
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-11-23T09:41:17.601Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: callId,
+        output: "Wall time: 59.0062 seconds\nSleep completed.",
+      },
+    }),
+  ];
+  await writeFile(doneRollout, `${doneLines.join("\n")}\n`, "utf8");
+
+  const actAfterSleep = await readRolloutActivitySnapshot(doneRollout, null, { nowMs: Date.parse(doneIso) + 1_000 });
+  assert.equal(actAfterSleep.activity?.status, "running");
+  assert.equal(actAfterSleep.activity?.phase, "处理工具结果");
+  assert.equal(actAfterSleep.activity?.text, "");
+
+  doneLines.push(
+    JSON.stringify({
+      timestamp: "2026-11-23T09:41:20.000Z",
+      type: "event_msg",
+      payload: { type: "agent_message", message: "观测完成", phase: "final_answer" },
+    }),
+    JSON.stringify({
+      timestamp: "2026-11-23T09:41:20.100Z",
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: turnId },
+    }),
+  );
+  await writeFile(doneRollout, `${doneLines.join("\n")}\n`, "utf8");
+
+  const previewDone = await readLargeThreadPreview(doneRollout, { limit: 5 });
+  assert.equal(previewDone.turns[0].status, "completed");
+  const doneSleepItems = previewDone.turns[0].items.filter((it) => it.type === "mcpToolCall");
+  assert.equal(doneSleepItems.length, 1);
+  assert.equal(doneSleepItems[0].status, "completed");
+  assert.equal(doneSleepItems[0].durationMs, 59_000);
+
+  const doneHtml = renderTurnHtml(previewDone.turns[0]);
+  assert.ok(doneHtml.includes("clock.sleep · 等待 59s"), "missing completed sleep duration");
+  assert.ok(!doneHtml.includes("进行中"), "completed sleep should not render 进行中");
+
+  // 3. Aborted sleep transitions to interrupted without leaving 进行中
+  const abortRollout = resolve(dir, "rollout-abort.jsonl");
+  const abortLines = [
+    ...baseLines,
+    JSON.stringify({
+      timestamp: "2026-11-23T09:40:48.500Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: callId,
+        output: "aborted by user after 29.9s",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-11-23T09:40:48.505Z",
+      type: "event_msg",
+      payload: { type: "turn_aborted", turn_id: turnId, reason: "interrupted" },
+    }),
+  ];
+  await writeFile(abortRollout, `${abortLines.join("\n")}\n`, "utf8");
+
+  const previewAbort = await readLargeThreadPreview(abortRollout, { limit: 5 });
+  assert.equal(previewAbort.turns[0].status, "interrupted");
+  const abortSleepItems = previewAbort.turns[0].items.filter((it) => it.type === "mcpToolCall");
+  assert.equal(abortSleepItems.length, 1);
+  assert.equal(abortSleepItems[0].status, "interrupted");
+  assert.match(abortSleepItems[0].resultText || "", /aborted by user after 29\.9s/);
+
+  const abortHtml = renderTurnHtml(previewAbort.turns[0]);
+  assert.ok(abortHtml.includes("已中断"), "missing interrupted pill");
+  assert.ok(abortHtml.includes("aborted by user after 29.9s"), "missing abort detail output");
+  assert.ok(!abortHtml.includes("进行中"), "aborted sleep should not render 进行中");
 });

@@ -2,16 +2,43 @@ const RATE_LIMIT_RE = /(?:^|\b)(?:429|rate[_\s-]?limit|usage[_\s-]?limit|too man
 const AUTH_ERROR_RE = /(?:^|\b)(?:401|403|unauthorized|forbidden|invalid[_\s-]?api[_\s-]?key|authentication|auth[_\s-]?error|not logged in|login required|token expired|invalid token)(?:\b|$)|鉴权|未登录|密钥无效|认证失败/i;
 const NETWORK_ERROR_RE = /(?:^|\b)(?:502|503|504|timeout|timed[_\s-]?out|econnrefused|enotfound|ehostunreach|enetunreach|econnreset|socket hang up|bad gateway|fetch failed)(?:\b|$)|线路|连接失败|无法连接|网络|超时/i;
 const NOT_INSTALLED_RE = /(?:^|\b)(?:enoent|command not found|not installed)(?:\b|$)|未安装|找不到命令/i;
+const CODEX_OFFICIAL_CLIENT_ONLY_RE = /only allows codex official clients/i;
+
+export function isCodexOfficialClientError(errorOrMessage) {
+  if (!errorOrMessage) return false;
+  if (typeof errorOrMessage === "string") {
+    return CODEX_OFFICIAL_CLIENT_ONLY_RE.test(errorOrMessage);
+  }
+  const texts = [
+    errorOrMessage.message,
+    errorOrMessage.additionalDetails,
+    errorOrMessage.reason,
+    errorOrMessage.stderr,
+    errorOrMessage.detail,
+    errorOrMessage.error?.message,
+    errorOrMessage.error?.additionalDetails,
+  ].filter(Boolean);
+  return texts.some((item) => CODEX_OFFICIAL_CLIENT_ONLY_RE.test(String(item)));
+}
 
 export function extractErrorMessage(errorOrMessage) {
   if (!errorOrMessage) return "";
   if (typeof errorOrMessage === "string") return errorOrMessage.trim();
+  const additional = String(
+    errorOrMessage.additionalDetails || errorOrMessage.error?.additionalDetails || "",
+  ).trim();
+  const primaryMsg = String(errorOrMessage.message || errorOrMessage.error?.message || "").trim();
+  if (additional && (CODEX_OFFICIAL_CLIENT_ONLY_RE.test(additional) || /^Reconnecting\b/i.test(primaryMsg))) {
+    return additional;
+  }
   const candidates = [
     errorOrMessage.message,
+    errorOrMessage.additionalDetails,
     errorOrMessage.reason,
     errorOrMessage.result,
     errorOrMessage.stderr,
     errorOrMessage.error?.message,
+    errorOrMessage.error?.additionalDetails,
   ].filter(Boolean);
   return String(candidates[0] || "").trim();
 }
@@ -26,6 +53,15 @@ export function classifyProfileError(errorOrMessage, { now = Date.now(), cooldow
       shortReason: "限额冷却",
       detail,
       cooldownUntil: nowSec + Math.max(60, Number(cooldownSeconds) || 1800),
+    };
+  }
+  if (isCodexOfficialClientError(errorOrMessage) || isCodexOfficialClientError(detail)) {
+    return {
+      status: "unavailable",
+      reasonCode: "official_client_only",
+      shortReason: "仅限官方CLI",
+      detail: detail || extractErrorMessage(errorOrMessage),
+      cooldownUntil: 0,
     };
   }
   if (AUTH_ERROR_RE.test(detail)) {
@@ -80,6 +116,10 @@ export function normalizeProfileHealth(rawMeta = {}, { installed = true, now = D
   const alias = String(meta.alias || "").trim();
   const autoAliasSignature = String(meta.autoAliasSignature || "").trim();
   const autoAliasSource = String(meta.autoAliasSource || "").trim();
+  const codexExecMode = Boolean(meta.codexExecMode);
+  const codexExecSuggested = Object.hasOwn(meta, "codexExecSuggested")
+    ? Boolean(meta.codexExecSuggested)
+    : meta.reasonCode === "official_client_only";
 
   if (!installed) {
     return {
@@ -92,6 +132,8 @@ export function normalizeProfileHealth(rawMeta = {}, { installed = true, now = D
       cooldownUntil: 0,
       disabled,
       alias,
+      codexExecMode,
+      codexExecSuggested,
       ...(autoAliasSignature ? { autoAliasSignature } : {}),
       ...(autoAliasSource ? { autoAliasSource } : {}),
     };
@@ -134,6 +176,10 @@ export function normalizeProfileHealth(rawMeta = {}, { installed = true, now = D
     cooldownUntil,
     disabled,
     alias,
+    codexExecMode,
+    codexExecSuggested: Object.hasOwn(meta, "codexExecSuggested")
+      ? Boolean(meta.codexExecSuggested)
+      : reasonCode === "official_client_only",
     ...(autoAliasSignature ? { autoAliasSignature } : {}),
     ...(autoAliasSource ? { autoAliasSource } : {}),
   };

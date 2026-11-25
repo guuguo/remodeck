@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { ClaudeProvider } from "../src/providers/claude-provider.mjs";
 import { discoverClaudeProfiles, discoverCodexProfiles } from "../src/providers/profile-discovery.mjs";
-import { parseClaudeErrorResetSec, QuotaService, statusToneFromPercent } from "../src/quota-service.mjs";
+import { extractClaudeRateLimitWindows, parseClaudeErrorResetSec, QuotaService, statusToneFromPercent } from "../src/quota-service.mjs";
 
 function seedCockpitSqlite(sqlitePath, rows = []) {
   const db = new DatabaseSync(sqlitePath);
@@ -480,4 +480,111 @@ test("discovers dual Cockpit Claude instances and Codex Cockpit labels with isol
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("QuotaService consumes Claude CLI unifiedWindows stream events, expires stale plan samples, and replaces fallback 充足 with 未限流", async (t) => {
+  const root = await mkdtemp(join(os.tmpdir(), "ac-quota-cli-stream-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const homeDir = join(root, "home");
+  const claudeHome = join(homeDir, ".claude");
+  const desktopDir = join(homeDir, "Library", "Application Support", "Claude");
+  await Promise.all([
+    mkdir(join(claudeHome, "projects"), { recursive: true }),
+    mkdir(desktopDir, { recursive: true }),
+  ]);
+
+  const anchorMs = 1795340000_000;
+  const anchorSec = Math.floor(anchorMs / 1000);
+  const reset5hSec = anchorSec + 3600;
+  const reset7dSec = anchorSec + 86400 * 3;
+
+  // Verify pure extractor handles official rate_limit_info.unifiedWindows shape.
+  const extracted = extractClaudeRateLimitWindows({
+    type: "rate_limit_event",
+    rate_limit_info: {
+      status: "allowed",
+      resetsAt: reset5hSec,
+      rateLimitType: "five_hour",
+      unifiedWindows: {
+        five_hour: { utilization: 0.75, resetsAt: reset5hSec, status: "allowed" },
+        seven_day: { utilization: 0.34, resetsAt: reset7dSec, status: "allowed" },
+      },
+    },
+  });
+  assert.equal(extracted.fiveHour?.utilization, 0.75);
+  assert.equal(extracted.sevenDay?.utilization, 0.34);
+
+  // Older desktop sample (4 days stale) and recent desktop sample overridden by fresher CLI stream.
+  await writeFile(
+    join(desktopDir, "plan-usage-history.json"),
+    JSON.stringify({
+      samples: [
+        { t: anchorMs - 4 * 86400 * 1000, org: "org-stale", u: { fh: 0, sd: 14 } },
+        { t: anchorMs - 3600 * 1000, org: "org-live", u: { fh: 10, sd: 82 } },
+      ],
+    }),
+    "utf8",
+  );
+
+  let fakeNowMs = anchorMs;
+  const svc = new QuotaService({
+    homeDir,
+    cockpitDir: join(root, ".cockpit"),
+    ttlMs: 0,
+    nowFn: () => fakeNowMs,
+    claudeQuotaReader: async (profile) => {
+      if (profile.id !== "live") return null;
+      return {
+        fiveHour: { utilization: 0.75, resetsAt: reset5hSec, status: "allowed", observedAtMs: anchorMs - 10_000 },
+        sevenDay: { utilization: 0.34, resetsAt: reset7dSec, status: "allowed", observedAtMs: anchorMs - 10_000 },
+        updatedAtMs: anchorMs - 10_000,
+        updatedAt: anchorSec - 10,
+        source: "claude-cli-stream",
+      };
+    },
+  });
+
+  const profiles = [
+    {
+      provider: "claude",
+      id: "live",
+      installed: true,
+      home: claudeHome,
+      cockpitAccount: { email: "live@example.com", organizationUuid: "org-live", planType: "Pro" },
+    },
+    {
+      provider: "claude",
+      id: "stale",
+      installed: true,
+      home: join(root, "empty-claude"),
+      cockpitAccount: { email: "stale@example.com", organizationUuid: "org-stale", planType: "Pro" },
+    },
+  ];
+
+  const first = await svc.collectAll(profiles, { refresh: true });
+  const qLive = first.byKey["claude:live"];
+  assert.equal(qLive.windows.fiveHour.remainingPercent, 25);
+  assert.equal(qLive.windows.fiveHour.resetsAt, reset5hSec);
+  assert.equal(qLive.windows.weekly.remainingPercent, 66);
+  assert.equal(qLive.windows.weekly.resetsAt, reset7dSec);
+  assert.equal(qLive.summaryText, "余 25%");
+  assert.equal(qLive.source, "claude-cli-stream");
+
+  // 4-day-old plan-usage-history sample must be expired, not masquerading as 86% or "充足".
+  const qStale = first.byKey["claude:stale"];
+  assert.equal(qStale.windows.fiveHour.remainingPercent, null);
+  assert.equal(qStale.windows.fiveHour.detail, "未限流");
+  assert.equal(qStale.windows.weekly.remainingPercent, null);
+  assert.equal(qStale.windows.weekly.detail, "未限流");
+
+  // After 5h resetsAt passes, 5h clears cleanly while active weekly stays at 66%.
+  fakeNowMs = (reset5hSec + 60) * 1000;
+  const rolled = await svc.collectAll(profiles, { refresh: true });
+  const qRolled = rolled.byKey["claude:live"];
+  assert.equal(qRolled.windows.fiveHour.remainingPercent, null);
+  assert.equal(qRolled.windows.fiveHour.resetsAt, null);
+  assert.equal(qRolled.windows.fiveHour.detail, "未限流");
+  assert.equal(qRolled.windows.weekly.remainingPercent, 66);
+  assert.equal(qRolled.summaryText, "余 66%");
 });

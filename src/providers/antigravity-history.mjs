@@ -21,16 +21,22 @@ const MAX_QUEUED_MSG_CACHE = 64;
 const parsedQueuedMsgCache = new Map();
 const MAX_TRANSCRIPT_PROMPT_HINT_CACHE = 500;
 const transcriptPromptHintCache = new Map();
+const MAX_TAIL_ERROR_CACHE = 300;
+const tailErrorCache = new Map();
 const AGY_PROMPT_HINT_TAIL_BYTES = 32 * 1024;
 
-function setTranscriptPromptHintCache(key, value) {
-  if (transcriptPromptHintCache.has(key)) {
-    transcriptPromptHintCache.delete(key);
-  } else if (transcriptPromptHintCache.size >= MAX_TRANSCRIPT_PROMPT_HINT_CACHE) {
-    const oldestKey = transcriptPromptHintCache.keys().next().value;
-    if (oldestKey !== undefined) transcriptPromptHintCache.delete(oldestKey);
+function setBoundedLruCache(map, maxEntries, key, value) {
+  if (map.has(key)) {
+    map.delete(key);
+  } else if (map.size >= maxEntries) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== undefined) map.delete(oldestKey);
   }
-  transcriptPromptHintCache.set(key, value);
+  map.set(key, value);
+}
+
+function setTranscriptPromptHintCache(key, value) {
+  setBoundedLruCache(transcriptPromptHintCache, MAX_TRANSCRIPT_PROMPT_HINT_CACHE, key, value);
 }
 
 function readAntigravityPromptHintsSync(appDataDir, rawId, { updatedAt = 0, stepCount = 0 } = {}) {
@@ -86,6 +92,7 @@ function readAntigravityPromptHintsSync(appDataDir, rawId, { updatedAt = 0, step
   let lastSubstantiveUserText = "";
   let userCount = 0;
   let hasLaterStep = false;
+  const tailSteps = [];
 
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
@@ -95,7 +102,9 @@ function readAntigravityPromptHintsSync(appDataDir, rawId, { updatedAt = 0, step
     } catch {
       continue;
     }
-    if (!step || step.type !== "USER_INPUT") continue;
+    if (!step || typeof step !== "object") continue;
+    tailSteps.push(step);
+    if (step.type !== "USER_INPUT") continue;
     if (step.source && step.source !== "USER_EXPLICIT") continue;
     const text = stripPromptNoise(step.content || "");
     if (!text) continue;
@@ -112,6 +121,7 @@ function readAntigravityPromptHintsSync(appDataDir, rawId, { updatedAt = 0, step
     firstUserText,
     lastUserText: lastSubstantiveUserText || lastUserText,
     hasFollowUpTurns: Boolean(userCount > 1 || hasLaterStep),
+    hasPendingAskQuestion: isPendingAskQuestionInSteps(tailSteps),
   };
   setTranscriptPromptHintCache(cacheKey, {
     mtimeMs: st.mtimeMs,
@@ -190,6 +200,238 @@ function iterProtobufFields(buf) {
     }
   }
   return fields;
+}
+
+function decodeProtobufTimestampSeconds(buf) {
+  if (!buf?.length) return 0;
+  let pos = 0;
+  while (pos < buf.length) {
+    const tagRes = readProtobufVarint(buf, pos);
+    if (!tagRes) break;
+    pos = tagRes.nextOffset;
+    const tag = Number(tagRes.value);
+    const fieldNo = tag >>> 3;
+    const wireType = tag & 7;
+    if (fieldNo <= 0) break;
+    if (wireType === 0) {
+      const valRes = readProtobufVarint(buf, pos);
+      if (!valRes) break;
+      pos = valRes.nextOffset;
+      if (fieldNo === 1) {
+        const sec = Number(valRes.value);
+        if (Number.isFinite(sec) && sec > 0) return sec;
+      }
+    } else if (wireType === 1) {
+      if (pos + 8 > buf.length) break;
+      pos += 8;
+    } else if (wireType === 5) {
+      if (pos + 4 > buf.length) break;
+      pos += 4;
+    } else if (wireType === 2) {
+      const lenRes = readProtobufVarint(buf, pos);
+      if (!lenRes) break;
+      const len = Number(lenRes.value);
+      pos = lenRes.nextOffset;
+      if (!Number.isSafeInteger(len) || len < 0 || pos + len > buf.length) break;
+      pos += len;
+    } else {
+      break;
+    }
+  }
+  return 0;
+}
+
+export function decodeAntigravityErrorStepPayload(payloadBuf, metadataBuf = null) {
+  const buf = Buffer.isBuffer(payloadBuf) ? payloadBuf : (payloadBuf ? Buffer.from(payloadBuf) : null);
+  if (!buf?.length) return null;
+  let userMessage = "";
+  let shortError = "";
+  let fullError = "";
+  let fallbackError = "";
+  let model = "";
+  let reason = "";
+  for (const topField of iterProtobufFields(buf)) {
+    if (topField.fieldNo !== 24) continue;
+    for (const errContainer of iterProtobufFields(topField.bytes)) {
+      if (errContainer.fieldNo !== 3) continue;
+      for (const errField of iterProtobufFields(errContainer.bytes)) {
+        if (errField.fieldNo === 1 && !userMessage) {
+          userMessage = errField.bytes.toString("utf8").trim();
+        } else if (errField.fieldNo === 2 && !shortError) {
+          shortError = errField.bytes.toString("utf8").trim();
+        } else if (errField.fieldNo === 3 && !fullError) {
+          fullError = errField.bytes.toString("utf8").trim();
+        } else if (errField.fieldNo === 9 && !fallbackError) {
+          fallbackError = errField.bytes.toString("utf8").trim();
+        } else if (errField.fieldNo === 10 && (!model || !reason)) {
+          try {
+            const detailJson = JSON.parse(errField.bytes.toString("utf8"));
+            if (!model && detailJson?.metadata?.model) model = String(detailJson.metadata.model).trim();
+            if (!reason && detailJson?.reason) reason = String(detailJson.reason).trim();
+          } catch {
+            // Ignore non-JSON detail entry.
+          }
+        }
+      }
+    }
+  }
+  const primaryDetail = shortError || fallbackError;
+  let message = "";
+  if (userMessage && primaryDetail) {
+    message = primaryDetail.toLowerCase().includes(userMessage.toLowerCase())
+      ? primaryDetail
+      : `${userMessage}\n${primaryDetail}`;
+  } else {
+    message = userMessage
+      || primaryDetail
+      || (fullError ? (fullError.split(/\r?\n/)[0]?.trim() || "") : "");
+  }
+  if (!message) return null;
+  const isRetryAttempt = !userMessage && /^API error \(attempt \d+\):/i.test(primaryDetail);
+  const detail = fullError && fullError !== message && fullError !== primaryDetail
+    ? fullError.slice(0, 4000)
+    : "";
+  let createdAtSec = 0;
+  const meta = Buffer.isBuffer(metadataBuf) ? metadataBuf : (metadataBuf ? Buffer.from(metadataBuf) : null);
+  if (meta?.length) {
+    for (const mf of iterProtobufFields(meta)) {
+      if (mf.fieldNo === 1) {
+        createdAtSec = decodeProtobufTimestampSeconds(mf.bytes);
+        if (createdAtSec > 0) break;
+      }
+    }
+  }
+  return {
+    message,
+    shortError: primaryDetail || message,
+    userMessage,
+    detail,
+    model,
+    reason,
+    isRetryAttempt,
+    createdAt: createdAtSec > 0 ? new Date(createdAtSec * 1000).toISOString() : "",
+    createdAtSec,
+  };
+}
+
+export function readAntigravityTailErrorSync(appDataDir, rawId) {
+  const cleanId = String(rawId || "").trim();
+  if (!appDataDir || !cleanId) return null;
+  const dbPath = resolve(appDataDir, "conversations", `${cleanId}.db`);
+  let dbSt;
+  try {
+    dbSt = statSync(dbPath);
+    if (!dbSt.isFile() || dbSt.size <= 0) return null;
+  } catch {
+    return null;
+  }
+  let walMtimeMs = 0;
+  let walSize = 0;
+  try {
+    const walSt = statSync(`${dbPath}-wal`);
+    if (walSt.isFile()) {
+      walMtimeMs = Number(walSt.mtimeMs || 0);
+      walSize = Number(walSt.size || 0);
+    }
+  } catch {
+    // Ignore missing WAL file.
+  }
+
+  const cacheKey = `${appDataDir}|${cleanId}`;
+  const cached = tailErrorCache.get(cacheKey);
+  if (
+    cached
+    && cached.dbMtimeMs === dbSt.mtimeMs
+    && cached.dbSize === dbSt.size
+    && cached.walMtimeMs === walMtimeMs
+    && cached.walSize === walSize
+  ) {
+    setBoundedLruCache(tailErrorCache, MAX_TAIL_ERROR_CACHE, cacheKey, cached);
+    return cached.value ? { ...cached.value } : null;
+  }
+
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { open: true, readOnly: true });
+    const rows = db.prepare(
+      "SELECT idx, step_type, metadata, step_payload FROM steps ORDER BY idx DESC LIMIT 6",
+    ).all();
+    let tailErr = null;
+    for (const row of rows) {
+      const stepType = Number(row?.step_type);
+      if (stepType === 101) continue;
+      if (stepType === 17) {
+        const decoded = decodeAntigravityErrorStepPayload(row?.step_payload, row?.metadata);
+        if (decoded?.message) {
+          tailErr = {
+            stepIndex: Number(row.idx),
+            message: decoded.message,
+            shortError: decoded.shortError,
+            detail: decoded.detail,
+            model: decoded.model,
+            reason: decoded.reason,
+            isRetryAttempt: decoded.isRetryAttempt,
+            createdAt: decoded.createdAt,
+            createdAtSec: decoded.createdAtSec,
+          };
+        }
+      }
+      break;
+    }
+    setBoundedLruCache(tailErrorCache, MAX_TAIL_ERROR_CACHE, cacheKey, {
+      dbMtimeMs: dbSt.mtimeMs,
+      dbSize: dbSt.size,
+      walMtimeMs,
+      walSize,
+      value: tailErr,
+    });
+    return tailErr ? { ...tailErr } : null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // Ignore close errors.
+    }
+  }
+}
+
+function readAntigravityErrorSteps(appDataDir, rawId) {
+  const dbPath = resolve(appDataDir, "conversations", `${rawId}.db`);
+  if (!existsSync(dbPath)) return [];
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { open: true, readOnly: true });
+    const rows = db.prepare(
+      "SELECT idx, metadata, step_payload FROM steps WHERE step_type = 17 ORDER BY idx ASC",
+    ).all();
+    const out = [];
+    for (const row of rows) {
+      const decoded = decodeAntigravityErrorStepPayload(row?.step_payload, row?.metadata);
+      if (!decoded?.message) continue;
+      out.push({
+        step_index: Number(row.idx),
+        type: "ERROR_MESSAGE",
+        status: "ERROR",
+        created_at: decoded.createdAt || "",
+        content: decoded.message,
+        shortError: decoded.shortError || "",
+        detail: decoded.detail || "",
+        isRetryAttempt: Boolean(decoded.isRetryAttempt),
+        ...(decoded.model ? { model: decoded.model } : {}),
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // Ignore close errors.
+    }
+  }
 }
 
 function decodeAntigravityMediaField(bytes) {
@@ -555,7 +797,7 @@ export function readAntigravityIndexedThreadById(appDataDir, rawId, {
     if (!row) return null;
     const mapped = mapIndexedRowToThread(row, appDataDir, profileType, { nowMs, staleLiveAgeMs });
     if (!mapped) return null;
-    if (mapped.threadSource !== "subagent" && mapped.stepCount >= 2) {
+    if (mapped.threadSource !== "subagent" && (mapped.stepCount >= 2 || mapped.live)) {
       const hints = readAntigravityPromptHintsSync(appDataDir, mapped.id, {
         updatedAt: mapped.updatedAt,
         stepCount: mapped.stepCount,
@@ -564,6 +806,15 @@ export function readAntigravityIndexedThreadById(appDataDir, rawId, {
         if (hints.firstUserText) mapped.firstUserText = hints.firstUserText;
         if (hints.lastUserText) mapped.lastUserText = hints.lastUserText;
         if (hints.hasFollowUpTurns) mapped.hasFollowUpTurns = true;
+        if (hints.hasPendingAskQuestion) mapped.live = false;
+      }
+    }
+    if (mapped.threadSource !== "subagent" && !mapped.live) {
+      const tailErr = readAntigravityTailErrorSync(appDataDir, mapped.id);
+      if (tailErr?.message) {
+        mapped.lastTurnStatus = "failed";
+        mapped.lastError = tailErr.shortError || tailErr.message;
+        mapped.lastErrorAt = tailErr.createdAtSec || mapped.updatedAt;
       }
     }
     return mapped;
@@ -845,20 +1096,23 @@ export async function readAntigravityLiveActivity(appDataDir, rawId, {
   }
 
   const pendingAsync = collectPendingAntigravityAsyncWork(steps);
+  const pendingAskQuestion = isPendingAskQuestionInSteps(steps);
   const terminalPlanner = isTerminalAntigravityPlannerStep(lastEffective);
-  if (terminalPlanner) {
+  if (terminalPlanner || pendingAskQuestion) {
     lastThought = "";
   }
 
   const transcriptMtimeMs = st?.mtimeMs ? Number(st.mtimeMs) : 0;
   const summaryUpdatedMs = Number(summary?.updatedAt) > 0 ? Number(summary.updatedAt) * 1000 : 0;
-  let live = isAntigravityDiskLive({
-    flaggedLive: Boolean(summary?.live),
-    updatedAtMs: summaryUpdatedMs,
-    transcriptMtimeMs,
-    nowMs,
-    staleLiveAgeMs,
-  });
+  let live = pendingAskQuestion
+    ? false
+    : isAntigravityDiskLive({
+      flaggedLive: Boolean(summary?.live),
+      updatedAtMs: summaryUpdatedMs,
+      transcriptMtimeMs,
+      nowMs,
+      staleLiveAgeMs,
+    });
   if (live && terminalPlanner && !pendingAsync.hasPending) {
     const lastDiskMs = Math.max(summaryUpdatedMs, transcriptMtimeMs);
     if (lastDiskMs > 0 && (nowMs - lastDiskMs) > terminalStepGraceMs) {
@@ -914,10 +1168,11 @@ export async function readAntigravityLiveActivity(appDataDir, rawId, {
   const statMtimeSec = st?.mtimeMs ? Math.floor(st.mtimeMs / 1000) : 0;
   const updatedAt = Math.max(Number(summary?.updatedAt) || 0, statMtimeSec);
   const queueSig = nativeQueuedTurns.map((item) => item.id).join(",");
-  const cursor = `${live ? 1 : 0}:${st?.size || 0}:${Math.floor(st?.mtimeMs || 0)}:${summary?.stepCount || 0}:${summary?.updatedAt || 0}:q=${queueSig}`;
+  const cursor = `${live ? 1 : 0}:${st?.size || 0}:${Math.floor(st?.mtimeMs || 0)}:${summary?.stepCount || 0}:${summary?.updatedAt || 0}:q=${queueSig}:ask=${pendingAskQuestion ? 1 : 0}`;
 
   return {
     live,
+    pendingAskQuestion,
     cursor,
     updatedAt,
     stepCount: Number(summary?.stepCount) || 0,
@@ -962,16 +1217,27 @@ export function readAntigravityIndexedThreads(appDataDir, {
     for (const row of rows) {
       const mapped = mapIndexedRowToThread(row, appDataDir, profileType, { nowMs, staleLiveAgeMs });
       if (!mapped) continue;
-      if (mapped.threadSource !== "subagent" && mapped.stepCount >= 2 && hintProbed < 80) {
-        hintProbed += 1;
-        const hints = readAntigravityPromptHintsSync(appDataDir, mapped.id, {
-          updatedAt: mapped.updatedAt,
-          stepCount: mapped.stepCount,
-        });
-        if (hints) {
-          if (hints.firstUserText) mapped.firstUserText = hints.firstUserText;
-          if (hints.lastUserText) mapped.lastUserText = hints.lastUserText;
-          if (hints.hasFollowUpTurns) mapped.hasFollowUpTurns = true;
+      if (mapped.threadSource !== "subagent" && (mapped.stepCount >= 1 || mapped.live) && (mapped.live || hintProbed < 80)) {
+        if (!mapped.live) hintProbed += 1;
+        if (mapped.stepCount >= 2 || mapped.live) {
+          const hints = readAntigravityPromptHintsSync(appDataDir, mapped.id, {
+            updatedAt: mapped.updatedAt,
+            stepCount: mapped.stepCount,
+          });
+          if (hints) {
+            if (hints.firstUserText) mapped.firstUserText = hints.firstUserText;
+            if (hints.lastUserText) mapped.lastUserText = hints.lastUserText;
+            if (hints.hasFollowUpTurns) mapped.hasFollowUpTurns = true;
+            if (hints.hasPendingAskQuestion) mapped.live = false;
+          }
+        }
+        if (!mapped.live) {
+          const tailErr = readAntigravityTailErrorSync(appDataDir, mapped.id);
+          if (tailErr?.message) {
+            mapped.lastTurnStatus = "failed";
+            mapped.lastError = tailErr.shortError || tailErr.message;
+            mapped.lastErrorAt = tailErr.createdAtSec || mapped.updatedAt;
+          }
         }
       }
       results.push(mapped);
@@ -1072,6 +1338,49 @@ export function extractPendingAskQuestionFromTurns(turns = []) {
   return null;
 }
 
+export function isPendingAskQuestionInSteps(steps = []) {
+  if (!Array.isArray(steps) || !steps.length) return false;
+  let pendingAskToolIdx = -1;
+  let genericCountAfterPlanner = 0;
+
+  for (const step of steps) {
+    if (!step || typeof step !== "object") continue;
+    const type = String(step.type || "");
+    if (type === "USER_INPUT") {
+      if (step.source && step.source !== "USER_EXPLICIT") continue;
+      pendingAskToolIdx = -1;
+      genericCountAfterPlanner = 0;
+      continue;
+    }
+    if (type === "ERROR_MESSAGE") {
+      pendingAskToolIdx = -1;
+      genericCountAfterPlanner = 0;
+      continue;
+    }
+    if (type === "PLANNER_RESPONSE") {
+      pendingAskToolIdx = -1;
+      genericCountAfterPlanner = 0;
+      if (step.status !== "RUNNING" && step.status !== "ERROR") {
+        const toolCalls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
+        pendingAskToolIdx = toolCalls.findIndex((tc) => tc?.name === "ask_question");
+      }
+      continue;
+    }
+    if (type === "GENERIC" && pendingAskToolIdx >= 0) {
+      const slot = genericCountAfterPlanner;
+      genericCountAfterPlanner += 1;
+      if (slot === pendingAskToolIdx) {
+        const hasDoneOutput = step.status !== "RUNNING" && Boolean(stripToolEchoHeader(step.content || step.error || ""));
+        if (step.status === "ERROR" || hasDoneOutput) {
+          pendingAskToolIdx = -1;
+        }
+      }
+    }
+  }
+
+  return pendingAskToolIdx >= 0;
+}
+
 function mapToolCallToItem(toolCall, stepIndex, toolIdx, defaultStatus = "completed") {
   const name = String(toolCall?.name || "tool");
   const args = unwrapToolArgs(toolCall?.args);
@@ -1150,14 +1459,37 @@ function exactTranscriptStepKey(step) {
   return `${step.step_index}|${step.type || ""}|${step.created_at || ""}`;
 }
 
-function parseAntigravityTranscriptInternal(lines, { rawId = "", fullLinesMap = null, detail = "full" } = {}) {
+function parseAntigravityTranscriptInternal(lines, { rawId = "", fullLinesMap = null, detail = "full", extraSteps = [] } = {}) {
   const steps = [];
+  const seenIndexes = new Set();
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      steps.push(JSON.parse(line));
+      const parsed = JSON.parse(line);
+      steps.push(parsed);
+      if (Number.isInteger(Number(parsed?.step_index))) {
+        seenIndexes.add(Number(parsed.step_index));
+      }
     } catch {
       // Ignore partial line.
+    }
+  }
+  if (Array.isArray(extraSteps) && extraSteps.length > 0) {
+    let inserted = false;
+    for (const extra of extraSteps) {
+      if (!extra || typeof extra !== "object") continue;
+      const idxNum = Number(extra.step_index);
+      if (Number.isInteger(idxNum) && seenIndexes.has(idxNum)) continue;
+      steps.push(extra);
+      if (Number.isInteger(idxNum)) seenIndexes.add(idxNum);
+      inserted = true;
+    }
+    if (inserted) {
+      steps.sort((a, b) => {
+        const ai = Number.isFinite(Number(a?.step_index)) ? Number(a.step_index) : Number.MAX_SAFE_INTEGER;
+        const bi = Number.isFinite(Number(b?.step_index)) ? Number(b.step_index) : Number.MAX_SAFE_INTEGER;
+        return ai - bi;
+      });
     }
   }
 
@@ -1276,8 +1608,13 @@ function parseAntigravityTranscriptInternal(lines, { rawId = "", fullLinesMap = 
         lastModel = stepModel;
       }
       const stepStatus = step.status === "RUNNING" ? "inProgress" : (step.status === "ERROR" ? "failed" : "completed");
-      if (stepStatus === "inProgress") turn.status = "inProgress";
-      else if (turn.status === "inProgress" && stepStatus === "completed") turn.status = "completed";
+      if (stepStatus === "inProgress") {
+        turn.status = "inProgress";
+        turn.error = null;
+      } else if (stepStatus === "completed" && (turn.status === "inProgress" || turn.status === "failed")) {
+        turn.status = "completed";
+        turn.error = null;
+      }
 
       if (step.thinking) {
         turn.items.push({
@@ -1305,6 +1642,30 @@ function parseAntigravityTranscriptInternal(lines, { rawId = "", fullLinesMap = 
           text: String(step.content),
           phase: Array.isArray(step.tool_calls) && step.tool_calls.length ? "commentary" : "final_answer",
         });
+      }
+      if (ts > 0) turn.completedAt = ts;
+      lastEffectiveStep = step;
+      continue;
+    }
+
+    if (type === "ERROR_MESSAGE") {
+      const turn = ensureTurn(`agy-step-${step.step_index ?? idx}`, ts, idx);
+      const stepModel = String(step.model || "").trim();
+      if (stepModel) {
+        if (!turn.model) turn.model = stepModel;
+        if (!Array.isArray(turn.models)) turn.models = [];
+        if (!turn.models.includes(stepModel)) turn.models.push(stepModel);
+        lastModel = stepModel;
+      }
+      const errText = String(step.content || "").trim();
+      if (errText) {
+        turn.status = "failed";
+        turn.error = {
+          message: errText,
+          ...(step.shortError ? { shortError: step.shortError } : {}),
+          ...(step.detail ? { detail: step.detail } : {}),
+          ...(step.isRetryAttempt ? { retryAttempt: true } : {}),
+        };
       }
       if (ts > 0) turn.completedAt = ts;
       lastEffectiveStep = step;
@@ -1448,12 +1809,16 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
   const logsDir = resolve(appDataDir, "brain", rawId, ".system_generated", "logs");
   const compactPath = resolve(logsDir, "transcript.jsonl");
   const fullPath = resolve(logsDir, "transcript_full.jsonl");
+  const convDbPath = resolve(appDataDir, "conversations", `${rawId}.db`);
+  const convDbWalPath = `${convDbPath}-wal`;
   const normalizedDetail = detail === "full" ? "full" : "auto";
-  const cacheKey = `${compactPath}|${normalizedDetail}|v2`;
+  const cacheKey = `${compactPath}|${normalizedDetail}|v4`;
 
-  const [compactStat, fullStat] = await Promise.all([
+  const [compactStat, fullStat, dbStat, walStat] = await Promise.all([
     stat(compactPath).catch(() => null),
     stat(fullPath).catch(() => null),
+    stat(convDbPath).catch(() => null),
+    stat(convDbWalPath).catch(() => null),
   ]);
 
   let parsedTurns = null;
@@ -1462,6 +1827,10 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
   if (compactStat?.isFile()) {
     const fullMtimeMs = fullStat?.isFile() ? fullStat.mtimeMs : 0;
     const fullSize = fullStat?.isFile() ? fullStat.size : 0;
+    const dbMtimeMs = dbStat?.isFile() ? dbStat.mtimeMs : 0;
+    const dbSize = dbStat?.isFile() ? dbStat.size : 0;
+    const walMtimeMs = walStat?.isFile() ? walStat.mtimeMs : 0;
+    const walSize = walStat?.isFile() ? walStat.size : 0;
     const cached = parsedTranscriptCache.get(cacheKey);
     if (
       cached
@@ -1469,6 +1838,10 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
       && cached.compactSize === compactStat.size
       && cached.fullMtimeMs === fullMtimeMs
       && cached.fullSize === fullSize
+      && cached.dbMtimeMs === dbMtimeMs
+      && cached.dbSize === dbSize
+      && cached.walMtimeMs === walMtimeMs
+      && cached.walSize === walSize
     ) {
       parsedTranscriptCache.delete(cacheKey);
       parsedTranscriptCache.set(cacheKey, cached);
@@ -1512,10 +1885,12 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
           }
         }
 
+        const errorSteps = dbStat?.isFile() ? readAntigravityErrorSteps(appDataDir, rawId) : [];
         const parsed = parseAntigravityTranscriptInternal(compactLines, {
           rawId,
           fullLinesMap,
           detail: normalizedDetail,
+          extraSteps: errorSteps,
         });
         parsedTurns = parsed.turns;
         lastTurnOpen = parsed.lastTurnOpen;
@@ -1529,6 +1904,10 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
           compactSize: compactStat.size,
           fullMtimeMs,
           fullSize,
+          dbMtimeMs,
+          dbSize,
+          walMtimeMs,
+          walSize,
           turns: parsedTurns,
           lastTurnOpen,
           model: lastModel,

@@ -1,5 +1,17 @@
 # 更新日志 (CHANGELOG)
 
+## v0.2.6 (2026-11-25)
+
+UI 资源版本：`20261125a`
+
+- feat(search): global thread content search with snippets
+- feat(human-verify): human verification panel, HUD and generic API
+- feat(codex): exec compatibility mode for official-client-only accounts
+- feat(ui): native folder picker for new threads, title policy, quota and history polish
+- fix(voice): keep full utterances, project hotwords, ask back on unresolved targets
+- feat(update): realign clients after an upstream history rewrite
+- chore(privacy): strip maintainer-specific data and add no-private-content rule
+
 ## v0.2.4 (2026-11-21)
 
 UI 资源版本：`20261121a`

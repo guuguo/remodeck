@@ -16,18 +16,189 @@ const COMPRESSION_STEPS = [
   { scale: 0.72, quality: 0.58 },
 ];
 
+const LOCAL_IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif|bmp|svg|heic|heif|tiff?|avif)$/i;
+const GENERIC_CLIPBOARD_IMAGE_NAME_RE = /^(?:image|clipboard(?:\s*image)?|pasted(?:\s*image)?|blob)(?:\.[a-z0-9]{2,5})?$/i;
+const IMAGE_EXT_SRC = "(?:png|jpe?g|webp|gif|bmp|svg|heic|heif|tiff?|avif)";
+const LOCAL_PATH_ROOT_SRC = "(?:file:\\/\\/(?:localhost)?\\/|\\/|[A-Za-z]:[\\\\/])";
+const UNQUOTED_DIR_PREFIX_SRC = "(?:(?:(?!\\s+(?:[a-z][a-z0-9+.-]*:\\/\\/|\\/|[A-Za-z]:[\\\\/]))[^\"'<>\\r\\n\\t])*?[\\\\/])?";
+const GENERIC_IMAGE_PATH_PATTERNS = {
+  doubleQuotedNamePattern: `[^"\\r\\n\\\\/]+\\.${IMAGE_EXT_SRC}`,
+  singleQuotedNamePattern: `[^'\\r\\n\\\\/]+\\.${IMAGE_EXT_SRC}`,
+  unquotedNamePattern: `(?:[^\\s"'<>\\\\/]|\\\\ )+\\.${IMAGE_EXT_SRC}`,
+};
+
+function escapeRegex(value = "") {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function decodeUriSafe(value = "") {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return String(value || "");
+  }
+}
+
+function stripMatchingQuotes(raw = "") {
+  const trimmed = String(raw || "").trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === "\"" && last === "\"") || (first === "'" && last === "'")) {
+      return trimmed.slice(1, -1).trim();
+    }
+  }
+  return trimmed;
+}
+
+function buildNamePattern(name = "") {
+  const clean = String(name || "");
+  if (!clean) return "";
+  const variants = new Set([clean]);
+  try {
+    variants.add(encodeURIComponent(clean));
+  } catch {}
+  if (clean.includes(" ")) {
+    variants.add(clean.replace(/ /g, "\\ "));
+  }
+  return [...variants].filter(Boolean).map((item) => escapeRegex(item)).join("|");
+}
+
+function stripLocalImagePathByPattern(text, patterns) {
+  const dq = typeof patterns === "string" ? patterns : String(patterns?.doubleQuotedNamePattern || "");
+  const sq = typeof patterns === "string" ? patterns : String(patterns?.singleQuotedNamePattern || "");
+  const uq = typeof patterns === "string" ? patterns : String(patterns?.unquotedNamePattern || "");
+  if (!dq || !sq || !uq) return String(text || "");
+  const pathRe = new RegExp(
+    `(^|[\\s(])(?:"${LOCAL_PATH_ROOT_SRC}(?:[^"\\r\\n]*?[\\\\/])?(?:${dq})"|'${LOCAL_PATH_ROOT_SRC}(?:[^'\\r\\n]*?[\\\\/])?(?:${sq})'|${LOCAL_PATH_ROOT_SRC}${UNQUOTED_DIR_PREFIX_SRC}(?:${uq})(?=$|[\\s<>\\u4e00-\\u9fff]))[ \\t]*`,
+    "gim",
+  );
+  return String(text || "").replace(pathRe, (_match, prefix) => prefix);
+}
+
+function extractLocalImageBasename(raw = "") {
+  const candidate = stripMatchingQuotes(raw);
+  if (!candidate) return "";
+  const isFileUri = /^file:\/\/(?:localhost)?\//i.test(candidate);
+  const pathRaw = isFileUri ? candidate.split(/[?#]/)[0].trim() : candidate;
+  const isLocalPath = isFileUri || /^\/(?!\/)/.test(pathRaw) || /^[A-Za-z]:[\\/]/.test(pathRaw);
+  if (!isLocalPath) return "";
+  let pathPart = pathRaw;
+  if (isFileUri) {
+    pathPart = decodeUriSafe(pathRaw.replace(/^file:\/\/(?:localhost)?/i, ""));
+  }
+  const isPosixPath = !/^[A-Za-z]:[\\/]/.test(pathPart) && pathPart.startsWith("/");
+  const cleanSepPath = isPosixPath ? pathPart.replace(/\\ /g, " ") : pathPart;
+  const normalized = cleanSepPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  const baseName = normalized.split("/").filter(Boolean).pop() || "";
+  if (!baseName || !LOCAL_IMAGE_EXT_RE.test(baseName)) return "";
+  return baseName;
+}
+
+function cleanLinesWithPathPass(lines, cleanLine) {
+  let anyChanged = false;
+  const results = lines.map((line) => {
+    const next = cleanLine(line);
+    const changed = next !== line;
+    if (changed) anyChanged = true;
+    return { next, changed };
+  });
+  return { anyChanged, results };
+}
+
 // 仅移除已经成功附加的同名本地图片路径；正文、网址和其他文件引用保持原样。
 export function stripAttachedImagePaths(text, files = []) {
   let cleaned = String(text || "");
   for (const file of files) {
-    const name = String(file?.name || "");
-    if (!name) continue;
-    const names = [...new Set([name, encodeURIComponent(name)])].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-    const root = "(?:file:\\/\\/\\/|\\/|[A-Za-z]:[\\\\/])";
-    const path = new RegExp(`(^|[\\s(])(?:"${root}[^"\\r\\n]*?(?:${names})"|'${root}[^'\\r\\n]*?(?:${names})'|${root}[^\\s"'<>]*?(?:${names})(?=$|[\\s<>\\u4e00-\\u9fff]))[ \\t]*`, "gm");
-    cleaned = cleaned.replace(path, (_match, prefix) => prefix);
+    const pattern = buildNamePattern(file?.name);
+    if (!pattern) continue;
+    cleaned = stripLocalImagePathByPattern(cleaned, pattern);
   }
   return cleaned;
+}
+
+// 粘贴剪贴板图片时，同步剥离附带的本地图片路径或裸文件名；保留用户混合正文与无关链接。
+export function cleanClipboardTextForPastedImages({
+  plainText = "",
+  uriList = "",
+  html = "",
+  imageFiles = [],
+  clipboardFiles = [],
+} = {}) {
+  const rawText = String(plainText || "");
+  const validImageFiles = Array.isArray(imageFiles) ? imageFiles.filter(Boolean) : [];
+  if (!rawText || !validImageFiles.length) return rawText;
+
+  const knownNameMap = new Map();
+  const rememberName = (name) => {
+    const clean = String(name || "").trim();
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (!knownNameMap.has(key)) knownNameMap.set(key, clean);
+  };
+
+  for (const file of validImageFiles) {
+    rememberName(file?.name);
+    rememberName(extractLocalImageBasename(file?.path));
+  }
+  for (const file of Array.isArray(clipboardFiles) ? clipboardFiles : []) {
+    if (!file) continue;
+    const fileType = String(file?.type || "");
+    const rawName = String(file?.name || "");
+    const rawPath = String(file?.path || "");
+    if (fileType.startsWith("image/") || LOCAL_IMAGE_EXT_RE.test(rawName || rawPath)) {
+      rememberName(rawName);
+      rememberName(extractLocalImageBasename(rawPath));
+    }
+  }
+  for (const line of String(uriList || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || !/^file:\/\//i.test(trimmed)) continue;
+    rememberName(extractLocalImageBasename(trimmed));
+  }
+  if (html) {
+    const imgSrcRe = /<img\b[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)')/gi;
+    let match;
+    while ((match = imgSrcRe.exec(String(html))) !== null) {
+      rememberName(extractLocalImageBasename(match[1] || match[2] || ""));
+    }
+  }
+
+  const rawLines = rawText.split(/\r?\n/);
+  const nonEmptyLines = rawLines.map((line) => stripMatchingQuotes(line)).filter(Boolean);
+  if (
+    nonEmptyLines.length > 0
+    && nonEmptyLines.every((line) => Boolean(extractLocalImageBasename(line)) || knownNameMap.has(line.toLowerCase()))
+  ) {
+    return "";
+  }
+
+  const knownFileObjects = [...knownNameMap.values()].map((name) => ({ name }));
+  let pass = cleanLinesWithPathPass(rawLines, (line) => stripAttachedImagePaths(line, knownFileObjects));
+
+  if (!pass.anyChanged) {
+    const hasGenericClipboardImage = validImageFiles.some((file) => {
+      const name = String(file?.name || "").trim();
+      return !name || GENERIC_CLIPBOARD_IMAGE_NAME_RE.test(name);
+    });
+    if (hasGenericClipboardImage) {
+      pass = cleanLinesWithPathPass(
+        rawLines,
+        (line) => stripLocalImagePathByPattern(line, GENERIC_IMAGE_PATH_PATTERNS),
+      );
+    }
+  }
+
+  if (!pass.anyChanged) return rawText;
+
+  const lineBreak = rawText.includes("\r\n") ? "\r\n" : "\n";
+  const keptLines = [];
+  for (const item of pass.results) {
+    if (item.changed && !item.next.trim()) continue;
+    keptLines.push(item.next);
+  }
+  const cleaned = keptLines.join(lineBreak);
+  return cleaned.trim() ? cleaned : "";
 }
 
 export function estimateDataUrlBytes(dataUrl) {

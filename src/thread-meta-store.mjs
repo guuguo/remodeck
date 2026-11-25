@@ -4,6 +4,11 @@ import { defaultDataDir } from "./instance-identity.mjs";
 import { normalizeWorkspacePath } from "./platform.mjs";
 import { displayThreadTitle } from "./thread-display.mjs";
 import { normalizedThreadName } from "./thread-name.mjs";
+import {
+  evaluateTitleMutation,
+  isCanonicalDomainTitle,
+  resolveEffectiveTitleMeta,
+} from "./thread-title-policy.mjs";
 
 export function normalizeProjectCwd(cwd) {
   return normalizeWorkspacePath(cwd);
@@ -51,6 +56,7 @@ function normalizeSettings(raw = {}) {
     agentAutoTitle: raw?.agentAutoTitle !== false,
     autoUpdateCli: raw?.autoUpdateCli !== false,
     agyAutoCompact: raw?.agyAutoCompact !== false,
+    agyAutoRetryAuth401: raw?.agyAutoRetryAuth401 !== false,
     agyAutoCompactTokens: Number.isFinite(tokens) && tokens > 0
       ? Math.min(AGY_AUTO_COMPACT_TOKENS_MAX, Math.max(AGY_AUTO_COMPACT_TOKENS_MIN, tokens))
       : DEFAULT_AGY_AUTO_COMPACT_TOKENS,
@@ -175,14 +181,125 @@ export function createThreadMetaStore({
     get(compositeId) {
       return state.threads[compositeId] ? { ...state.threads[compositeId] } : null;
     },
-    async setCustomName(compositeId, name) {
+    async setCustomName(compositeId, name, { source = "user" } = {}) {
       await ensureLoaded();
       const clean = normalizedThreadName(name);
+      const nowSec = Math.floor(Date.now() / 1000);
       const prev = state.threads[compositeId] || {};
+      const resolvedSource = source === "domain" || (source === "agent" && isCanonicalDomainTitle(clean))
+        ? "domain"
+        : (source === "agent" ? "agent" : "user");
       state.threads[compositeId] = {
         ...prev,
         customName: clean,
-        updatedAt: Math.floor(Date.now() / 1000),
+        titleMeta: {
+          state: resolvedSource === "user" ? "user" : "locked",
+          source: resolvedSource,
+          base: clean,
+          suffixes: [],
+          createdAt: prev.titleMeta?.createdAt || nowSec,
+          lockedAt: nowSec,
+          updatedAt: nowSec,
+          draftTurns: Math.max(1, Number(prev.titleMeta?.draftTurns) || 1),
+        },
+        updatedAt: nowSec,
+      };
+      await persist();
+      return { ...state.threads[compositeId] };
+    },
+    async applyThreadTitleMutation(
+      compositeId,
+      { source = "user", action = "set", name = "", suffix = "", lock = false } = {},
+    ) {
+      await ensureLoaded();
+      const prev = state.threads[compositeId] || {};
+      const nowSec = Math.floor(Date.now() / 1000);
+      const decision = evaluateTitleMutation(prev, { source, action, name, suffix, lock }, { nowSec });
+      if (!decision.ok) {
+        throw Object.assign(new Error(decision.error || "标题格式不合法"), {
+          status: decision.status || 400,
+          code: decision.code || "invalid_title",
+        });
+      }
+      if (decision.skipped) {
+        return {
+          skipped: true,
+          locked: Boolean(decision.locked),
+          reason: decision.reason,
+          name: decision.currentName,
+          titleState: decision.titleState,
+          base: decision.base,
+          suffixes: decision.suffixes,
+        };
+      }
+      state.threads[compositeId] = {
+        ...prev,
+        customName: decision.nextCustomName,
+        titleMeta: decision.nextTitleMeta,
+        updatedAt: nowSec,
+      };
+      await persist();
+      return {
+        skipped: false,
+        locked: decision.nextTitleMeta.state === "locked" || decision.nextTitleMeta.state === "user",
+        reason: "",
+        name: decision.nextCustomName,
+        titleState: decision.nextTitleMeta.state,
+        titleMeta: { ...decision.nextTitleMeta },
+      };
+    },
+    async setForkInheritedName(
+      compositeId,
+      displayName,
+      { inheritedBase = "", suffixes = [], lock = false, source = "fork" } = {},
+    ) {
+      await ensureLoaded();
+      const cleanDisplay = normalizedThreadName(displayName);
+      const cleanBase = String(inheritedBase || cleanDisplay).replace(/[\r\n]+/g, " ").trim() || cleanDisplay;
+      const cleanSuffixes = Array.isArray(suffixes)
+        ? suffixes.map((s) => String(s || "").trim()).filter(Boolean)
+        : [];
+      const nowSec = Math.floor(Date.now() / 1000);
+      const prev = state.threads[compositeId] || {};
+      const nextState = source === "user" ? "user" : (lock ? "locked" : "draft");
+      state.threads[compositeId] = {
+        ...prev,
+        customName: cleanDisplay,
+        titleMeta: {
+          state: nextState,
+          source,
+          base: cleanBase,
+          suffixes: cleanSuffixes,
+          createdAt: nowSec,
+          lockedAt: nextState === "locked" || nextState === "user" ? nowSec : 0,
+          updatedAt: nowSec,
+          draftTurns: lock || nextState === "user" ? 3 : 1,
+        },
+        updatedAt: nowSec,
+      };
+      await persist();
+      return { ...state.threads[compositeId] };
+    },
+    async recordUserTurnForTitle(compositeId) {
+      await ensureLoaded();
+      if (!compositeId) return null;
+      const prev = state.threads[compositeId];
+      if (!prev?.titleMeta || prev.titleMeta.state !== "draft") return null;
+      const nowSec = Math.floor(Date.now() / 1000);
+      const nextTurns = (Number(prev.titleMeta.draftTurns) || 1) + 1;
+      const eff = resolveEffectiveTitleMeta({
+        ...prev,
+        titleMeta: { ...prev.titleMeta, draftTurns: nextTurns },
+      }, { nowSec });
+      state.threads[compositeId] = {
+        ...prev,
+        titleMeta: {
+          ...prev.titleMeta,
+          draftTurns: nextTurns,
+          state: eff.state,
+          lockedAt: eff.state === "locked" ? (eff.lockedAt || nowSec) : 0,
+          updatedAt: nowSec,
+        },
       };
       await persist();
       return { ...state.threads[compositeId] };
@@ -375,6 +492,7 @@ export function createThreadMetaStore({
       const meta = state.threads[thread.id];
       if (!meta) return thread;
       const customName = meta.customName || "";
+      const eff = resolveEffectiveTitleMeta(meta);
       const nextName = customName || thread.name || "";
       const nextTitle = customName
         || thread.title
@@ -389,7 +507,8 @@ export function createThreadMetaStore({
         autoTitle: "",
         autoTitleSourceSig: "",
         autoTitleIsDrift: false,
-        titleLocked: Boolean(customName),
+        titleLocked: Boolean(customName && eff.state !== "draft"),
+        titleState: eff.state,
         titleDomainKey: "",
         titleSchemaVersion: Number(meta.titleSchemaVersion) || 0,
         archived: Boolean(meta.archived ?? thread.archived),
@@ -411,6 +530,7 @@ export function createThreadMetaStore({
         ...(Object.hasOwn(patch, "agentAutoTitle") ? { agentAutoTitle: Boolean(patch.agentAutoTitle) } : {}),
         ...(Object.hasOwn(patch, "autoUpdateCli") ? { autoUpdateCli: Boolean(patch.autoUpdateCli) } : {}),
         ...(Object.hasOwn(patch, "agyAutoCompact") ? { agyAutoCompact: Boolean(patch.agyAutoCompact) } : {}),
+        ...(Object.hasOwn(patch, "agyAutoRetryAuth401") ? { agyAutoRetryAuth401: Boolean(patch.agyAutoRetryAuth401) } : {}),
         ...(Object.hasOwn(patch, "agyAutoCompactTokens") ? { agyAutoCompactTokens: patch.agyAutoCompactTokens } : {}),
       });
       state.settings = next;
@@ -475,6 +595,12 @@ export function createThreadMetaStore({
         }
         if (Object.hasOwn(patch, "autoAliasSource")) {
           next.autoAliasSource = String(patch.autoAliasSource || "").slice(0, 32);
+        }
+        if (Object.hasOwn(patch, "codexExecMode")) {
+          next.codexExecMode = Boolean(patch.codexExecMode);
+        }
+        if (Object.hasOwn(patch, "codexExecSuggested")) {
+          next.codexExecSuggested = Boolean(patch.codexExecSuggested);
         }
         next.updatedAt = Math.floor(Date.now() / 1000);
         state.profiles[key] = next;
