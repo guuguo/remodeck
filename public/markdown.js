@@ -1710,13 +1710,16 @@ function renderSlashCommandCard(cmd) {
   `;
 }
 
-export function renderMessageCopyButton(text = "", { forkTurnIndex = -1, forkTurnId = "" } = {}) {
+export function renderMessageCopyButton(text = "", { forkTurnIndex = -1, forkTurnId = "", allowPinPlan = false } = {}) {
   const content = String(text).replace(/<!--\s*GOAL_COMPLETE\s*-->/g, "");
   if (!content.trim()) return "";
   const copyHtml = `<button type="button" class="msg-copy-btn" data-copy-message="${escapeHtml(content)}" title="复制消息文字（Markdown）" aria-label="复制消息文字">${iconSvg("clipboard", { size: 12 })}<span>复制</span></button>`;
   if (!Number.isInteger(forkTurnIndex) || forkTurnIndex < 0) return copyHtml;
   const forkHtml = `<button type="button" class="msg-copy-btn msg-fork-btn" data-fork-turn-index="${forkTurnIndex}" data-fork-turn-id="${escapeHtml(forkTurnId)}" title="从此处分叉为新会话（丢弃下方后续对话）" aria-label="从此处分叉为新会话">${iconSvg("fork", { size: 12 })}<span>分叉</span></button>`;
-  return `${copyHtml}${forkHtml}`;
+  const planHtml = allowPinPlan
+    ? `<button type="button" class="msg-copy-btn msg-plan-btn" data-pin-plan-turn-index="${forkTurnIndex}" data-pin-plan-turn-id="${escapeHtml(forkTurnId)}" title="将此回复设为任务规划锚点，后续从兄弟会话一键跳回" aria-label="设为任务规划">${iconSvg("pin", { size: 12 })}<span>设为规划</span></button>`
+    : "";
+  return `${copyHtml}${forkHtml}${planHtml}`;
 }
 
 function renderUserItem(item, { threadId = "", deferImages = false, forkTurnIndex = -1, forkTurnId = "", timestamp = null } = {}) {
@@ -2206,6 +2209,11 @@ function shortModelName(rawModel = "") {
     const word = rawCodename.charAt(0).toUpperCase() + rawCodename.slice(1).toLowerCase();
     return `${word}${effortSuffix}`;
   }
+  const geminiWorker = clean.match(/^gemini[- ](flash|pro|lite|ultra|nano)[- ]worker(?:[- ](?:agy|[a-z0-9]+))?(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
+  if (geminiWorker) {
+    const tier = geminiWorker[1].charAt(0).toUpperCase() + geminiWorker[1].slice(1).toLowerCase();
+    return `${tier} Worker${effortSuffix}`;
+  }
   const geminiCodename = clean.match(/^gemini[- ]\d+(?:[.-]\d+)*[- ]([a-z][a-z0-9]+)(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
   if (geminiCodename?.[1] && !/^(?:pro|flash|lite|ultra|nano|exp|preview)$/i.test(geminiCodename[1])) {
     const word = geminiCodename[1].charAt(0).toUpperCase() + geminiCodename[1].slice(1).toLowerCase();
@@ -2261,6 +2269,11 @@ function shortModelName(rawModel = "") {
   }
   if (clean === "gpt-5.3-codex" || /5\.3.*codex/i.test(clean)) {
     return "5.3 Codex";
+  }
+  const gptOss = clean.match(/^gpt[- ]oss(?:[\s-]+(\d+[a-z]*))?(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
+  if (gptOss) {
+    const size = gptOss[1] ? ` ${gptOss[1].toUpperCase()}` : "";
+    return `GPT-OSS${size}${effortSuffix}`;
   }
   if (lower.includes("gpt-")) {
     const baseGpt = clean
@@ -2390,7 +2403,7 @@ function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, thread
         ${isCommentary ? `<span class="phase-tag">过程汇报</span>` : ""}
         ${goalComplete ? `<span class="goal-done-tag">目标已达成</span>` : ""}
         ${agentTimeHtml}
-        ${renderMessageCopyButton(text, { forkTurnIndex, forkTurnId })}
+        ${renderMessageCopyButton(text, { forkTurnIndex, forkTurnId, allowPinPlan: true })}
       </div>
       <div class="msg-bubble agent-bubble md-body">
         ${renderMarkdown(text, { threadId, deferImages })}

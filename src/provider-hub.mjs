@@ -1,5 +1,7 @@
+import { existsSync } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
-import { MemoryVault, formatMemoryBriefForPrompt, resolveVaultPath } from "./memory-vault.mjs";
+import { MemoryVault, defaultVaultPath, formatMemoryBriefForPrompt, resolveVaultPath } from "./memory-vault.mjs";
+import { TaskStore } from "./task-store.mjs";
 import os from "node:os";
 import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 import {
@@ -561,6 +563,7 @@ export class ProviderHub {
   #queue;
   #pendingRequests = new Map();
   #activeTurns = new Map();
+  #completedTurnIds = new Set();
   #threadLastErrors = new Map();
   #recoveringThreads = new Set();
   #startupRecoveryReady = true;
@@ -592,6 +595,9 @@ export class ProviderHub {
   #cliUpdateStartupTimer = null;
   #cliUpdateIntervalTimer = null;
   #searchIndex;
+  #taskStore;
+  #pendingThreadTaskBindings = new Map();
+  #earlyCompletedTurns = new Map();
   #closed = false;
 
   constructor({
@@ -608,6 +614,7 @@ export class ProviderHub {
     enableQueueDrain = true,
     enableSearchIndex = null,
     callLightweightProfileAi = null,
+    taskStore = null,
   } = {}) {
     this.#env = env;
     this.#dataDir = dataDir;
@@ -619,6 +626,10 @@ export class ProviderHub {
     this.#inflightStore = inflightStore || createInflightTurnStore({ filePath: inflightTurnsPath(dataDir) });
     this.#executionStats = new ExecutionStats({ filePath: resolve(dataDir, "execution-stats.json") });
     this.#forkStore = new ForkStore({ filePath: resolve(dataDir, "forked-threads.json") });
+    this.#taskStore = taskStore || (dataDir ? new TaskStore({
+      dataDir,
+      onChange: (evt) => this.#broadcast("task_updated", evt),
+    }) : null);
 
     const emitEvent = (evt) => this.#handleProviderEvent(evt);
     const emitServerRequest = (req) => this.#handleProviderServerRequest(req);
@@ -1086,7 +1097,10 @@ export class ProviderHub {
           this.#broadcast("server_request_resolved", { requestId, threadId });
         }
       } else if (threadId && method === "turn/started") {
-        this.#activeTurns.set(threadId, { turnId: params?.turn?.id || "", startedAt: Date.now() });
+        const startedTurnId = params?.turn?.id || "";
+        if (!startedTurnId || !this.#completedTurnIds.has(startedTurnId)) {
+          this.#activeTurns.set(threadId, { turnId: startedTurnId, startedAt: Date.now() });
+        }
         this.#threadLastErrors.delete(threadId);
         this.#lastAssistantText.delete(threadId);
       } else if (threadId && (method === "item/agentMessage/delta" || method === "codex/event/agent_message_content_delta")) {
@@ -1108,6 +1122,7 @@ export class ProviderHub {
       } else if (method === "error" && evt.provider === "codex" && evt.profileId && isCodexOfficialClientError(params?.error)) {
         void this.#markCodexOfficialClientRestricted(evt.profileId, params.error);
       } else if (threadId && method === "turn/completed") {
+        this.#recordCompletedTurnId(params?.turn?.id || "");
         this.#activeTurns.delete(threadId);
         this.#inflightStore.clear(threadId);
         this.#clearPendingRequestsForThread(threadId);
@@ -1157,7 +1172,10 @@ export class ProviderHub {
     }
 
     if (evt.type === "turn_started" && threadId) {
-      this.#activeTurns.set(threadId, { turnId: evt.turn?.id || "", startedAt: Date.now() });
+      const startedTurnId = evt.turn?.id || "";
+      if (!startedTurnId || !this.#completedTurnIds.has(startedTurnId)) {
+        this.#activeTurns.set(threadId, { turnId: startedTurnId, startedAt: Date.now() });
+      }
       this.#threadLastErrors.delete(threadId);
       this.#lastAssistantText.delete(threadId);
     } else if (evt.type === "stream_delta" && evt.delta && threadId) {
@@ -1170,6 +1188,7 @@ export class ProviderHub {
     } else if (evt.type === "item_completed" && evt.item?.type === "agentMessage" && evt.item.text && threadId) {
       this.#lastAssistantText.set(threadId, evt.item.text);
     } else if (evt.type === "turn_completed" && threadId) {
+      this.#recordCompletedTurnId(evt.turnId || "");
       this.#activeTurns.delete(threadId);
       this.#inflightStore.clear(threadId);
       this.#clearPendingRequestsForThread(threadId);
@@ -1227,9 +1246,58 @@ export class ProviderHub {
     this.#broadcast("provider_event", evt);
   }
 
+  #recordCompletedTurnId(turnId = "") {
+    const cleanId = String(turnId || "").trim();
+    if (!cleanId) return;
+    if (this.#completedTurnIds.size > 500) {
+      const oldest = this.#completedTurnIds.values().next().value;
+      if (oldest !== undefined) this.#completedTurnIds.delete(oldest);
+    }
+    this.#completedTurnIds.add(cleanId);
+  }
+
+  async #logTurnCompletedToTask(taskId, threadId, summary) {
+    if (!this.#taskStore || !taskId || !threadId) return;
+    const threadMeta = this.#metaStore.get(threadId);
+    if (threadMeta?.internal) return;
+    const plainMsg = String(summary?.lastAgentMessage || "")
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120);
+    const statusNote = summary?.interrupted
+      ? "执行已中断"
+      : (summary?.error ? `执行出错：${String(summary.error).slice(0, 80)}` : (plainMsg ? `完成一轮：${plainMsg}` : "完成一轮执行"));
+    const threadTitle = threadMeta?.customName || this.#threadTitleCache.get(threadId) || threadId;
+    await this.#taskStore.appendLog(taskId, {
+      kind: "turn_completed",
+      actor: "hub",
+      threadId,
+      text: `[${threadTitle}] ${statusNote}`,
+    }).catch(() => {});
+  }
+
   async #onTurnCompleted(threadId, summary) {
     this.#lastTurnUserText.delete(threadId);
     this.#searchIndex?.markThreadDirty(threadId);
+    const pendingBinding = this.#pendingThreadTaskBindings.get(threadId);
+    if (pendingBinding) {
+      await pendingBinding.promise.catch(() => null);
+    }
+    const threadMeta = this.#metaStore.get(threadId);
+    const resolvedTaskId = pendingBinding?.taskId
+      || threadMeta?.taskId
+      || (this.#taskStore && !threadMeta?.internal ? (await this.#taskStore.findByThreadId(threadId).catch(() => null))?.id || "" : "");
+    if (this.#taskStore && resolvedTaskId && !threadMeta?.internal) {
+      this.#earlyCompletedTurns.delete(threadId);
+      await this.#logTurnCompletedToTask(resolvedTaskId, threadId, summary);
+    } else if (this.#taskStore && !threadMeta?.internal) {
+      this.#earlyCompletedTurns.set(threadId, { summary, at: Date.now() });
+      if (this.#earlyCompletedTurns.size > 32) {
+        const oldestKey = this.#earlyCompletedTurns.keys().next().value;
+        if (oldestKey) this.#earlyCompletedTurns.delete(oldestKey);
+      }
+    }
     const evalResult = await this.#goalController.evaluateAfterTurn(threadId, {
       lastAgentMessage: summary.lastAgentMessage,
       interrupted: summary.interrupted,
@@ -2570,13 +2638,22 @@ export class ProviderHub {
     };
   }
 
-  // One-line shared-memory pointer for new sessions in a known project (explicit topic wins over cwd match); skipped for slash commands or when no vault is configured.
+  get taskStore() {
+    return this.#taskStore;
+  }
+
+  // One-line shared-memory pointer for new sessions in a known project (explicit topic wins over cwd match); skipped for slash commands or when disabled/empty.
   async #memoryPointer({ cwd, text, topic }) {
     const cleanCwd = String(cwd || "").trim();
     if ((!cleanCwd && !topic) || /^\//.test(String(text || "").trim())) return "";
+    if (this.#metaStore.getSettings().sharedMemoryEnabled === false) return "";
     try {
-      const root = await resolveVaultPath({ env: this.#env, dataDir: this.#dataDir });
-      if (!root) return "";
+      let root = await resolveVaultPath({ env: this.#env, dataDir: this.#dataDir });
+      if (!root) {
+        const candidate = defaultVaultPath(this.#dataDir);
+        if (!candidate || !existsSync(candidate)) return "";
+        root = candidate;
+      }
       const vault = new MemoryVault(root);
       const scope = await vault.resolveTopic({ topic, cwd: cleanCwd });
       if (!scope) return "";
@@ -2584,6 +2661,117 @@ export class ProviderHub {
     } catch {
       return "";
     }
+  }
+
+  async #buildTaskPromptLine(task, { currentCwd = "", excludeThreadId = "", parentTask = null } = {}) {
+    if (!task?.id || !this.#taskStore) return "";
+    const parent = parentTask || (task.parentId ? await this.#taskStore.get(task.parentId).catch(() => null) : null);
+    const normCurrent = normalizeProjectCwd(currentCwd || task.cwd || "");
+    const siblingIds = new Set([...(task.threadIds || []), ...(parent?.threadIds || [])]);
+    const liveSameCwdTitles = [];
+    for (const sid of siblingIds) {
+      if (!sid || sid === excludeThreadId) continue;
+      if (!this.#activeTurns.has(sid)) continue;
+      const sibCwd = normalizeProjectCwd(this.#threadCwdCache.get(sid)?.cwd || this.#metaStore.get(sid)?.cwd || "");
+      if (normCurrent && sibCwd && normCurrent === sibCwd) {
+        const sibTitle = this.#metaStore.get(sid)?.customName || this.#threadTitleCache.get(sid) || sid;
+        liveSameCwdTitles.push(sibTitle);
+      }
+    }
+    const parts = [`[任务 ${task.id}「${task.title}」`];
+    if (parent?.title) parts.push(`父任务：${parent.title}`);
+    if (liveSameCwdTitles.length) {
+      parts.push(`注意：兄弟会话「${liveSameCwdTitles.slice(0, 2).join("、")}」正在同目录运行，请避免修改冲突文件`);
+    }
+    parts.push(`查进度：remodeck task show ${task.id}｜记进展：remodeck task log ${task.id} "一句进展"]`);
+    return parts.join("｜");
+  }
+
+  async #prepareTaskForNewThread({
+    taskId = "",
+    parentTaskId = "",
+    sourceThreadId = "",
+    taskTitle = "",
+    taskMode = "",
+    cwd = "",
+    topic = "",
+    text = "",
+  } = {}) {
+    if (!this.#taskStore) return null;
+    const cleanMode = String(taskMode || "").trim();
+    const cleanTaskId = String(taskId || "").trim();
+    const cleanParentId = String(parentTaskId || "").trim();
+    const cleanSourceId = String(sourceThreadId || "").trim();
+    if (!cleanTaskId && !cleanParentId && cleanMode !== "same" && cleanMode !== "child") return null;
+
+    const createdIds = [];
+    const createdMetaLinks = [];
+    const ensureSourceTask = async () => {
+      if (!cleanSourceId) return null;
+      const byMeta = this.#metaStore.get(cleanSourceId)?.taskId;
+      let existing = (byMeta ? await this.#taskStore.get(byMeta) : null) || await this.#taskStore.findByThreadId(cleanSourceId);
+      if (!existing) {
+        const srcMeta = this.#metaStore.get(cleanSourceId);
+        const srcTitle = String(
+          (cleanMode === "same" ? taskTitle : "")
+          || srcMeta?.customName
+          || this.#threadTitleCache.get(cleanSourceId)
+          || text
+          || "协作任务",
+        ).replace(/\s+/g, " ").trim().slice(0, 48) || "协作任务";
+        const srcCwd = srcMeta?.cwd || this.#threadCwdCache.get(cleanSourceId)?.cwd || cwd || "";
+        existing = await this.#taskStore.create({
+          title: srcTitle,
+          topicId: topic || srcMeta?.topicId || "",
+          cwd: srcCwd,
+          threadIds: [cleanSourceId],
+          actor: "system",
+        });
+        createdIds.push(existing.id);
+        await this.setThreadTask(cleanSourceId, existing.id);
+        createdMetaLinks.push(cleanSourceId);
+      }
+      return existing;
+    };
+
+    if (cleanMode === "child" || cleanParentId) {
+      let parent = cleanParentId ? await this.#taskStore.get(cleanParentId) : await ensureSourceTask();
+      if (!parent) {
+        throw Object.assign(new Error("父任务不存在"), { status: 404 });
+      }
+      const childTitle = String(taskTitle || text || "子任务").replace(/\s+/g, " ").trim().slice(0, 48) || "子任务";
+      const child = await this.#taskStore.create({
+        title: childTitle,
+        parentId: parent.id,
+        topicId: topic || parent.topicId || "",
+        cwd: cwd || parent.cwd || "",
+        actor: "system",
+      });
+      createdIds.push(child.id);
+      return { task: child, parent, createdIds, createdMetaLinks };
+    }
+
+    let target = cleanTaskId ? await this.#taskStore.get(cleanTaskId) : await ensureSourceTask();
+    if (cleanTaskId && !target) {
+      throw Object.assign(new Error("目标任务不存在"), { status: 404 });
+    }
+    if (!target) {
+      const title = String(taskTitle || text || "协作任务").replace(/\s+/g, " ").trim().slice(0, 48) || "协作任务";
+      target = await this.#taskStore.create({
+        title,
+        topicId: topic || "",
+        cwd: cwd || "",
+        actor: "system",
+      });
+      createdIds.push(target.id);
+    }
+    if (cleanSourceId && !target.threadIds.includes(cleanSourceId)) {
+      target = await this.#taskStore.bindThread(target.id, cleanSourceId, { actor: "system" });
+      await this.setThreadTask(cleanSourceId, target.id);
+      createdMetaLinks.push(cleanSourceId);
+    }
+    const parent = target.parentId ? await this.#taskStore.get(target.parentId) : null;
+    return { task: target, parent, createdIds, createdMetaLinks };
   }
 
   async startThread({
@@ -2600,20 +2788,48 @@ export class ProviderHub {
     memoryBrief = true,
     memoryTopic = "",
     internal = false,
+    taskId = "",
+    parentTaskId = "",
+    sourceThreadId = "",
+    taskTitle = "",
+    taskMode = "",
   } = {}) {
     const impl = this.getProvider(provider);
     const cleanPerm = normalizePermissionMode(permissionMode);
     const useGoal = Boolean(goalMode || runMode === "goal" || /^\/goal(?:\s|$)/i.test(String(text || "").trim()));
+    const isSlash = /^\//.test(String(text || "").trim());
+
+    let preparedTask = null;
+    if (!internal) {
+      preparedTask = await this.#prepareTaskForNewThread({
+        taskId,
+        parentTaskId,
+        sourceThreadId,
+        taskTitle,
+        taskMode,
+        cwd,
+        topic: memoryTopic,
+        text,
+      });
+    }
 
     let res;
     try {
       const brief = memoryBrief ? await this.#memoryPointer({ cwd, text, topic: memoryTopic }) : "";
+      const taskLine = (preparedTask?.task && !isSlash)
+        ? await this.#buildTaskPromptLine(preparedTask.task, {
+            currentCwd: cwd,
+            excludeThreadId: sourceThreadId,
+            parentTask: preparedTask.parent,
+          })
+        : "";
+      const injectedLines = [brief, taskLine].filter(Boolean);
       res = await impl.startThread({
         profileId,
         cwd,
         // Internal workers are created idle, labelled, and only then sent a
         // turn. Even a synchronous completion cannot escape the SSE filter.
-        text: internal ? "" : brief ? `${text}\n\n---\n${brief}` : text,
+        text: internal ? "" : injectedLines.length ? `${text}\n\n---\n${injectedLines.join("\n")}` : text,
         images: internal ? [] : images,
         model,
         effort,
@@ -2622,6 +2838,14 @@ export class ProviderHub {
         ...(provider === "antigravity" ? { autoRetryAuth401: this.#agyAutoRetryAuth401Enabled() } : {}),
       });
     } catch (error) {
+      if (preparedTask?.createdIds?.length && this.#taskStore) {
+        for (const tid of preparedTask.createdIds.slice().reverse()) {
+          await this.#taskStore.update(tid, { status: "dropped", actor: "system" }).catch(() => {});
+        }
+        for (const sid of preparedTask.createdMetaLinks || []) {
+          await this.setThreadTask(sid, "").catch(() => {});
+        }
+      }
       void this.#recordProfileFailure(provider, profileId, error);
       throw error;
     }
@@ -2630,6 +2854,16 @@ export class ProviderHub {
       this.#lastTurnUserText.set(res.thread.id, cleanText);
     }
     const explicitCwd = String(cwd || "").trim() ? (res.thread.cwd || cwd) : "";
+    let boundTask = preparedTask?.task || null;
+    if (boundTask && this.#taskStore) {
+      const bindPromise = this.#taskStore.bindThread(boundTask.id, res.thread.id, { actor: "system" });
+      this.#pendingThreadTaskBindings.set(res.thread.id, { taskId: boundTask.id, promise: bindPromise });
+      try {
+        boundTask = await bindPromise;
+      } finally {
+        this.#pendingThreadTaskBindings.delete(res.thread.id);
+      }
+    }
     await this.#metaStore.setThreadPrefs(res.thread.id, {
       ...(internal ? { internal: true } : {}),
       ...(explicitCwd ? { cwd: explicitCwd } : {}),
@@ -2637,6 +2871,16 @@ export class ProviderHub {
       ...(effort ? { reasoningEffort: effort } : {}),
       permissionMode: cleanPerm,
     });
+    if (boundTask) {
+      await this.setThreadTask(res.thread.id, boundTask.id);
+      const early = this.#earlyCompletedTurns.get(res.thread.id);
+      if (early) {
+        this.#earlyCompletedTurns.delete(res.thread.id);
+        if (Date.now() - early.at < 10_000) {
+          await this.#logTurnCompletedToTask(boundTask.id, res.thread.id, early.summary);
+        }
+      }
+    }
     if (internal && (cleanText || images.length)) {
       const sent = await this.sendTurn({ threadId: res.thread.id, cwd, text: cleanText, images, model, effort, permissionMode: cleanPerm });
       return { ...sent, thread: this.#enrichThread({ ...res.thread, ...sent.thread }) };
@@ -2647,6 +2891,7 @@ export class ProviderHub {
     });
     const appliedStart = this.#metaStore.applyToThread({
       ...res.thread,
+      ...(boundTask ? { taskId: boundTask.id } : {}),
       firstUserText: res.thread.firstUserText || cleanText,
       lastUserText: res.thread.lastUserText || cleanText,
     });
@@ -2676,6 +2921,7 @@ export class ProviderHub {
       thread,
       turn: res.turn,
       goalState: thread.goalState,
+      ...(boundTask ? { task: boundTask } : {}),
     };
   }
 
@@ -2870,6 +3116,9 @@ export class ProviderHub {
     isSystemResume = false,
     resumeAttempts = 0,
   } = {}) {
+    if (this.#closed) {
+      throw Object.assign(new Error("会话中心已关闭"), { status: 409 });
+    }
     const forkDraft = this.#forkStore.get(threadId);
     if (forkDraft?.materializedThreadId) {
       const redirected = await this.sendTurn({
@@ -2974,6 +3223,9 @@ export class ProviderHub {
       this.#lastTurnUserText.set(threadId, cleanText);
     }
     let res;
+    if (this.#closed) {
+      throw Object.assign(new Error("会话中心已关闭"), { status: 409 });
+    }
     this.#threadLastErrors.delete(threadId);
     try {
       res = await provider.sendTurn({
@@ -3008,7 +3260,7 @@ export class ProviderHub {
       internal: Boolean(savedPrefs?.internal) || isInternalVoiceCallThread({ cwd: res.thread?.cwd || effectiveCwd, preview: cleanText }),
       goalMode: useGoal || this.#goalController.get(threadId)?.active,
     });
-    if (res.turn?.id) {
+    if (res.turn?.id && !this.#completedTurnIds.has(res.turn.id)) {
       this.#activeTurns.set(threadId, { turnId: res.turn.id, startedAt: Date.now() });
     }
     this.#inflightStore.markStarted(threadId, {
@@ -3352,6 +3604,22 @@ export class ProviderHub {
 
   listThreadsMeta() {
     return this.#metaStore.listThreads();
+  }
+
+  async setThreadTask(compositeId, taskId = "") {
+    if (!compositeId) return null;
+    const meta = await this.#metaStore.setThreadTask(compositeId, taskId);
+    this.#broadcast("thread_prefs_updated", {
+      threadId: compositeId,
+      prefs: {
+        taskId: meta?.taskId || "",
+      },
+    });
+    return {
+      ok: true,
+      threadId: compositeId,
+      taskId: meta?.taskId || "",
+    };
   }
 
   async updateThreadTopic(compositeId, topicId = "", stageTag = "") {

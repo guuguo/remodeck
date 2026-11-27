@@ -2,6 +2,7 @@
 // Codex / Claude Code / Antigravity. Frontmatter and tables are machine-parsed,
 // prose stays human-first. Machine-only artifacts live under `.ac/` (hidden
 // from Obsidian) and are not meant to be read by people.
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -58,6 +59,18 @@ export async function resolveVaultPath({ env = process.env, dataDir = "" } = {})
   const cfg = await readMemoryConfig(dataDir);
   const fromCfg = expandHome(cfg.vaultPath);
   return fromCfg ? resolve(fromCfg) : "";
+}
+
+export function defaultVaultPath(dataDir = "") {
+  const clean = String(dataDir || "").trim();
+  return clean ? resolve(clean, "memory") : "";
+}
+
+export async function resolveEffectiveVaultPath({ env = process.env, dataDir = "", enabled = true } = {}) {
+  if (!enabled) return "";
+  const explicit = await resolveVaultPath({ env, dataDir });
+  if (explicit) return explicit;
+  return defaultVaultPath(dataDir);
 }
 
 // ---------- frontmatter (small YAML subset: scalars, inline lists, dash lists) ----------
@@ -206,10 +219,19 @@ function slugify(text) {
 // ---------- vault ----------
 
 export class MemoryVault {
+  #writeQueue = Promise.resolve();
+  #mutationQueue = Promise.resolve();
+
   constructor(root, { now = () => new Date() } = {}) {
-    if (!root) throw new Error("记忆库路径未配置（设置 AC_MEMORY_VAULT 或运行 ac-memory config --vault <路径>）");
+    if (!root) throw new Error("记忆库路径未配置（设置 AC_MEMORY_VAULT 或运行 remodeck memory config --vault <路径>）");
     this.root = resolve(root);
     this.now = now;
+  }
+
+  #serialize(fn) {
+    const run = this.#mutationQueue.then(fn, fn);
+    this.#mutationQueue = run.catch(() => {});
+    return run;
   }
 
   abs(rel) {
@@ -257,11 +279,15 @@ export class MemoryVault {
 
   async write(rel, meta, body) {
     const p = this.abs(rel);
-    await mkdir(dirname(p), { recursive: true });
-    const tmp = `${p}.${process.pid}.tmp`;
-    await writeFile(tmp, renderNote(meta, body));
-    await rename(tmp, p);
-    return rel;
+    const run = this.#writeQueue.then(async () => {
+      await mkdir(dirname(p), { recursive: true });
+      const tmp = `${p}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+      await writeFile(tmp, renderNote(meta, body));
+      await rename(tmp, p);
+      return rel;
+    });
+    this.#writeQueue = run.catch(() => {});
+    return run;
   }
 
   // scope: "<topicId>" | "area:<name>" | "me"
@@ -426,32 +452,98 @@ export class MemoryVault {
   }
 
   async updateWip(scope, slug, patch = {}) {
-    const rel = this.wipPath(scope, slug);
-    const note = await this.tryRead(rel);
-    const date = today(this.now());
-    const stamp = this.now().toISOString().slice(0, 16).replace("T", " ");
-    const meta = note?.meta?.kind ? { ...note.meta } : { kind: "wip", task: slugify(slug), scope, title: patch.title || slug, status: "active", sessions: [] };
-    let body = note?.body || `# ${patch.title || slug}\n\n${WIP_SECTIONS.map((s) => `## ${s}\n`).join("\n")}`;
-    if (patch.title) meta.title = patch.title;
-    if (patch.status) meta.status = patch.status;
-    if (patch.session) meta.sessions = [...new Set([...[].concat(meta.sessions || []), patch.session])];
-    if (patch.goal) body = setSection(body, "目标", patch.goal);
-    if (patch.state) body = setSection(body, "当前状态", patch.state);
-    if (patch.next) body = setSection(body, "下一步", patch.next);
-    if (patch.tentative) body = setSection(body, "暂定（未定稿，勿当事实）", patch.tentative);
-    if (patch.artifact) {
-      const lines = getSection(body, "中间产物").split("\n").filter(Boolean);
-      const [path] = String(patch.artifact).split(/\s+[—-]\s+/);
-      const kept = lines.filter((l) => !l.startsWith(`- ${path} `) && l !== `- ${path}`);
-      body = setSection(body, "中间产物", [...kept, `- ${patch.artifact}`].join("\n"));
-    }
-    if (patch.log) {
-      const log = getSection(body, "日志");
-      body = setSection(body, "日志", [log, `- ${stamp} ${String(patch.log).replace(/\s+/g, " ").trim()}`].filter(Boolean).join("\n"));
-    }
-    meta.updated = date;
-    await this.write(rel, meta, body);
-    return { file: rel, status: meta.status };
+    return this.#serialize(async () => {
+      const rel = this.wipPath(scope, slug);
+      const note = await this.tryRead(rel);
+      const date = today(this.now());
+      const stamp = this.now().toISOString().slice(0, 16).replace("T", " ");
+      const meta = note?.meta?.kind ? { ...note.meta } : { kind: "wip", task: slugify(slug), scope, title: patch.title || slug, status: "active", sessions: [] };
+      let body = note?.body || `# ${patch.title || slug}\n\n${WIP_SECTIONS.map((s) => `## ${s}\n`).join("\n")}`;
+      if (patch.title) meta.title = patch.title;
+      if (patch.status) meta.status = patch.status;
+      if (patch.session) meta.sessions = [...new Set([...[].concat(meta.sessions || []), patch.session])];
+      if (patch.goal) body = setSection(body, "目标", patch.goal);
+      if (patch.state) body = setSection(body, "当前状态", patch.state);
+      if (patch.next) body = setSection(body, "下一步", patch.next);
+      if (patch.tentative) body = setSection(body, "暂定（未定稿，勿当事实）", patch.tentative);
+      if (patch.artifact) {
+        const lines = getSection(body, "中间产物").split("\n").filter(Boolean);
+        const [path] = String(patch.artifact).split(/\s+[—-]\s+/);
+        const kept = lines.filter((l) => !l.startsWith(`- ${path} `) && l !== `- ${path}`);
+        body = setSection(body, "中间产物", [...kept, `- ${patch.artifact}`].join("\n"));
+      }
+      if (patch.log) {
+        const log = getSection(body, "日志");
+        body = setSection(body, "日志", [log, `- ${stamp} ${String(patch.log).replace(/\s+/g, " ").trim()}`].filter(Boolean).join("\n"));
+      }
+      meta.updated = date;
+      await this.write(rel, meta, body);
+      return { file: rel, status: meta.status };
+    });
+  }
+
+  // One-way read-only Markdown projection of a RemoDeck core task.
+  async projectTask(task, logs = [], { scope = "", parentTitle = "", childTitles = [] } = {}) {
+    if (!task?.id) return null;
+    return this.#serialize(async () => {
+      const dir = scope ? this.scopeDir(scope) : INBOX_DIR;
+      const rel = `${dir}/任务-${slugify(task.id)}.md`;
+      const date = String(task.updatedAt || "").slice(0, 10) || today(this.now());
+      const meta = {
+        kind: "task",
+        taskId: task.id,
+        ...(task.parentId ? { parentId: task.parentId } : {}),
+        ...(scope ? { scope } : {}),
+        title: task.title || task.id,
+        status: task.status || "open",
+        sessions: [].concat(task.threadIds || []),
+        updated: date,
+      };
+      const criteriaLines = (task.criteria || []).length
+        ? task.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
+        : "（暂无）";
+      const planLine = task.planRef?.threadId
+        ? `- 会话：\`${task.planRef.threadId}\`${task.planRef.turnId ? `（轮次 ${task.planRef.turnId}）` : ""}${task.planRef.excerpt ? `\n- 摘要：${task.planRef.excerpt}` : ""}`
+        : "（暂无）";
+      const childLines = childTitles.length ? childTitles.map((t) => `- ${t}`).join("\n") : "（暂无）";
+      const sessionLines = (task.threadIds || []).length ? task.threadIds.map((id) => `- \`${id}\``).join("\n") : "（暂无）";
+      const logLines = (logs || []).length
+        ? logs.slice(-20).map((l) => `- ${String(l.ts || "").slice(0, 16).replace("T", " ")} [${l.kind || "log"}] ${l.text || ""}`).join("\n")
+        : "（暂无）";
+      const parentHeader = task.parentId ? `\n> 所属父任务：${parentTitle || task.parentId}（\`${task.parentId}\`）\n` : "";
+      const body = [
+        `# ${task.title || task.id}`,
+        parentHeader.trimEnd(),
+        "<!-- 只读投影：真源由 RemoDeck tasks.json 维护，请使用 remodeck task 命令或界面操作 -->",
+        "",
+        "## 目标",
+        "",
+        task.goal || "（未写目标）",
+        "",
+        "## 验收标准",
+        "",
+        criteriaLines,
+        "",
+        "## 规划锚点",
+        "",
+        planLine,
+        "",
+        "## 子任务",
+        "",
+        childLines,
+        "",
+        "## 关联会话",
+        "",
+        sessionLines,
+        "",
+        "## 执行过程",
+        "",
+        logLines,
+        "",
+      ].filter((line, idx, arr) => !(line === "" && arr[idx - 1] === "")).join("\n");
+      await this.write(rel, meta, body);
+      return { file: rel };
+    });
   }
 
   async listWip({ scope = "", status = "" } = {}) {
@@ -548,7 +640,7 @@ export class MemoryVault {
     for (const rel of (await this.listNotes()).filter((r) => r.startsWith(dir) && basename(r).startsWith("台账-"))) {
       const note = await this.tryRead(rel);
       const rows = parseTable(getSection(note?.body || "", "记录")).rows;
-      out.push(`台账 ${rel}：${rows.length} 行，更新于 ${note?.meta?.updated || "?"}（ac-memory get 查看全文）`);
+      out.push(`台账 ${rel}：${rows.length} 行，更新于 ${note?.meta?.updated || "?"}（remodeck memory get 查看全文）`);
     }
     const conflicts = parseTable(getSection((await this.tryRead(CONFLICTS_FILE))?.body || "", "队列")).rows
       .filter((r) => r["状态"] === "待定" && r["归属"] === scope);
@@ -706,5 +798,5 @@ export async function scanAntigravityScratch(brainDir, { maxFilesPerSession = 30
 // Wraps a pointer for a new session's first prompt: the agent pulls details itself only when the task needs history.
 export function formatMemoryBriefForPrompt(pointer) {
   if (!pointer) return "";
-  return `${pointer}本会话没有之前的上下文：如果任务涉及过往进展、发布记录、数据或已做的决定，先用 agent-memory 技能检索（ac-memory brief / search / get），不要凭印象作答；无关则忽略本提示。`;
+  return `${pointer}本会话没有之前的上下文：如果任务涉及过往进展、发布记录、数据或已做的决定，先用 remodeck-memory 技能检索（remodeck memory brief / search / get），不要凭印象作答；无关则忽略本提示。`;
 }

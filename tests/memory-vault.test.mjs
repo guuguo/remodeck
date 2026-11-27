@@ -200,7 +200,7 @@ test("hub.startThread appends the project memory brief for sessions opened in a 
   assert.match(sent[0].text, /^看看文章数据\n\n---\n\[共享记忆\] 项目「图片翻译」/);
   assert.match(sent[0].text, /事实 1 条/);
   assert.doesNotMatch(sent[0].text, /示例品牌 DemoBrand/, "contents are pulled on demand, not pushed");
-  assert.match(sent[0].text, /ac-memory brief \/ search/);
+  assert.match(sent[0].text, /remodeck-memory 技能检索（remodeck memory brief \/ search/);
   assert.equal(sent[1].text, "随便聊聊");
   assert.equal(sent[2].text, "/goal 做完");
   assert.match(sent[3].text, /项目「图片翻译」/, "explicit dispatch topic wins over cwd matching");

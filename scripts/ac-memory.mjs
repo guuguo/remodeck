@@ -23,6 +23,7 @@ import { defaultDataDir } from "../src/instance-identity.mjs";
 import {
   MACHINE_DIR,
   MemoryVault,
+  resolveEffectiveVaultPath,
   resolveVaultPath,
   scanAntigravityScratch,
   writeMemoryConfig,
@@ -76,7 +77,7 @@ async function main() {
     return;
   }
 
-  const root = flags.vault || (await resolveVaultPath({ dataDir }));
+  const root = flags.vault || (await resolveEffectiveVaultPath({ dataDir })) || (await resolveVaultPath({ dataDir }));
   const vault = new MemoryVault(root);
   const scopeOf = async (explicit) => explicit
     || (await vault.resolveTopic({ topic: flags.topic, cwd: flags.cwd || process.cwd() }));

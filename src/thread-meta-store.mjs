@@ -55,6 +55,7 @@ function normalizeSettings(raw = {}) {
   return {
     agentAutoTitle: raw?.agentAutoTitle !== false,
     autoUpdateCli: raw?.autoUpdateCli !== false,
+    sharedMemoryEnabled: raw?.sharedMemoryEnabled !== false,
     agyAutoCompact: raw?.agyAutoCompact !== false,
     agyAutoRetryAuth401: raw?.agyAutoRetryAuth401 !== false,
     agyAutoCompactTokens: Number.isFinite(tokens) && tokens > 0
@@ -426,6 +427,19 @@ export function createThreadMetaStore({
       await persist();
       return { ...next };
     },
+    async setThreadTask(compositeId, taskId = "") {
+      await ensureLoaded();
+      if (!compositeId) return null;
+      const prev = state.threads[compositeId] || {};
+      const cleanTaskId = String(taskId || "").trim().slice(0, 64);
+      if ((prev.taskId || "") === cleanTaskId) return { ...prev };
+      const next = { ...prev, updatedAt: Math.floor(Date.now() / 1000) };
+      if (cleanTaskId) next.taskId = cleanTaskId;
+      else delete next.taskId;
+      state.threads[compositeId] = next;
+      await persist();
+      return { ...next };
+    },
     async setThreadPrefs(compositeId, patch = {}) {
       await ensureLoaded();
       if (!compositeId) return null;
@@ -515,6 +529,7 @@ export function createThreadMetaStore({
         archived: Boolean(meta.archived ?? thread.archived),
         pinned: Boolean(meta.pinned),
         ...(meta.internal ? { internal: true } : {}),
+        ...(meta.taskId ? { taskId: meta.taskId } : {}),
         ...(meta.cwd ? { cwd: meta.cwd } : {}),
         ...(meta.model ? { model: meta.model } : {}),
         ...(meta.reasoningEffort ? { reasoningEffort: meta.reasoningEffort } : {}),
@@ -531,6 +546,7 @@ export function createThreadMetaStore({
         ...prev,
         ...(Object.hasOwn(patch, "agentAutoTitle") ? { agentAutoTitle: Boolean(patch.agentAutoTitle) } : {}),
         ...(Object.hasOwn(patch, "autoUpdateCli") ? { autoUpdateCli: Boolean(patch.autoUpdateCli) } : {}),
+        ...(Object.hasOwn(patch, "sharedMemoryEnabled") ? { sharedMemoryEnabled: Boolean(patch.sharedMemoryEnabled) } : {}),
         ...(Object.hasOwn(patch, "agyAutoCompact") ? { agyAutoCompact: Boolean(patch.agyAutoCompact) } : {}),
         ...(Object.hasOwn(patch, "agyAutoRetryAuth401") ? { agyAutoRetryAuth401: Boolean(patch.agyAutoRetryAuth401) } : {}),
         ...(Object.hasOwn(patch, "agyAutoCompactTokens") ? { agyAutoCompactTokens: patch.agyAutoCompactTokens } : {}),
