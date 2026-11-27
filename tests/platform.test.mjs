@@ -360,9 +360,13 @@ test("background execFile/spawn callers enforce windowsHide on Windows", async (
   }
 
   const voiceSrc = await readFile(join(repoRoot, "src/voice-call-service.mjs"), "utf8");
-  const spawnBlocks = voiceSrc.match(/child\s*=\s*spawn\([\s\S]*?\}\);/g) || [];
-  assert.equal(spawnBlocks.length, 3);
+  assert.doesNotMatch(voiceSrc, /\bspawn\(/, "voice-call-service should delegate worker spawning to NdjsonWorkerClient");
+  assert.match(voiceSrc, /NdjsonWorkerClient/, "voice-call-service must use NdjsonWorkerClient");
+
+  const workerSrc = await readFile(join(repoRoot, "src/ndjson-worker-client.mjs"), "utf8");
+  const spawnBlocks = workerSrc.match(/child\s*=\s*this\.#spawnImpl\([\s\S]*?\}\);/g) || [];
+  assert.equal(spawnBlocks.length, 1);
   for (const block of spawnBlocks) {
-    assert.match(block, /windowsHide:\s*true/, "voice-call-service spawn call must set windowsHide: true");
+    assert.match(block, /windowsHide:\s*true/, "NdjsonWorkerClient spawn call must set windowsHide: true");
   }
 });

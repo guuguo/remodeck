@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
@@ -6,6 +5,7 @@ import os from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultDataDir } from "./instance-identity.mjs";
+import { NdjsonWorkerClient } from "./ndjson-worker-client.mjs";
 import {
   execFileCrossPlatform,
   providerCandidatePaths,
@@ -573,20 +573,11 @@ export class VoiceCallService {
   #ttsCache = new Map();
   #activeSessionTurn = new Map();
   #turnQueue = Promise.resolve();
-  #asrChild = null;
-  #asrReadyPromise = null;
-  #asrStdoutBuf = "";
-  #asrPending = new Map();
   #asrHotwordNames = [];
   #asrHotwordUpdatedAt = 0;
-  #edgeTtsChild = null;
-  #edgeTtsReadyPromise = null;
-  #edgeTtsStdoutBuf = "";
-  #edgeTtsPending = new Map();
-  #kokoroChild = null;
-  #kokoroReadyPromise = null;
-  #kokoroStdoutBuf = "";
-  #kokoroPending = new Map();
+  #asrWorker;
+  #edgeTtsWorker;
+  #kokoroWorker;
   #closed = false;
 
   constructor({
@@ -601,6 +592,68 @@ export class VoiceCallService {
     this.#workspaceDir = resolve(dataDir, "voice-call");
     this.#utterancesDir = resolve(this.#workspaceDir, "utterances");
     this.#execFile = execFileImpl;
+    const moduleDir = dirname(fileURLToPath(import.meta.url));
+    this.#edgeTtsWorker = new NdjsonWorkerClient({
+      label: "Edge TTS 常驻进程",
+      readyTimeoutMs: 10_000,
+      defaultRequestTimeoutMs: EDGE_TTS_TIMEOUT_MS,
+      stderrLimit: 600,
+      isClosed: () => this.#closed,
+      resolveLaunch: (ttsBin) => {
+        const cleanBin = ttsBin || resolveEdgeTtsExecutable(this.#env);
+        const pythonBin = this.#resolveEdgeTtsPython(cleanBin);
+        if (!pythonBin) {
+          throw new Error("未检测到 Edge TTS Python 环境");
+        }
+        return {
+          cmd: pythonBin,
+          args: [resolve(moduleDir, "voice-edge-tts-worker.py")],
+          env: { ...this.#env },
+        };
+      },
+    });
+    this.#kokoroWorker = new NdjsonWorkerClient({
+      label: "Kokoro",
+      readyTimeoutMs: 45_000,
+      defaultRequestTimeoutMs: 20_000,
+      stderrLimit: 600,
+      isClosed: () => this.#closed,
+      resolveLaunch: () => {
+        const explicitBin = String(this.#env?.VOICE_KOKORO_BIN || "").trim();
+        const workerScript = resolve(moduleDir, "voice-kokoro-tts-worker.py");
+        const cmd = explicitBin || (this.#env?.VOICE_PYTHON_BIN || "/opt/homebrew/bin/python3.12");
+        return {
+          cmd,
+          args: explicitBin ? [] : [workerScript],
+          env: {
+            ...this.#env,
+            HF_HUB_OFFLINE: "1",
+            TRANSFORMERS_OFFLINE: "1",
+          },
+        };
+      },
+    });
+    this.#asrWorker = new NdjsonWorkerClient({
+      label: "本地 Whisper",
+      readyTimeoutMs: 45_000,
+      defaultRequestTimeoutMs: 35_000,
+      stderrLimit: 800,
+      isClosed: () => this.#closed,
+      resolveLaunch: () => {
+        const explicitBin = String(this.#env?.VOICE_ASR_BIN || process.env.VOICE_ASR_BIN || "").trim();
+        const workerScript = resolve(moduleDir, "voice-asr-worker.py");
+        const cmd = explicitBin || (this.#env?.VOICE_PYTHON_BIN || "/opt/homebrew/bin/python3.12");
+        return {
+          cmd,
+          args: explicitBin ? [] : [workerScript],
+          env: {
+            ...this.#env,
+            HF_HUB_OFFLINE: "1",
+            TRANSFORMERS_OFFLINE: "1",
+          },
+        };
+      },
+    });
   }
 
   async resolveHydrogenModel() {
@@ -1027,10 +1080,10 @@ export class VoiceCallService {
     let provider = "none";
     const ttsBin = resolveEdgeTtsExecutable(this.#env);
     if (ttsBin && this.#resolveEdgeTtsPython(ttsBin)) {
-      void this.#ensureEdgeTtsWorker(ttsBin).catch(() => {});
+      void this.#edgeTtsWorker.ensureReady(ttsBin).catch(() => {});
     }
     if (this.#hasLocalKokoroRuntime()) {
-      void this.#ensureKokoroWorker().catch(() => {});
+      void this.#kokoroWorker.ensureReady().catch(() => {});
     }
     const sayBin = resolveMacSayExecutable(this.#env);
     const cacheKey = cleanText.length <= 120
@@ -1249,14 +1302,14 @@ export class VoiceCallService {
   async warmAssistantCall() {
     const canWhisper = this.#hasLocalWhisperRuntime();
     if (canWhisper) {
-      void this.#ensureAsrWorker().catch(() => {});
+      void this.#asrWorker.ensureReady().catch(() => {});
     }
     const ttsBin = resolveEdgeTtsExecutable(this.#env);
     if (ttsBin && this.#resolveEdgeTtsPython(ttsBin)) {
-      void this.#ensureEdgeTtsWorker(ttsBin).catch(() => {});
+      void this.#edgeTtsWorker.ensureReady(ttsBin).catch(() => {});
     }
     if (this.#hasLocalKokoroRuntime()) {
-      void this.#ensureKokoroWorker().catch(() => {});
+      void this.#kokoroWorker.ensureReady().catch(() => {});
     }
     const [catalog] = await Promise.all([
       Promise.race([
@@ -1295,146 +1348,17 @@ export class VoiceCallService {
     }
   }
 
-  #resetEdgeTtsWorker(reason = "Edge TTS 常驻进程已关闭") {
-    if (this.#edgeTtsChild) {
-      const child = this.#edgeTtsChild;
-      this.#edgeTtsChild = null;
-      try { child.kill("SIGTERM"); } catch {}
-    }
-    this.#edgeTtsReadyPromise = null;
-    this.#edgeTtsStdoutBuf = "";
-    for (const [, pending] of this.#edgeTtsPending) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error(reason));
-    }
-    this.#edgeTtsPending.clear();
-  }
-
-  #ensureEdgeTtsWorker(ttsBin = "") {
-    if (this.#closed) {
-      return Promise.reject(Object.assign(new Error("语音服务已关闭"), { status: 503 }));
-    }
-    if (this.#edgeTtsReadyPromise && this.#edgeTtsChild && !this.#edgeTtsChild.killed) {
-      return this.#edgeTtsReadyPromise;
-    }
-    const pythonBin = this.#resolveEdgeTtsPython(ttsBin || resolveEdgeTtsExecutable(this.#env));
-    if (!pythonBin) {
-      return Promise.reject(new Error("未检测到 Edge TTS Python 环境"));
-    }
-
-    this.#edgeTtsReadyPromise = new Promise((resolveReady, rejectReady) => {
-      const moduleDir = dirname(fileURLToPath(import.meta.url));
-      const workerScript = resolve(moduleDir, "voice-edge-tts-worker.py");
-      let settledReady = false;
-      const readyTimer = setTimeout(() => {
-        if (!settledReady) {
-          settledReady = true;
-          this.#resetEdgeTtsWorker("Edge TTS 常驻进程启动超时");
-          rejectReady(new Error("Edge TTS 常驻进程启动超时"));
-        }
-      }, 10_000);
-
-      let child;
-      try {
-        child = spawn(pythonBin, [workerScript], {
-          env: { ...this.#env },
-          windowsHide: true,
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-      } catch (error) {
-        clearTimeout(readyTimer);
-        rejectReady(error);
-        return;
-      }
-
-      this.#edgeTtsChild = child;
-      let stderrTail = "";
-
-      child.stderr.on("data", (chunk) => {
-        stderrTail = `${stderrTail}${chunk.toString("utf8")}`.slice(-600);
-      });
-
-      child.stdout.on("data", (chunk) => {
-        this.#edgeTtsStdoutBuf += chunk.toString("utf8");
-        while (true) {
-          const nl = this.#edgeTtsStdoutBuf.indexOf("\n");
-          if (nl === -1) break;
-          const line = this.#edgeTtsStdoutBuf.slice(0, nl).trim();
-          this.#edgeTtsStdoutBuf = this.#edgeTtsStdoutBuf.slice(nl + 1);
-          if (!line) continue;
-          let msg;
-          try {
-            msg = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          if (Object.hasOwn(msg, "ready") && !settledReady) {
-            settledReady = true;
-            clearTimeout(readyTimer);
-            if (msg.ready) {
-              resolveReady(child);
-            } else {
-              this.#resetEdgeTtsWorker(msg.error || "Edge TTS 初始化失败");
-              rejectReady(new Error(msg.error || "Edge TTS 初始化失败"));
-            }
-            continue;
-          }
-          const reqId = String(msg?.id || "");
-          if (reqId && this.#edgeTtsPending.has(reqId)) {
-            const pending = this.#edgeTtsPending.get(reqId);
-            this.#edgeTtsPending.delete(reqId);
-            clearTimeout(pending.timer);
-            if (msg.ok) {
-              pending.resolve(msg);
-            } else {
-              pending.reject(new Error(msg.error || "Edge TTS 合成失败"));
-            }
-          }
-        }
-      });
-
-      child.on("error", (err) => {
-        clearTimeout(readyTimer);
-        if (!settledReady) {
-          settledReady = true;
-          rejectReady(err);
-        }
-        this.#resetEdgeTtsWorker(err?.message || "Edge TTS 进程启动失败");
-      });
-
-      child.on("exit", (code, signal) => {
-        clearTimeout(readyTimer);
-        const reason = stderrTail.trim() || `Edge TTS 进程退出 (${code ?? signal ?? "unknown"})`;
-        if (!settledReady) {
-          settledReady = true;
-          rejectReady(new Error(reason));
-        }
-        this.#resetEdgeTtsWorker(reason);
-      });
-    });
-
-    return this.#edgeTtsReadyPromise;
-  }
-
-  async #synthesizeViaEdgeTtsWorker({ ttsBin = "", text = "", voice = DEFAULT_VOICE_TTS_NAME, rate = "+8%" } = {}) {
-    const child = await this.#ensureEdgeTtsWorker(ttsBin);
-    const reqId = `tts-${randomUUID().slice(0, 10)}`;
-    const payload = JSON.stringify({ id: reqId, text, voice, rate }) + "\n";
-    return new Promise((resolveDone, rejectDone) => {
-      const timer = setTimeout(() => {
-        this.#edgeTtsPending.delete(reqId);
-        this.#resetEdgeTtsWorker("Edge TTS 合成超时");
-        rejectDone(new Error("Edge TTS 合成超时"));
-      }, EDGE_TTS_TIMEOUT_MS);
-      this.#edgeTtsPending.set(reqId, { resolve: resolveDone, reject: rejectDone, timer });
-      try {
-        child.stdin.write(payload);
-      } catch (err) {
-        clearTimeout(timer);
-        this.#edgeTtsPending.delete(reqId);
-        rejectDone(err);
-      }
-    });
+  #synthesizeViaEdgeTtsWorker({ ttsBin = "", text = "", voice = DEFAULT_VOICE_TTS_NAME, rate = "+8%" } = {}) {
+    return this.#edgeTtsWorker.request(
+      { text, voice, rate },
+      {
+        idPrefix: "tts-",
+        timeoutMs: EDGE_TTS_TIMEOUT_MS,
+        timeoutMessage: "Edge TTS 合成超时",
+        errorMessage: "Edge TTS 合成失败",
+        launchArg: ttsBin,
+      },
+    );
   }
 
   #hasLocalKokoroRuntime() {
@@ -1448,275 +1372,16 @@ export class VoiceCallService {
     return existsSync(resolve(home, ".cache", "huggingface", "hub", "models--mlx-community--Kokoro-82M-bf16", "snapshots"));
   }
 
-  #resetKokoroWorker(reason = "Kokoro 常驻进程已关闭") {
-    if (this.#kokoroChild) {
-      const child = this.#kokoroChild;
-      this.#kokoroChild = null;
-      try { child.kill("SIGTERM"); } catch {}
-    }
-    this.#kokoroReadyPromise = null;
-    this.#kokoroStdoutBuf = "";
-    for (const [, pending] of this.#kokoroPending) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error(reason));
-    }
-    this.#kokoroPending.clear();
-  }
-
-  #ensureKokoroWorker() {
-    if (this.#closed) {
-      return Promise.reject(Object.assign(new Error("语音服务已关闭"), { status: 503 }));
-    }
-    if (this.#kokoroReadyPromise && this.#kokoroChild && !this.#kokoroChild.killed) {
-      return this.#kokoroReadyPromise;
-    }
-
-    this.#kokoroReadyPromise = new Promise((resolveReady, rejectReady) => {
-      const explicitBin = String(this.#env?.VOICE_KOKORO_BIN || "").trim();
-      const moduleDir = dirname(fileURLToPath(import.meta.url));
-      const workerScript = resolve(moduleDir, "voice-kokoro-tts-worker.py");
-      const cmd = explicitBin || (this.#env?.VOICE_PYTHON_BIN || "/opt/homebrew/bin/python3.12");
-      const args = explicitBin ? [] : [workerScript];
-
-      let settledReady = false;
-      const readyTimer = setTimeout(() => {
-        if (!settledReady) {
-          settledReady = true;
-          this.#resetKokoroWorker("Kokoro 启动超时");
-          rejectReady(new Error("Kokoro 启动超时"));
-        }
-      }, 45_000);
-
-      let child;
-      try {
-        child = spawn(cmd, args, {
-          env: {
-            ...this.#env,
-            HF_HUB_OFFLINE: "1",
-            TRANSFORMERS_OFFLINE: "1",
-          },
-          windowsHide: true,
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-      } catch (error) {
-        clearTimeout(readyTimer);
-        rejectReady(error);
-        return;
-      }
-
-      this.#kokoroChild = child;
-      let stderrTail = "";
-
-      child.stderr.on("data", (chunk) => {
-        stderrTail = `${stderrTail}${chunk.toString("utf8")}`.slice(-600);
-      });
-
-      child.stdout.on("data", (chunk) => {
-        this.#kokoroStdoutBuf += chunk.toString("utf8");
-        while (true) {
-          const nl = this.#kokoroStdoutBuf.indexOf("\n");
-          if (nl === -1) break;
-          const line = this.#kokoroStdoutBuf.slice(0, nl).trim();
-          this.#kokoroStdoutBuf = this.#kokoroStdoutBuf.slice(nl + 1);
-          if (!line) continue;
-          let msg;
-          try {
-            msg = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          if (Object.hasOwn(msg, "ready") && !settledReady) {
-            settledReady = true;
-            clearTimeout(readyTimer);
-            if (msg.ready) {
-              resolveReady(child);
-            } else {
-              this.#resetKokoroWorker(msg.error || "Kokoro 初始化失败");
-              rejectReady(new Error(msg.error || "Kokoro 初始化失败"));
-            }
-            continue;
-          }
-          const reqId = String(msg?.id || "");
-          if (reqId && this.#kokoroPending.has(reqId)) {
-            const pending = this.#kokoroPending.get(reqId);
-            this.#kokoroPending.delete(reqId);
-            clearTimeout(pending.timer);
-            if (msg.ok) {
-              pending.resolve(msg);
-            } else {
-              pending.reject(new Error(msg.error || "Kokoro 合成失败"));
-            }
-          }
-        }
-      });
-
-      child.on("error", (err) => {
-        clearTimeout(readyTimer);
-        if (!settledReady) {
-          settledReady = true;
-          rejectReady(err);
-        }
-        this.#resetKokoroWorker(err?.message || "Kokoro 进程启动失败");
-      });
-
-      child.on("exit", (code, signal) => {
-        clearTimeout(readyTimer);
-        const reason = stderrTail.trim() || `Kokoro 进程退出 (${code ?? signal ?? "unknown"})`;
-        if (!settledReady) {
-          settledReady = true;
-          rejectReady(new Error(reason));
-        }
-        this.#resetKokoroWorker(reason);
-      });
-    });
-
-    return this.#kokoroReadyPromise;
-  }
-
-  async #synthesizeViaKokoroWorker({ text = "", voice = "zf_xiaoxiao", speed = 1.06 } = {}) {
-    const child = await this.#ensureKokoroWorker();
-    const reqId = `kokoro-${randomUUID().slice(0, 10)}`;
-    const payload = JSON.stringify({ id: reqId, text, voice, speed }) + "\n";
-    return new Promise((resolveDone, rejectDone) => {
-      const timer = setTimeout(() => {
-        this.#kokoroPending.delete(reqId);
-        this.#resetKokoroWorker("Kokoro 合成超时");
-        rejectDone(new Error("Kokoro 合成超时"));
-      }, 20_000);
-      this.#kokoroPending.set(reqId, { resolve: resolveDone, reject: rejectDone, timer });
-      try {
-        child.stdin.write(payload);
-      } catch (err) {
-        clearTimeout(timer);
-        this.#kokoroPending.delete(reqId);
-        rejectDone(err);
-      }
-    });
-  }
-
-  #resetAsrWorker(reason = "语音识别进程已退出") {
-    const child = this.#asrChild;
-    this.#asrChild = null;
-    this.#asrReadyPromise = null;
-    this.#asrStdoutBuf = "";
-    if (child && !child.killed) {
-      try { child.kill("SIGTERM"); } catch {}
-    }
-    for (const [reqId, pending] of this.#asrPending.entries()) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error(reason));
-      this.#asrPending.delete(reqId);
-    }
-  }
-
-  #ensureAsrWorker() {
-    if (this.#closed) {
-      return Promise.reject(Object.assign(new Error("语音服务已关闭"), { status: 503 }));
-    }
-    if (this.#asrReadyPromise && this.#asrChild && !this.#asrChild.killed) {
-      return this.#asrReadyPromise;
-    }
-
-    this.#asrReadyPromise = new Promise((resolveReady, rejectReady) => {
-      const explicitBin = String(this.#env?.VOICE_ASR_BIN || process.env.VOICE_ASR_BIN || "").trim();
-      const moduleDir = dirname(fileURLToPath(import.meta.url));
-      const workerScript = resolve(moduleDir, "voice-asr-worker.py");
-      const cmd = explicitBin || (this.#env?.VOICE_PYTHON_BIN || "/opt/homebrew/bin/python3.12");
-      const args = explicitBin ? [] : [workerScript];
-
-      let settledReady = false;
-      const readyTimer = setTimeout(() => {
-        if (!settledReady) {
-          settledReady = true;
-          this.#resetAsrWorker("本地 Whisper 启动超时");
-          rejectReady(new Error("本地 Whisper 启动超时"));
-        }
-      }, 45_000);
-
-      let child;
-      try {
-        child = spawn(cmd, args, {
-          env: {
-            ...this.#env,
-            HF_HUB_OFFLINE: "1",
-            TRANSFORMERS_OFFLINE: "1",
-          },
-          windowsHide: true,
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-      } catch (error) {
-        clearTimeout(readyTimer);
-        rejectReady(error);
-        return;
-      }
-
-      this.#asrChild = child;
-      let stderrTail = "";
-
-      child.stderr.on("data", (chunk) => {
-        stderrTail = `${stderrTail}${chunk.toString("utf8")}`.slice(-800);
-      });
-
-      child.stdout.on("data", (chunk) => {
-        this.#asrStdoutBuf += chunk.toString("utf8");
-        while (true) {
-          const nl = this.#asrStdoutBuf.indexOf("\n");
-          if (nl === -1) break;
-          const line = this.#asrStdoutBuf.slice(0, nl).trim();
-          this.#asrStdoutBuf = this.#asrStdoutBuf.slice(nl + 1);
-          if (!line) continue;
-          let msg;
-          try {
-            msg = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          if (Object.hasOwn(msg, "ready") && !settledReady) {
-            settledReady = true;
-            clearTimeout(readyTimer);
-            if (msg.ready) {
-              resolveReady(child);
-            } else {
-              this.#resetAsrWorker(msg.error || "本地语音识别初始化失败");
-              rejectReady(new Error(msg.error || "本地语音识别初始化失败"));
-            }
-            continue;
-          }
-          const reqId = String(msg?.id || "");
-          if (reqId && this.#asrPending.has(reqId)) {
-            const pending = this.#asrPending.get(reqId);
-            this.#asrPending.delete(reqId);
-            clearTimeout(pending.timer);
-            if (msg.ok) {
-              pending.resolve(msg);
-            } else {
-              pending.reject(new Error(msg.error || "语音识别失败"));
-            }
-          }
-        }
-      });
-
-      child.on("error", (err) => {
-        clearTimeout(readyTimer);
-        if (!settledReady) {
-          settledReady = true;
-          rejectReady(err);
-        }
-        this.#resetAsrWorker(err?.message || "语音识别进程启动失败");
-      });
-
-      child.on("exit", (code, signal) => {
-        clearTimeout(readyTimer);
-        const reason = stderrTail.trim() || `语音识别进程退出 (${code ?? signal ?? "unknown"})`;
-        if (!settledReady) {
-          settledReady = true;
-          rejectReady(new Error(reason));
-        }
-        this.#resetAsrWorker(reason);
-      });
-    });
-
-    return this.#asrReadyPromise;
+  #synthesizeViaKokoroWorker({ text = "", voice = "zf_xiaoxiao", speed = 1.06 } = {}) {
+    return this.#kokoroWorker.request(
+      { text, voice, speed },
+      {
+        idPrefix: "kokoro-",
+        timeoutMs: 20_000,
+        timeoutMessage: "Kokoro 合成超时",
+        errorMessage: "Kokoro 合成失败",
+      },
+    );
   }
 
   async getAsrPromptHints({ pendingSnapshot = null } = {}) {
@@ -1782,27 +1447,19 @@ export class VoiceCallService {
     await writeFile(audioPath, buf);
 
     try {
-      const child = await this.#ensureAsrWorker();
-      const reqId = randomUUID();
-      const result = await new Promise((resolveReq, rejectReq) => {
-        const timer = setTimeout(() => {
-          this.#asrPending.delete(reqId);
-          this.#resetAsrWorker("语音识别超时");
-          rejectReq(new Error("语音识别超时"));
-        }, 35_000);
-        this.#asrPending.set(reqId, {
-          resolve: resolveReq,
-          reject: rejectReq,
-          timer,
-        });
-        child.stdin.write(`${JSON.stringify({
-          id: reqId,
+      const result = await this.#asrWorker.request(
+        {
           audioPath,
           language,
           ...(Number(overlapMs) > 0 ? { overlapMs: Math.round(Number(overlapMs)) } : {}),
           ...(promptHints ? { prompt: promptHints } : {}),
-        })}\n`);
-      });
+        },
+        {
+          timeoutMs: 35_000,
+          timeoutMessage: "语音识别超时",
+          errorMessage: "语音识别失败",
+        },
+      );
       const text = String(result?.text || "").trim();
       const duringPlaybackText = String(result?.duringPlaybackText || "").trim();
       const afterPlaybackText = String(result?.afterPlaybackText || "").trim();
@@ -1901,9 +1558,9 @@ export class VoiceCallService {
     this.#calls.clear();
     this.#ttsCache.clear();
     this.#activeSessionTurn.clear();
-    this.#resetAsrWorker("语音服务已关闭");
-    this.#resetEdgeTtsWorker("语音服务已关闭");
-    this.#resetKokoroWorker("语音服务已关闭");
+    this.#asrWorker.reset("语音服务已关闭");
+    this.#edgeTtsWorker.reset("语音服务已关闭");
+    this.#kokoroWorker.reset("语音服务已关闭");
     if (this.#client) {
       await this.#client.close().catch(() => {});
       this.#client = null;

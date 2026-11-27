@@ -213,7 +213,6 @@ test("ClaudeProvider streams deltas, handles tool approval & AskUserQuestion, an
   const dir = await mkdtemp(resolve(os.tmpdir(), "ac-claude-prov-"));
   const claudeDir = resolve(dir, ".claude");
   await mkdir(claudeDir, { recursive: true });
-  t.after(() => rm(dir, { recursive: true, force: true }));
 
   const deltas = [];
   const serverRequests = [];
@@ -231,7 +230,10 @@ test("ClaudeProvider streams deltas, handles tool approval & AskUserQuestion, an
     },
     onServerRequest: (req) => serverRequests.push(req),
   });
-  t.after(() => provider.close());
+  t.after(async () => {
+    await provider.close();
+    await rm(dir, { recursive: true, force: true });
+  });
 
   const created = await provider.startThread({
     profileId: "default",
@@ -285,7 +287,6 @@ test("ClaudeProvider.listModels dynamically reads local model-catalog and settin
   const dir = await mkdtemp(resolve(os.tmpdir(), "ac-claude-models-"));
   const claudeDir = resolve(dir, ".claude");
   await mkdir(claudeDir, { recursive: true });
-  t.after(() => rm(dir, { recursive: true, force: true }));
 
   await writeFile(resolve(claudeDir, "settings.json"), JSON.stringify({
     modelSettings: {
@@ -300,7 +301,10 @@ test("ClaudeProvider.listModels dynamically reads local model-catalog and settin
       AGENT_CONTROL_CLAUDE_CONFIG_DIRS: JSON.stringify([{ id: "default", label: "Claude 默认", home: claudeDir }]),
     },
   });
-  t.after(() => provider.close());
+  t.after(async () => {
+    await provider.close();
+    await rm(dir, { recursive: true, force: true });
+  });
 
   const fallbackModels = await provider.listModels("default");
   assert.ok(fallbackModels.some((m) => m.id === "claude-sonnet-5-5" && m.isDefault === true));

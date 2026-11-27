@@ -2337,7 +2337,11 @@ test("Antigravity ask_question parses questions, emits userInput request on read
   const { renderTurnHtml } = await import("../public/markdown.js");
 
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-agy-ask-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  let provider = null;
+  t.after(async () => {
+    await provider?.close().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
   const agyHome = resolve(root, ".gemini", "antigravity");
   const rawId = "conv-ask-1";
   const logsDir = resolve(agyHome, "brain", rawId, ".system_generated", "logs");
@@ -2375,7 +2379,7 @@ test("Antigravity ask_question parses questions, emits userInput request on read
   assert.doesNotMatch(html, /本轮停在工具执行步/);
 
   const requests = [];
-  const provider = new AntigravityProvider({
+  provider = new AntigravityProvider({
     env: {
       ...process.env,
       HOME: root,
@@ -2385,7 +2389,6 @@ test("Antigravity ask_question parses questions, emits userInput request on read
     },
     onServerRequest: (req) => requests.push(req),
   });
-  t.after(() => provider.close());
 
   await provider.readThread("desktop", rawId, { detail: "full" });
   assert.equal(requests.length, 1);
@@ -2653,7 +2656,11 @@ test("isPendingAskQuestionInSteps detects unresolved ask_question across paralle
 
 test("Antigravity live ask_question clears fake live state, emits card on hub.readThread, ignores pagination, and clears after desktop answer", async (t) => {
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-agy-ask-live-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  let hub = null;
+  t.after(async () => {
+    await hub?.close().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
   const desktopDir = resolve(root, "desktop");
   const dataDir = resolve(root, "data");
   const convId = "conv-ask-live-1";
@@ -2724,7 +2731,7 @@ test("Antigravity live ask_question clears fake live state, emits card on hub.re
     AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
   };
   const provider = new AntigravityProvider({ env: hubEnv });
-  const hub = new ProviderHub({
+  hub = new ProviderHub({
     dataDir,
     env: hubEnv,
     providers: [provider],
@@ -2732,7 +2739,6 @@ test("Antigravity live ask_question clears fake live state, emits card on hub.re
     enableSearchIndex: false,
   });
   await hub.init();
-  t.after(() => hub.close());
 
   const compositeId = `antigravity:desktop:${convId}`;
   const act1 = await provider.getActivity("desktop", convId);
@@ -2785,7 +2791,15 @@ test("Antigravity live ask_question clears fake live state, emits card on hub.re
 
 test("Antigravity ask_question supports leading text, dedupes identical signature, and avoids re-emitting right after answer", async (t) => {
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-agy-ask-dedupe-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  let hub = null;
+  let hub2 = null;
+  t.after(async () => {
+    await Promise.all([
+      hub?.close().catch(() => {}),
+      hub2?.close().catch(() => {}),
+    ]);
+    await rm(root, { recursive: true, force: true });
+  });
   const desktopDir = resolve(root, "desktop");
   const dataDir = resolve(root, "data");
   const convId = "conv-ask-dedupe-1";
@@ -2822,7 +2836,7 @@ test("Antigravity ask_question supports leading text, dedupes identical signatur
     AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
   };
   const provider = new AntigravityProvider({ env: hubEnv });
-  const hub = new ProviderHub({
+  hub = new ProviderHub({
     dataDir,
     env: hubEnv,
     providers: [provider],
@@ -2830,7 +2844,6 @@ test("Antigravity ask_question supports leading text, dedupes identical signatur
     enableSearchIndex: false,
   });
   await hub.init();
-  t.after(() => hub.close());
   const hubEvents = [];
   hub.subscribe((event, payload) => hubEvents.push({ event, payload }));
 
@@ -2865,9 +2878,8 @@ test("Antigravity ask_question supports leading text, dedupes identical signatur
   };
   const dedupeDataDir = resolve(root, "data-dedupe");
   await mkdir(dedupeDataDir, { recursive: true });
-  const hub2 = new ProviderHub({ dataDir: dedupeDataDir, env: hubEnv, providers: [mockProvider], enableQueueDrain: false, enableSearchIndex: false });
+  hub2 = new ProviderHub({ dataDir: dedupeDataDir, env: hubEnv, providers: [mockProvider], enableQueueDrain: false, enableSearchIndex: false });
   await hub2.init();
-  t.after(() => hub2.close());
   hub2.subscribe((event, payload) => dedupeEvents.push({ event, payload }));
 
   const sharedSig = JSON.stringify([["请选择执行方案", false, ["方案 A", "方案 B"]]]);
@@ -3111,7 +3123,11 @@ test("readAntigravityTailErrorSync and readAntigravityIndexedThreads track tail 
 
 test("AntigravityProvider.sendTurn emits failed turn_completed when ACP exits end_turn after writing tail step_type=17", async (t) => {
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-agy-send-tailerr-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  let hub = null;
+  t.after(async () => {
+    await hub?.close().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
   const desktopDir = resolve(root, "desktop");
   const dataDir = resolve(root, "data");
   const convId = "conv-send-tailerr-1";
@@ -3189,9 +3205,8 @@ test("AntigravityProvider.sendTurn emits failed turn_completed when ACP exits en
       AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
     },
   });
-  const hub = new ProviderHub({ dataDir, providers: [provider], enableQueueDrain: false });
+  hub = new ProviderHub({ dataDir, providers: [provider], enableQueueDrain: false });
   await hub.init();
-  t.after(() => hub.close());
 
   const events = [];
   hub.subscribe((event, payload) => events.push({ event, payload }));
@@ -3243,7 +3258,15 @@ test("agyAutoRetryAuth401 setting persists and AntigravityProvider auto-continue
   assert.equal(isTransientAntigravityAuth401Error({ message: "You are not logged into Antigravity." }), false);
 
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-agy-retry401-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  let hub = null;
+  let directProvider = null;
+  t.after(async () => {
+    await Promise.all([
+      hub?.close().catch(() => {}),
+      directProvider?.close().catch(() => {}),
+    ]);
+    await rm(root, { recursive: true, force: true });
+  });
   const desktopDir = resolve(root, "desktop");
   const dataDir = resolve(root, "data");
   const promptLog = resolve(root, "prompts.jsonl");
@@ -3325,9 +3348,8 @@ test("agyAutoRetryAuth401 setting persists and AntigravityProvider auto-continue
       AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
     },
   });
-  const hub = new ProviderHub({ dataDir, providers: [provider], enableQueueDrain: false });
+  hub = new ProviderHub({ dataDir, providers: [provider], enableQueueDrain: false });
   await hub.init();
-  t.after(() => hub.close());
 
   assert.equal(hub.getSettings().agyAutoRetryAuth401, true);
   await hub.setSettings({ agyAutoRetryAuth401: false });
@@ -3337,7 +3359,7 @@ test("agyAutoRetryAuth401 setting persists and AntigravityProvider auto-continue
 
   const directEvents = [];
   const directPending = [];
-  const directProvider = new AntigravityProvider({
+  directProvider = new AntigravityProvider({
     env: {
       ...process.env,
       HOME: root,
@@ -3350,7 +3372,6 @@ test("agyAutoRetryAuth401 setting persists and AntigravityProvider auto-continue
     onEvent: (evt) => directEvents.push(evt),
     onServerRequest: (req) => directPending.push(req),
   });
-  t.after(() => directProvider.close());
 
   // Case A: transient 401 followed by recovery after auto-continue
   await directProvider.sendTurn({
@@ -3526,12 +3547,16 @@ test("internal worker model keeps turn.models transition without polluting turn.
   assert.equal(isAntigravityInternalWorkerModel("gemini-3.8-flash"), false);
 
   const dir = await mkdtemp(resolve(os.tmpdir(), "ac-agy-worker-model-"));
+  let provider = null;
+  t.after(async () => {
+    await provider?.close().catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  });
   const desktopDir = resolve(dir, "desktop");
   const convWithOrch = "conv-orch-worker";
   const convWorkerOnly = "conv-worker-only";
   await mkdir(resolve(desktopDir, "brain", convWithOrch, ".system_generated", "logs"), { recursive: true });
   await mkdir(resolve(desktopDir, "brain", convWorkerOnly, ".system_generated", "logs"), { recursive: true });
-  t.after(() => rm(dir, { recursive: true, force: true }));
 
   const orchLines = [
     JSON.stringify({
@@ -3610,7 +3635,7 @@ test("internal worker model keeps turn.models transition without polluting turn.
   assert.equal(loadedWorkerOnly.thread.model, "");
   assert.deepEqual(loadedWorkerOnly.thread.turns[0].models, ["gemini-flash-worker-agy"]);
 
-  const provider = new AntigravityProvider({
+  provider = new AntigravityProvider({
     env: {
       ...process.env,
       AGY_BIN: MOCK_AGY_BIN,
@@ -3619,7 +3644,6 @@ test("internal worker model keeps turn.models transition without polluting turn.
       ]),
     },
   });
-  t.after(() => provider.close().catch(() => {}));
   const readWorkerOnly = await provider.readThread("desktop", convWorkerOnly);
   assert.equal(readWorkerOnly.thread.model, DEFAULT_AGY_MODEL);
 });

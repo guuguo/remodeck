@@ -743,6 +743,9 @@ export class ClaudeTurnManager extends EventEmitter {
           ? "interrupted"
           : (msg.is_error || msg.subtype === "error" ? "failed" : "completed");
         closeStdinSafely();
+        if (this.#activeRuns.get(rawId) === run) {
+          this.#activeRuns.delete(rawId);
+        }
         this.emit("turnCompleted", {
           profileId,
           rawId,

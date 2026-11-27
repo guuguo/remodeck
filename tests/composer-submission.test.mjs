@@ -81,7 +81,6 @@ test("正常发送、主动排队和插话保留原请求，其他错误不自�
 
 test("Codex Mock 协议的忙碌错误转入控制端队列，前一轮结束后自动发送", async (t) => {
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-composer-queue-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
   const codexHome = resolve(root, "codex");
   await mkdir(codexHome);
   const hub = new ProviderHub({
@@ -97,7 +96,10 @@ test("Codex Mock 协议的忙碌错误转入控制端队列，前一轮结束后
       AGENT_CONTROL_GROK_HOMES: "[]",
     },
   });
-  t.after(() => hub.close());
+  t.after(async () => {
+    await hub.close();
+    await rm(root, { recursive: true, force: true });
+  });
   await hub.init();
   const started = await hub.startThread({ provider: "codex", cwd: root, text: "当前任务 [SLOW]" });
   const payload = {
