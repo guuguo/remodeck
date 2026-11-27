@@ -13,7 +13,6 @@ import {
   askSpriteAssistant,
   appendSpriteTurn,
   buildSpriteContext,
-  submitSpriteDispatch,
   spriteTomorrowAtEight,
   renderSpriteAssistantHtml,
   renderSpriteFullscreenHtml,
@@ -59,7 +58,6 @@ export function createInitialSpriteState() {
     lastTtsPayload: null,
     thinkingLabel: "",
     messages: [],
-    pendingPreview: null,
     pendingArchive: null,
     pendingReorg: null,
     pendingProposal: null,
@@ -190,6 +188,15 @@ export function createSpriteController({
     void postAssistantJson("api/assistant/action", { proposalId: id, cancel: true }).catch(() => {});
   }
 
+  function clearSpritePendingCards({ cancelServer = false } = {}) {
+    if (cancelServer && state.sprite.pendingProposal) {
+      cancelPendingProposalOnServer(state.sprite.pendingProposal);
+    }
+    state.sprite.pendingProposal = null;
+    state.sprite.pendingArchive = null;
+    state.sprite.pendingReorg = null;
+  }
+
   const audio = createSpriteAudioPipeline({
     state,
     getEl,
@@ -281,8 +288,7 @@ export function createSpriteController({
     const mount = $("spriteAssistantMount");
     const is3d = Boolean(isBoardViewActive() && state.boardViewMode === "tycoon3d" && !state.scopedProjectCwd);
     const hasPendingCard = Boolean(
-      state.sprite.pendingPreview
-      || state.sprite.pendingArchive
+      state.sprite.pendingArchive
       || state.sprite.pendingReorg
       || state.sprite.pendingProposal,
     );
@@ -516,7 +522,7 @@ export function createSpriteController({
     }
     state.sprite.open = true;
     state.sprite.busy = true;
-    state.sprite.pendingPreview = null;
+    clearSpritePendingCards({ cancelServer: true });
     renderSpriteAssistantMount();
     try {
       const res = await apiPost("/api/overview/archive-digest", {
@@ -697,9 +703,10 @@ export function createSpriteController({
       cancelPendingProposalOnServer(state.sprite.pendingProposal);
       state.sprite.pendingProposal = null;
       pushSpriteMessage({ role: "sprite", tone: "idle", text: "好的，已取消该操作。" });
-    } else if (sAct === "edit-dispatch") {
-      state.sprite.draft = state.sprite.pendingPreview?.payload?.text || "";
-      state.sprite.pendingPreview = null;
+    } else if (sAct === "edit-proposal") {
+      state.sprite.draft = state.sprite.pendingProposal?.instruction || "";
+      cancelPendingProposalOnServer(state.sprite.pendingProposal);
+      state.sprite.pendingProposal = null;
       renderSpriteAssistantMount();
       ($("spriteFullscreenInput") || $("spriteCommandInput"))?.focus();
     } else if (sAct === "load-memory" || sAct === "clear-memory") {
@@ -774,11 +781,6 @@ export function createSpriteController({
     } else if (sAct === "cancel-archive") {
       state.sprite.pendingArchive = null;
       pushSpriteMessage({ role: "sprite", tone: "idle", text: "好的，已取消本次归档操作。" });
-    } else if (sAct === "confirm-dispatch") {
-      void confirmSpriteDispatchPreview();
-    } else if (sAct === "cancel-dispatch") {
-      state.sprite.pendingPreview = null;
-      pushSpriteMessage({ role: "sprite", tone: "idle", text: "好的，已取消本次派工预览。" });
     }
   }
 
@@ -881,7 +883,7 @@ export function createSpriteController({
       const qText = spriteQuickPreviewBtn.dataset.spriteQuickPreview || "";
       const qTopic = spriteQuickPreviewBtn.dataset.spriteQuickTopic || "";
       pushSpriteMessage({ role: "user", text: qText });
-      void requestSpriteDispatchPreview({ instruction: qText, topicId: qTopic });
+      void requestSpriteDispatchProposal({ instruction: qText, topicId: qTopic });
       return true;
     }
     return false;
@@ -896,10 +898,10 @@ export function createSpriteController({
       return true;
     }
     const spriteInheritCheck = e.target.closest("[data-sprite-toggle-inherit]");
-    if (spriteInheritCheck && state.sprite.pendingPreview?.payload) {
+    if (spriteInheritCheck && state.sprite.pendingProposal?.intent === "dispatch") {
       const checked = Boolean(spriteInheritCheck.checked);
       state.dispatchInheritContext = checked;
-      state.sprite.pendingPreview.payload.inheritContext = checked;
+      state.sprite.pendingProposal.inheritContext = checked;
       renderSpriteAssistantMount();
       return true;
     }
@@ -969,25 +971,27 @@ export function createSpriteController({
     }
   }
 
-  async function requestSpriteDispatchPreview({ instruction = "", topicId = "", agentKey = "auto", mode = "auto" } = {}) {
+  async function requestSpriteDispatchProposal({ instruction = "", topicId = "", agentKey = "auto", mode = "auto" } = {}) {
     const cleanText = String(instruction || "").trim();
     if (!cleanText) return;
     state.sprite.open = true;
     state.sprite.busy = true;
+    state.sprite.pendingArchive = null;
+    state.sprite.pendingReorg = null;
     renderSpriteAssistantMount();
     try {
       const effectiveAgent = agentKey !== "auto" ? agentKey : (state.dispatchAgentKey || "auto");
       const effectiveModel = effectiveAgent !== "auto" ? (state.dispatchModel || "") : "";
-      const payload = {
-        text: cleanText,
+      const res = await postAssistantJson("api/assistant/dispatch-preview", {
+        instruction: cleanText,
         topicId: topicId || state.sprite.scopedTopicId || "",
         mode: mode || "auto",
         preferredProvider: "auto",
         agentKey: effectiveAgent,
         model: effectiveModel,
         inheritContext: state.dispatchInheritContext !== false,
-      };
-      const res = await submitSpriteDispatch(payload);
+        callKey: state.sprite.sessionId || "",
+      });
       if (res?.chatOnly) {
         const replyText = String(res.reply || "我在听，请告诉我你想安排的具体任务或项目。").trim();
         pushSpriteMessage({
@@ -998,8 +1002,8 @@ export function createSpriteController({
         });
         return;
       }
-      const routes = Array.isArray(res?.routes) ? res.routes : [];
-      if (!routes.length) {
+      const proposal = res?.proposal;
+      if (!proposal || !Array.isArray(proposal.routes) || !proposal.routes.length) {
         pushSpriteMessage({
           role: "sprite",
           tone: "urgent",
@@ -1007,79 +1011,16 @@ export function createSpriteController({
         });
         return;
       }
-      state.sprite.pendingPreview = {
-        payload,
-        routes,
-        aiPlanned: Boolean(res?.aiPlanned),
-        aiModel: String(res?.aiModel || "").trim(),
-        reply: String(res?.reply || "").trim(),
-      };
+      if (state.sprite.pendingProposal && state.sprite.pendingProposal.id !== proposal.id) {
+        cancelPendingProposalOnServer(state.sprite.pendingProposal);
+      }
+      state.sprite.pendingProposal = proposal;
       renderSpriteAssistantMount();
     } catch (error) {
       pushSpriteMessage({
         role: "sprite",
         tone: "urgent",
         text: `生成派工预览失败：${formatActionError(error)}`,
-      });
-    } finally {
-      state.sprite.busy = false;
-      renderSpriteAssistantMount();
-    }
-  }
-
-  async function confirmSpriteDispatchPreview() {
-    const preview = state.sprite.pendingPreview;
-    if (!preview?.payload || state.sprite.busy) return;
-    const { payload, routes } = preview;
-    const chosenAgentKey = payload.agentKey || "auto";
-    const missingAgent = routes.some((rt) => !rt.agentKey);
-    const mismatched = chosenAgentKey !== "auto" && routes.some((rt) => rt.agentKey !== chosenAgentKey);
-    if (missingAgent || mismatched) {
-      pushSpriteMessage({
-        role: "sprite",
-        tone: "urgent",
-        text: missingAgent
-          ? "已拦截：后台服务还是旧版本（未返回账号归属），请先在版本弹窗点「重启服务」后再派单。"
-          : `已拦截：后端解析出的账号与所选「${chosenAgentKey}」不一致，未执行派出。`,
-      });
-      return;
-    }
-
-    state.sprite.busy = true;
-    renderSpriteAssistantMount();
-    try {
-      const res = await submitSpriteDispatch(payload, { confirmed: true, routes });
-      state.sprite.pendingPreview = null;
-      state.lastDispatchReceipt = res;
-      if (res?.overview) {
-        state.missionOverview = res.overview;
-      }
-      void refreshThreads().catch(() => {});
-      const dispatched = Array.isArray(res?.dispatched) ? res.dispatched : [];
-      if (dispatched.length > 0) {
-        const first = dispatched[0];
-        getTycoon3d?.()?.triggerDispatchBurst?.(first.topicId || "");
-        const msgText = dispatched.length === 1
-          ? `已派出员工入驻「${first.topicName}」！任务正在执行中。`
-          : `已成功派出 ${dispatched.length} 名并发 AI 员工上岗！`;
-        const chips = dispatched
-          .filter((d) => d.threadId)
-          .slice(0, 2)
-          .map((d) => ({ kind: "thread", id: d.threadId, label: `进入：${d.topicName}` }));
-        pushSpriteMessage({
-          role: "sprite",
-          tone: "work",
-          text: msgText,
-          spokenText: msgText,
-          chips,
-        });
-      }
-      renderProjectBoard();
-    } catch (error) {
-      pushSpriteMessage({
-        role: "sprite",
-        tone: "urgent",
-        text: `派出失败：${formatActionError(error)}`,
       });
     } finally {
       state.sprite.busy = false;
@@ -1167,19 +1108,59 @@ export function createSpriteController({
     const proposal = state.sprite.pendingProposal;
     if (!proposal || state.sprite.busy) return;
     state.sprite.busy = true;
-    state.sprite.thinkingLabel = "正在执行操作…";
+    state.sprite.thinkingLabel = proposal.intent === "dispatch" ? "正在派出工位…" : "正在执行操作…";
     renderSpriteAssistantMount();
     try {
-      const res = await postAssistantJson("api/assistant/action", proposal.id ? { proposalId: proposal.id } : proposal);
+      const actionBody = proposal.id
+        ? {
+            proposalId: proposal.id,
+            ...(proposal.intent === "dispatch" ? { inheritContext: proposal.inheritContext !== false } : {}),
+          }
+        : proposal;
+      const res = await postAssistantJson("api/assistant/action", actionBody);
       state.sprite.pendingProposal = null;
       const summary = res?.summary || "已执行";
-      pushSpriteMessage({
-        role: "sprite",
-        tone: "good",
-        text: `好的，${summary}。`,
-        spokenText: `好的，${summary}。`,
-        executedTag: summary,
-      });
+      if (res?.intent === "dispatch") {
+        state.lastDispatchReceipt = res;
+        if (res?.overview) state.missionOverview = res.overview;
+        const dispatched = Array.isArray(res?.dispatched) ? res.dispatched : [];
+        if (dispatched.length > 0) {
+          const first = dispatched[0];
+          getTycoon3d?.()?.triggerDispatchBurst?.(first.topicId || "");
+          const msgText = dispatched.length === 1
+            ? `已派出员工入驻「${first.topicName}」！任务正在执行中。`
+            : `已成功派出 ${dispatched.length} 名并发 AI 员工上岗！`;
+          const chips = dispatched
+            .filter((d) => d.threadId)
+            .slice(0, 2)
+            .map((d) => ({ kind: "thread", id: d.threadId, label: `进入：${d.topicName}` }));
+          pushSpriteMessage({
+            role: "sprite",
+            tone: "work",
+            text: msgText,
+            spokenText: msgText,
+            executedTag: summary,
+            chips,
+          });
+        } else {
+          pushSpriteMessage({
+            role: "sprite",
+            tone: "good",
+            text: `好的，${summary}。`,
+            spokenText: `好的，${summary}。`,
+            executedTag: summary,
+          });
+        }
+        renderProjectBoard();
+      } else {
+        pushSpriteMessage({
+          role: "sprite",
+          tone: "good",
+          text: `好的，${summary}。`,
+          spokenText: `好的，${summary}。`,
+          executedTag: summary,
+        });
+      }
       void loadMissionOverview({ trigger: "assistant-action" });
       void refreshThreads().catch(() => {});
     } catch (error) {
@@ -1451,25 +1432,12 @@ export function createSpriteController({
     state.sprite.draft = "";
     pushSpriteMessage({ role: "user", text });
 
-    if (state.sprite.pendingProposal) {
-      if (/^(确认|确定|执行|同意|批准|可以|好的|好|行|没问题|ok|yes)[!！。.,，~～]*$/i.test(text)) {
-        await confirmSpriteProposal();
-        return;
-      }
-      if (/^(取消|算了|不要|别|撤回|放弃|no|cancel)[!！。.,，~～]*$/i.test(text)) {
-        cancelPendingProposalOnServer(state.sprite.pendingProposal);
-        state.sprite.pendingProposal = null;
-        pushSpriteMessage({ role: "sprite", tone: "idle", text: "好的，已取消该操作。", spokenText: "好的，已取消该操作。" });
-        return;
-      }
-    }
-
     const agentCtx = buildDispatchAgentContext();
     const excludedAgentKeys = Array.isArray(state.missionOverview?.meta?.dispatchPrefs?.excludedAgentKeys)
       ? state.missionOverview.meta.dispatchPrefs.excludedAgentKeys
       : [];
     const parsed = classifySpriteUserInput(text, {
-      hasPendingPreview: Boolean(state.sprite.pendingPreview),
+      hasPendingProposal: Boolean(state.sprite.pendingProposal),
       hasPendingArchive: Boolean(state.sprite.pendingArchive),
       hasPendingReorg: Boolean(state.sprite.pendingReorg),
       scopedTopicId: state.sprite.scopedTopicId,
@@ -1477,6 +1445,17 @@ export function createSpriteController({
       agentOptions: agentCtx.agentOptions,
       excludedAgentKeys,
     });
+
+    if (parsed.intent === "confirm_proposal") {
+      await confirmSpriteProposal();
+      return;
+    }
+    if (parsed.intent === "cancel_proposal") {
+      cancelPendingProposalOnServer(state.sprite.pendingProposal);
+      state.sprite.pendingProposal = null;
+      pushSpriteMessage({ role: "sprite", tone: "idle", text: "好的，已取消该操作。", spokenText: "好的，已取消该操作。" });
+      return;
+    }
 
     if (parsed.intent === "confirm_reorg") {
       await confirmSpriteReorgPreview();
@@ -1518,27 +1497,13 @@ export function createSpriteController({
       });
       return;
     }
-    if (parsed.intent === "confirm_preview") {
-      await confirmSpriteDispatchPreview();
-      return;
-    }
-    if (parsed.intent === "cancel_preview") {
-      state.sprite.pendingPreview = null;
-      pushSpriteMessage({
-        role: "sprite",
-        tone: "idle",
-        text: "好的，已取消本次派工预览。",
-        spokenText: "已取消本次派工预览。",
-      });
-      return;
-    }
     if (parsed.intent === "query_tickets") {
       const reply = buildSpriteTicketReply(state.missionOverview);
       pushSpriteMessage({ role: "sprite", tone: reply.tone, text: reply.text, spokenText: reply.spokenText, actions: reply.actions });
       return;
     }
     if (parsed.intent === "dispatch_preview") {
-      await requestSpriteDispatchPreview({
+      await requestSpriteDispatchProposal({
         instruction: parsed.instruction,
         topicId: parsed.topicId,
         agentKey: parsed.agentKey,

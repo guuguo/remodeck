@@ -596,3 +596,106 @@ test("SpriteController never plays warm notices when user is already speaking", 
   assert.equal(ttsCalls.length, 0);
   await controller.hangupSpritePhoneCall();
 });
+
+test("SpriteController routes quick-preview and dispatch through server proposals with inherit toggle and edit flow", async () => {
+  const previewBodies = [];
+  const actionBodies = [];
+  let previewSeq = 0;
+  let nextChatOnly = false;
+
+  const { state, controller } = createTestHarness({
+    fetchImpl: async (url, opts = {}) => {
+      const u = String(url || "");
+      const body = opts.body ? JSON.parse(opts.body) : {};
+      if (u.includes("api/assistant/dispatch-preview")) {
+        previewBodies.push(body);
+        if (nextChatOnly) {
+          return Response.json({ ok: true, chatOnly: true, reply: "请说明要修的具体问题。" });
+        }
+        previewSeq += 1;
+        return Response.json({
+          ok: true,
+          proposal: {
+            id: `act_disp_${previewSeq}`,
+            intent: "dispatch",
+            risk: "confirm",
+            summary: `准备派给「示例商城」：${body.instruction}`,
+            instruction: body.instruction,
+            inheritContext: body.inheritContext !== false,
+            routes: [
+              {
+                topicId: "shop",
+                topicName: "示例商城",
+                agentKey: "codex:default",
+                agentLabel: "Codex 默认",
+                action: "spawn_parallel",
+                hasTopicDigest: true,
+                taskBrief: body.instruction,
+              },
+            ],
+          },
+        });
+      }
+      if (u.includes("api/assistant/action")) {
+        actionBodies.push(body);
+        if (body.cancel) return Response.json({ ok: true, canceled: true });
+        return Response.json({
+          ok: true,
+          intent: "dispatch",
+          summary: "已派出到「示例商城」并建账",
+          dispatched: [{ topicId: "shop", topicName: "示例商城", threadId: "codex:default:new-1" }],
+        });
+      }
+      return Response.json({ ok: true });
+    },
+  });
+
+  // 1. Quick preview chip creates a server-side dispatch proposal.
+  const quickBtn = {
+    dataset: { spriteQuickPreview: "排查登录超时", spriteQuickTopic: "shop" },
+    closest(sel) { return sel === "[data-sprite-quick-preview]" ? quickBtn : null; },
+  };
+  controller.handleSpriteDelegatedClick({ target: quickBtn, stopPropagation() {} });
+  await new Promise((r) => setTimeout(r, 25));
+
+  assert.equal(previewBodies.length, 1);
+  assert.equal(previewBodies[0].instruction, "排查登录超时");
+  assert.equal(previewBodies[0].topicId, "shop");
+  assert.equal(state.sprite.pendingProposal?.id, "act_disp_1");
+
+  // 2. Inherit-context toggle updates both global preference and pending proposal.
+  const inheritCheckbox = {
+    checked: false,
+    closest(sel) { return sel === "[data-sprite-toggle-inherit]" ? inheritCheckbox : null; },
+  };
+  assert.equal(controller.handleSpriteDelegatedChange({ target: inheritCheckbox }), true);
+  assert.equal(state.dispatchInheritContext, false);
+  assert.equal(state.sprite.pendingProposal?.inheritContext, false);
+
+  // 3. Typing confirmation dispatches via /api/assistant/action with proposalId + inheritContext override.
+  await controller.handleSpriteCommand("确认");
+  assert.equal(actionBodies.at(-1)?.proposalId, "act_disp_1");
+  assert.equal(actionBodies.at(-1)?.inheritContext, false);
+  assert.equal(state.sprite.pendingProposal, null);
+  assert.equal(state.lastDispatchReceipt?.dispatched?.[0]?.threadId, "codex:default:new-1");
+  assert.ok(state.sprite.messages.at(-1)?.chips?.some((c) => c.kind === "thread" && c.id === "codex:default:new-1"));
+
+  // 4. Explicit dispatch command -> edit-proposal cancels server proposal and restores draft.
+  await controller.handleSpriteCommand("派工：补全单测");
+  assert.equal(state.sprite.pendingProposal?.id, "act_disp_2");
+  const editBtn = {
+    dataset: { spriteAction: "edit-proposal" },
+    closest(sel) { return sel === "[data-sprite-action]" ? editBtn : null; },
+  };
+  controller.handleSpriteDelegatedClick({ target: editBtn, stopPropagation() {} });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(state.sprite.pendingProposal, null);
+  assert.equal(state.sprite.draft, "补全单测");
+  assert.deepEqual(actionBodies.at(-1), { proposalId: "act_disp_2", cancel: true });
+
+  // 5. chatOnly dispatch-preview response appends sprite reply without pendingProposal.
+  nextChatOnly = true;
+  await controller.handleSpriteCommand("派工：随便聊聊");
+  assert.equal(state.sprite.pendingProposal, null);
+  assert.equal(state.sprite.messages.at(-1)?.text, "请说明要修的具体问题。");
+});

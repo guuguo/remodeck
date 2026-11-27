@@ -898,3 +898,98 @@ test("流式 JSON 首字段解析 extractCompleteJsonStringField 与短句跳过
   await f.assistant.ask({ text: "帮我看下昨天报错原因", mode: "phone", sessionId: "s-search" });
   assert.equal(searchCalls, 1);
 });
+
+test("createDispatchProposal 统一服务端派工预览、上下文继承覆盖与纯闲聊兜底", async (t) => {
+  const f = await fixture(t);
+  const calls = [];
+  const origDispatch = f.assistant.dispatchImpl;
+  f.assistant.dispatchImpl = async (opts) => {
+    calls.push(opts);
+    if (opts.confirmOnly && opts.text === "随便聊聊") {
+      return { ok: true, confirmOnly: true, chatOnly: true, reply: "想安排哪一条产线？" };
+    }
+    if (opts.confirmOnly) {
+      return {
+        ok: true,
+        confirmOnly: true,
+        aiPlanned: true,
+        aiModel: "Gemini 3.8 Flash",
+        routes: [
+          {
+            topicId: "line-0",
+            topicName: "示例商城",
+            agentKey: "codex:default",
+            agentLabel: "Codex 默认",
+            segmentText: "修登录回调",
+            action: "spawn_parallel",
+            hasTopicDigest: true,
+          },
+          {
+            topicId: "line-1",
+            topicName: "绘本工坊",
+            agentKey: "claude:default",
+            agentLabel: "Claude 默认",
+            segmentText: "补单测",
+            action: "reuse_clean",
+          },
+        ],
+      };
+    }
+    return {
+      ok: true,
+      confirmOnly: false,
+      dispatched: opts.approvedRoutes.map((r, i) => ({
+        ...r,
+        cwd: `/Users/alice/projects/demo-${i}`,
+        threadId: `mock:default:unified-${i + 1}`,
+      })),
+    };
+  };
+
+  await assert.rejects(() => f.assistant.createDispatchProposal({ instruction: "  " }), /缺少派工指令/);
+
+  const chatRes = await f.assistant.createDispatchProposal({ instruction: "随便聊聊", callKey: "sp-u1" });
+  assert.equal(chatRes.chatOnly, true);
+  assert.equal(chatRes.reply, "想安排哪一条产线？");
+  assert.equal(chatRes.proposal, undefined);
+
+  const previewRes = await f.assistant.createDispatchProposal({
+    instruction: "修登录回调并补单测",
+    model: "gpt-5",
+    inheritContext: true,
+    callKey: "sp-u1",
+  });
+  assert.equal(calls[1].confirmOnly, true);
+  assert.equal(calls[1].useAiPlanner, true);
+  assert.equal(calls[1].model, "gpt-5");
+  assert.equal(calls[1].inheritContext, true);
+  assert.equal(previewRes.proposal?.intent, "dispatch");
+  assert.equal(previewRes.proposal?.risk, "confirm");
+  assert.equal(previewRes.proposal?.aiPlanned, true);
+  assert.equal(previewRes.proposal?.aiModel, "Gemini 3.8 Flash");
+  assert.equal(previewRes.proposal?.instruction, "修登录回调并补单测");
+  assert.equal(previewRes.proposal?.inheritContext, true);
+  assert.equal(previewRes.proposal?.routes?.length, 2);
+  assert.equal(previewRes.proposal?.routes?.[0]?.hasTopicDigest, true);
+
+  const pendingCopy = f.assistant.getPendingProposal(previewRes.proposal.id, { callKey: "sp-u1" });
+  assert.equal(pendingCopy?.aiPlanned, true);
+  assert.equal(pendingCopy?.instruction, "修登录回调并补单测");
+
+  // User unchecks inheritContext in UI before confirming -> override propagates to dispatchImpl
+  const execRes = await f.assistant.executeProposedAction({
+    proposalId: previewRes.proposal.id,
+    inheritContext: false,
+  });
+  assert.equal(execRes.ok, true);
+  assert.equal(execRes.intent, "dispatch");
+  assert.equal(calls[2].confirmOnly, false);
+  assert.equal(calls[2].useAiPlanner, false);
+  assert.equal(calls[2].inheritContext, false);
+  assert.equal(calls[2].model, "gpt-5");
+  assert.equal(execRes.dispatched?.length, 2);
+  assert.equal(execRes.taskIds?.length, 3);
+  assert.equal(f.assistant.getPendingProposal(previewRes.proposal.id), null);
+
+  f.assistant.dispatchImpl = origDispatch;
+});

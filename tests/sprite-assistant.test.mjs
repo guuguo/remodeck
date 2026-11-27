@@ -4,7 +4,7 @@ import fs from "node:fs";
 import { replaceHtmlPreservingUiState } from "../public/dom-preserve.js";
 import {
   buildSpriteOpeningBriefing,
-  buildSpriteContext, parseSpriteNdjson, appendSpriteTurn, askSpriteAssistant, submitSpriteDispatch, renderSpriteWorkCard, spriteTomorrowAtEight,
+  buildSpriteContext, parseSpriteNdjson, appendSpriteTurn, askSpriteAssistant, matchSpriteConfirmation, renderSpriteWorkCard, spriteTomorrowAtEight,
   buildSpriteQueryReply,
   captureSpriteOverviewSnapshot,
   classifySpriteUserInput,
@@ -117,8 +117,12 @@ test("Sprite Assistant classifies confirm/cancel/queries/dispatch and escapes XS
     { key: "codex:default", provider: "codex", label: "Codex" },
   ];
 
-  assert.equal(classifySpriteUserInput("确认", { hasPendingPreview: true }).intent, "confirm_preview");
-  assert.equal(classifySpriteUserInput("算了", { hasPendingPreview: true }).intent, "cancel_preview");
+  assert.equal(classifySpriteUserInput("确认", { hasPendingProposal: true }).intent, "confirm_proposal");
+  assert.equal(classifySpriteUserInput("算了", { hasPendingProposal: true }).intent, "cancel_proposal");
+  assert.equal(matchSpriteConfirmation("确认派出！"), "confirm");
+  assert.equal(matchSpriteConfirmation("ok"), "confirm");
+  assert.equal(matchSpriteConfirmation("不用了"), "cancel");
+  assert.equal(matchSpriteConfirmation("看看进度"), "");
   assert.equal(classifySpriteUserInput("我的工单").intent, "query_tickets");
   assert.equal(classifySpriteUserInput("汇报进展").intent, "briefing");
   assert.equal(classifySpriteUserInput("谁待拍板").intent, "query_pending");
@@ -140,8 +144,11 @@ test("Sprite Assistant classifies confirm/cancel/queries/dispatch and escapes XS
     open: true,
     ttsEnabled: true,
     messages: [{ role: "sprite", text: "你好 <script>alert(1)</script>" }],
-    pendingPreview: {
-      payload: { model: "gemini-4-pro" },
+    pendingProposal: {
+      id: "act_prev_1",
+      intent: "dispatch",
+      model: "gemini-4-pro",
+      instruction: "检查回调",
       routes: [
         {
           action: "reuse_clean",
@@ -155,6 +162,9 @@ test("Sprite Assistant classifies confirm/cancel/queries/dispatch and escapes XS
 
   assert.doesNotMatch(html, /<script>|<img onerror/);
   assert.match(html, /确认派出/);
+  assert.match(html, /data-sprite-action="confirm-proposal"/);
+  assert.match(html, /data-sprite-action="cancel-proposal"/);
+  assert.match(html, /data-sprite-action="edit-proposal"/);
   assert.match(html, /Antigravity/);
   assert.match(html, /gemini-4-pro/);
 });
@@ -194,8 +204,10 @@ test("Sprite Assistant supports scoped topic archive preview, confirm, and conte
 
   const inheritHtml = renderSpriteAssistantHtml({
     open: true,
-    pendingPreview: {
-      payload: { inheritContext: true },
+    pendingProposal: {
+      id: "act_inh_1",
+      intent: "dispatch",
+      inheritContext: true,
       routes: [{ action: "spawn_parallel", topicName: "图片翻译", hasTopicDigest: true, agentLabel: "Agy" }],
     },
   });
@@ -250,10 +262,12 @@ test("Sprite Assistant skips excluded accounts on provider match and renders exc
 
   const aiHtml = renderSpriteAssistantHtml({
     open: true,
-    pendingPreview: {
+    pendingProposal: {
+      id: "act_ai_1",
+      intent: "dispatch",
       aiPlanned: true,
       aiModel: "Gemini 3.8 Flash",
-      payload: { model: "gemini-4-pro" },
+      model: "gemini-4-pro",
       routes: [
         {
           action: "spawn_parallel",
@@ -280,20 +294,29 @@ test("T3: questions default to ask; only explicit dispatch verbs enter preview",
   assert.equal(classifySpriteUserInput("归档历史对话").intent, "archive_preview");
 });
 
-test("T14: dispatch preview performs zero startThread/send calls until confirmation", async () => {
-  let starts = 0, sends = 0;
-  const payload = { text: "修登录回调", topicId: "shop", confirmOnly: false };
-  const post = async (path, body) => {
-    assert.equal(path, "/api/overview/dispatch");
-    if (!body.confirmOnly) { starts++; sends++; }
-    return { routes: [{ topicId: "shop", agentKey: "codex:default" }] };
-  };
-  const result = await submitSpriteDispatch(payload, { post });
-  assert.equal(starts, 0);
-  assert.equal(sends, 0);
-  await submitSpriteDispatch(payload, { confirmed: true, routes: result.routes, post });
-  assert.equal(starts, 1);
-  assert.equal(sends, 1);
+test("Fullscreen sprite assistant renders unified dispatch proposal card and confirmation controls", () => {
+  const fsHtml = renderSpriteFullscreenHtml({
+    pendingProposal: {
+      id: "act_fs_1",
+      intent: "dispatch",
+      instruction: "修登录回调",
+      inheritContext: false,
+      routes: [
+        {
+          action: "spawn_parallel",
+          topicName: "示例商城",
+          agentLabel: "Codex 默认",
+          taskBrief: "修登录回调",
+          hasTopicDigest: true,
+        },
+      ],
+    },
+  });
+  assert.match(fsHtml, /派工预览/);
+  assert.match(fsHtml, /data-sprite-toggle-inherit/);
+  assert.doesNotMatch(fsHtml, /data-sprite-toggle-inherit[^>]*checked/);
+  assert.match(fsHtml, /data-sprite-action="edit-proposal"/);
+  assert.match(fsHtml, /data-sprite-action="confirm-proposal"/);
 });
 
 test("T16: opening judgement prioritizes alerts, then harvest, then the oldest quiet line", () => {

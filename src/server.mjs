@@ -934,6 +934,11 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/assistant/dispatch-preview" && request.method === "POST") {
+        sendJson(response, 200, await overviewService.assistant.createDispatchProposal(await readJsonBody(request)), { requestId });
+        return;
+      }
+
       if (pathname === "/api/assistant/notices" && request.method === "GET") {
         const limit = Number(url.searchParams.get("limit") || 10);
         sendJson(response, 200, await overviewService.assistant.listUnreadNotices({ limit }), { requestId });

@@ -177,6 +177,10 @@ export class AssistantService {
     return this.#proposals.executeProposedAction(input);
   }
 
+  async createDispatchProposal(input = {}) {
+    return this.#proposals.createDispatchProposal(input);
+  }
+
   async memoryVault() {
     if (this.vault) return this.vault;
     const enabled = this.hub?.getSettings?.().sharedMemoryEnabled !== false;

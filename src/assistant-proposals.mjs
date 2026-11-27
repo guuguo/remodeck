@@ -111,6 +111,20 @@ export class AssistantProposalManager {
     const id = String(proposal.id || `act_${randomUUID().slice(0, 8)}`).trim();
     const risk = proposal.risk || resolveActionRisk(proposal.intent, proposal.payload);
     const routesSummary = Array.isArray(proposal.routesSummary) && proposal.routesSummary.length ? proposal.routesSummary : null;
+    const isDispatch = proposal.intent === "dispatch";
+    const dispatchMeta = isDispatch
+      ? {
+          ...(proposal.aiPlanned ? { aiPlanned: true } : {}),
+          ...(proposal.aiModel ? { aiModel: String(proposal.aiModel).trim() } : {}),
+          ...(proposal.instruction || proposal.payload?.instruction
+            ? { instruction: String(proposal.instruction || proposal.payload?.instruction || "").trim() }
+            : {}),
+          ...(proposal.model || proposal.payload?.model
+            ? { model: String(proposal.model || proposal.payload?.model || "").trim() }
+            : {}),
+          inheritContext: (proposal.inheritContext ?? proposal.payload?.inheritContext) !== false,
+        }
+      : {};
     const nowMs = this.#ctx.now();
     this.#proposals.set(id, {
       id,
@@ -120,6 +134,7 @@ export class AssistantProposalManager {
       summary: proposal.summary || "",
       payload: proposal.payload || {},
       routesSummary,
+      dispatchMeta,
       createdAt: nowMs,
       expiresAt: nowMs + this.#proposalTtlMs,
     });
@@ -128,6 +143,7 @@ export class AssistantProposalManager {
       intent: proposal.intent,
       risk,
       summary: proposal.summary || "",
+      ...dispatchMeta,
       ...(routesSummary ? { routes: routesSummary } : {}),
     };
   }
@@ -145,6 +161,7 @@ export class AssistantProposalManager {
       intent: entry.intent,
       risk: entry.risk,
       summary: entry.summary,
+      ...(entry.dispatchMeta || {}),
       ...(entry.routesSummary ? { routes: entry.routesSummary } : {}),
       expiresAt: entry.expiresAt,
     };
@@ -189,18 +206,32 @@ export class AssistantProposalManager {
       mode: payload.mode || "auto",
       preferredProvider: payload.preferredProvider || "auto",
       agentKey: payload.agentKey || "auto",
+      ...(payload.model ? { model: payload.model } : {}),
+      inheritContext: payload.inheritContext !== false,
       confirmOnly: true,
       useAiPlanner: true,
     }).catch(() => null);
+    if (preview?.chatOnly) {
+      return { chatOnly: true, reply: String(preview.reply || "").trim() };
+    }
     const routes = Array.isArray(preview?.routes) ? preview.routes : [];
     if (!routes.length) return null;
     payload.approvedRoutes = routes;
     const routesSummary = routes.map((r) => ({
       topicId: r.topicId || "",
       topicName: r.topicName || "",
-      agentLabel: r.agentLabel || r.provider || "自动匹配",
+      agentKey: r.agentKey || "",
+      agentLabel: r.agentLabel || r.providerLabel || r.provider || "自动匹配",
+      provider: r.provider || "",
+      modelLabel: r.modelLabel || r.model || "",
+      effort: r.effort || "",
       segmentText: shortText(r.segmentText || "", 60),
+      taskBrief: shortText(r.taskBrief || r.segmentText || "", 80),
       action: r.action || "spawn_parallel",
+      hasTopicDigest: Boolean(r.hasTopicDigest),
+      diffLabel: r.taskDifficultyLabel || r.diffLabel || "",
+      reason: r.reason || "",
+      agentReason: r.agentReason || "",
     }));
     const shortAgent = (r) => shortText(String(r.agentLabel || r.provider || "自动").replace(/\s*[（(].*?[）)]/g, "").trim(), 16) || "自动";
     const confirmText = routesSummary.length === 1
@@ -208,7 +239,54 @@ export class AssistantProposalManager {
       : `准备拆 ${routesSummary.length} 路：${routesSummary.map((r, i) => `${i + 1}给「${r.topicName || "工作区"}」的${shortAgent(r)}`).join("，")}，确认发吗？`;
     proposal.summary = confirmText;
     proposal.routesSummary = routesSummary;
+    proposal.aiPlanned = Boolean(preview?.aiPlanned);
+    proposal.aiModel = String(preview?.aiModel || "").trim();
+    proposal.instruction = String(payload.instruction || "").trim();
+    proposal.inheritContext = payload.inheritContext !== false;
+    proposal.model = String(payload.model || "").trim();
     return { proposal, confirmText };
+  }
+
+  async createDispatchProposal({
+    instruction = "",
+    text = "",
+    topicId = "",
+    agentKey = "auto",
+    mode = "auto",
+    preferredProvider = "auto",
+    model = "",
+    inheritContext = true,
+    callKey = "",
+  } = {}) {
+    const cleanInstruction = shortText(instruction || text || "", 600);
+    if (!cleanInstruction) {
+      throw error("缺少派工指令", 400);
+    }
+    const proposal = {
+      id: `act_${randomUUID().slice(0, 8)}`,
+      intent: "dispatch",
+      risk: resolveActionRisk("dispatch"),
+      summary: `派工：${shortText(cleanInstruction, 40)}`,
+      payload: {
+        intent: "dispatch",
+        instruction: cleanInstruction,
+        topicId: String(topicId || "").trim(),
+        mode: String(mode || "auto").trim() || "auto",
+        preferredProvider: String(preferredProvider || "auto").trim() || "auto",
+        agentKey: String(agentKey || "auto").trim() || "auto",
+        ...(model ? { model: String(model).trim() } : {}),
+        inheritContext: inheritContext !== false,
+      },
+    };
+    const enriched = await this.enrichDispatchProposal(proposal);
+    if (enriched?.chatOnly) {
+      return { ok: true, chatOnly: true, reply: enriched.reply || "" };
+    }
+    if (!enriched?.proposal) {
+      return { ok: true, proposal: null, routes: [] };
+    }
+    const registered = this.registerProposal(enriched.proposal, { callKey });
+    return { ok: true, proposal: registered };
   }
 
   validateAndBuildAction(parsed, overview, pendingRequests = [], availableProfiles = []) {
@@ -460,12 +538,15 @@ export class AssistantProposalManager {
         throw error("缺少派工指令");
       }
       const approvedRoutes = Array.isArray(data.approvedRoutes) && data.approvedRoutes.length ? data.approvedRoutes : null;
+      const effectiveInheritContext = (input?.inheritContext !== undefined ? input.inheritContext : data.inheritContext) !== false;
       const res = await dispatchImpl({
         text: instruction,
         topicId: data.topicId || "",
         mode: data.mode || "auto",
         preferredProvider: data.preferredProvider || "auto",
         agentKey: data.agentKey || "auto",
+        ...(data.model ? { model: data.model } : {}),
+        inheritContext: effectiveInheritContext,
         confirmOnly: false,
         useAiPlanner: false,
         ...(approvedRoutes ? { approvedRoutes } : {}),
@@ -536,6 +617,7 @@ export class AssistantProposalManager {
         topicId: first?.topicId || data.topicId || "",
         dispatched,
         taskIds,
+        ...(res?.overview ? { overview: res.overview } : {}),
       };
     }
 

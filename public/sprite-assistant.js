@@ -295,11 +295,6 @@ export async function askSpriteAssistant(body, onTrace, { fetchImpl = globalThis
   }
 }
 
-export function submitSpriteDispatch(payload, { confirmed = false, routes = [], post = apiPost } = {}) {
-  return post("/api/overview/dispatch", { ...payload, confirmOnly: !confirmed,
-    ...(confirmed ? { approvedRoutes: routes } : { useAiPlanner: true }) });
-}
-
 export function spriteTomorrowAtEight(now = new Date()) {
   const next = new Date(now);
   next.setDate(next.getDate() + 1);
@@ -537,8 +532,19 @@ export function diffSpriteOverviewEvents(prevSnap, nextSnap, { recentCompletedBy
   return events;
 }
 
+const SPRITE_CONFIRM_RE = /^(?:确认|确定|确认调整|确认归档|确认派出|立即派出|派出|派工|派吧|发出|发吧|开始归档|归档|执行|同意|批准|应用|可以|好的|好|行|没问题|ok|yes|go|走起)[!！。.,，~～]*$/i;
+const SPRITE_CANCEL_RE = /^(?:取消|算了|不要|别|不改了|不归档|不派了|不派|不用了|撤回|放弃|no|cancel)[!！。.,，~～]*$/i;
+
+export function matchSpriteConfirmation(rawText = "") {
+  const text = String(rawText || "").trim();
+  if (!text) return "";
+  if (SPRITE_CONFIRM_RE.test(text)) return "confirm";
+  if (SPRITE_CANCEL_RE.test(text)) return "cancel";
+  return "";
+}
+
 export function classifySpriteUserInput(rawText, {
-  hasPendingPreview = false,
+  hasPendingProposal = false,
   hasPendingArchive = false,
   hasPendingReorg = false,
   scopedTopicId = "",
@@ -549,31 +555,20 @@ export function classifySpriteUserInput(rawText, {
   const text = String(rawText || "").trim();
   if (!text) return { intent: "empty" };
 
+  const confirmation = matchSpriteConfirmation(text);
   if (hasPendingReorg) {
-    if (/^(确认|确定|确认调整|执行|应用|可以|好的|好|行|没问题|ok|yes)[!！。.,，~～]*$/i.test(text)) {
-      return { intent: "confirm_reorg" };
-    }
-    if (/^(取消|算了|不要|不改了|撤回|放弃|no|cancel)[!！。.,，~～]*$/i.test(text)) {
-      return { intent: "cancel_reorg" };
-    }
+    if (confirmation === "confirm") return { intent: "confirm_reorg" };
+    if (confirmation === "cancel") return { intent: "cancel_reorg" };
   }
 
   if (hasPendingArchive) {
-    if (/^(确认|确定|确认归档|归档|开始归档|执行|可以|好的|好|行|没问题|ok|yes)[!！。.,，~～]*$/i.test(text)) {
-      return { intent: "confirm_archive" };
-    }
-    if (/^(取消|算了|不要|不归档|撤回|放弃|no|cancel)[!！。.,，~～]*$/i.test(text)) {
-      return { intent: "cancel_archive" };
-    }
+    if (confirmation === "confirm") return { intent: "confirm_archive" };
+    if (confirmation === "cancel") return { intent: "cancel_archive" };
   }
 
-  if (hasPendingPreview) {
-    if (/^(确认|确定|确认派出|派出|派工|执行|立即派出|发吧|可以|好的|好|行|没问题|ok|yes|走起)[!！。.,，~～]*$/i.test(text)) {
-      return { intent: "confirm_preview" };
-    }
-    if (/^(取消|算了|不要|不派了|撤回|放弃|no|cancel)[!！。.,，~～]*$/i.test(text)) {
-      return { intent: "cancel_preview" };
-    }
+  if (hasPendingProposal) {
+    if (confirmation === "confirm") return { intent: "confirm_proposal" };
+    if (confirmation === "cancel") return { intent: "cancel_proposal" };
   }
 
   if (/^(汇报|汇报进展|进展|当前进展|进度|播报|播报进度|盘点|总结|情况|现在什么情况|谁在忙|在忙什么)[?？!！。.~～]*$/i.test(text)) {
@@ -771,67 +766,6 @@ function renderPendingArchiveCardHtml(pendingArchive, busy = false) {
   `;
 }
 
-function renderPendingPreviewCardHtml(pendingPreview, busy = false) {
-  if (!pendingPreview || !Array.isArray(pendingPreview.routes) || !pendingPreview.routes.length) return "";
-  const routes = pendingPreview.routes;
-  const chosenModel = pendingPreview.payload?.model || "";
-  const inheritEnabled = pendingPreview.payload?.inheritContext !== false;
-  const anySpawnHasDigest = routes.some((rt) => rt.action === "spawn_parallel" && rt.hasTopicDigest);
-  const aiPlanned = Boolean(pendingPreview.aiPlanned);
-  const aiModel = String(pendingPreview.aiModel || "").trim();
-
-  return `
-    <div class="sprite-preview-card" role="region" aria-label="待确认派工预览">
-      <div class="sprite-preview-head">
-        <strong>${iconSvg("split", { size: 12 })} 派工预览（共 ${routes.length} 单 · 待你确认）</strong>
-        ${aiPlanned ? `<span class="sprite-ai-badge" title="${escapeHtml(aiModel ? `由 ${aiModel} 规划` : "由 AI 规划")}">AI 分配${aiModel ? ` · ${escapeHtml(aiModel)}` : ""}</span>` : ""}
-      </div>
-      <div class="sprite-preview-routes">
-        ${routes.map((rt) => {
-          const actLabel = rt.action === "reuse_clean" ? "复用干净工位" : "新开并发分身";
-          const agentLabel = rt.agentLabel || rt.providerLabel || rt.provider || "自动匹配账号";
-          const modelBase = rt.model || chosenModel || "账号默认模型";
-          const modelLabel = rt.effort ? `${modelBase} · ${rt.effort}` : modelBase;
-          const diffLabel = rt.taskDifficultyLabel || "";
-          const taskBrief = String(rt.segmentText || "").trim();
-          return `
-            <div class="sprite-preview-route">
-              <p class="sprite-dispatch-confirm">${escapeHtml(t("我理解为：让 {agent} 在 {topic}（{station}）做 {task}，这样派吗？", { agent: agentLabel, topic: rt.topicName || t("未指定产线"), station: rt.action === "reuse_clean" ? t("原工位") : t("新工位"), task: taskBrief || pendingPreview.payload?.text || "" }))}</p>
-              <div class="sprite-preview-line1">
-                <span class="sprite-route-act ${rt.action === "reuse_clean" ? "is-reuse" : "is-spawn"}">${escapeHtml(actLabel)}</span>
-                <strong class="sprite-route-topic">${escapeHtml(rt.topicName || "未指定产线")}</strong>
-                ${diffLabel ? `<span class="mo-inherit-pill">${escapeHtml(diffLabel)}</span>` : ""}
-                ${rt.action === "spawn_parallel" && rt.hasTopicDigest && inheritEnabled ? `<span class="mo-inherit-pill">继承归档记忆</span>` : ""}
-              </div>
-              ${taskBrief ? `<div class="sprite-route-task">${escapeHtml(taskBrief)}</div>` : ""}
-              <div class="sprite-preview-meta">
-                <span>账号：<strong>${escapeHtml(agentLabel)}</strong></span>
-                <span>模型：<strong>${escapeHtml(modelLabel)}</strong></span>
-              </div>
-              ${(rt.agentReason || rt.reason) ? `<div class="sprite-preview-reason">${escapeHtml([rt.agentReason, rt.reason].filter(Boolean).join(" · "))}</div>` : ""}
-            </div>
-          `;
-        }).join("")}
-      </div>
-      ${anySpawnHasDigest ? `
-        <label class="sprite-inherit-row">
-          <input type="checkbox" data-sprite-toggle-inherit="1" ${inheritEnabled ? "checked" : ""} ${busy ? "disabled" : ""} />
-          <span>新开分身自动注入该产线的历史归档摘要（复用工位不重复注入）</span>
-        </label>
-      ` : ""}
-      <div class="sprite-preview-actions">
-        <span class="sprite-preview-hint">可点右侧按钮，或语音说「确认」</span>
-        <div class="sprite-preview-btns">
-          <button type="button" class="mo-ctrl-btn sprite-btn-cancel" data-sprite-action="edit-dispatch" ${busy ? "disabled" : ""}>${t("修改")}</button>
-          <button type="button" class="btn-primary btn-xs sprite-btn-confirm" data-sprite-action="confirm-dispatch" ${busy ? "disabled" : ""}>
-            ${iconSvg("send", { size: 11 })}<span>${busy ? "派出中…" : "确认派出"}</span>
-          </button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
 function formatVoiceElapsed(sec = 0) {
   const s = Math.max(0, Math.floor(Number(sec) || 0));
   const m = String(Math.floor(s / 60)).padStart(2, "0");
@@ -890,8 +824,67 @@ function renderSpriteModelSelectHtml(modelOptions = [], selectedKey = "auto", { 
 }
 
 function renderPendingProposalCardHtml(pendingProposal, busy = false) {
-  if (!pendingProposal || !pendingProposal.summary) return "";
+  if (!pendingProposal) return "";
   const routes = Array.isArray(pendingProposal.routes) ? pendingProposal.routes : [];
+  if (pendingProposal.intent === "dispatch" && routes.length) {
+    const chosenModel = pendingProposal.model || "";
+    const inheritEnabled = pendingProposal.inheritContext !== false;
+    const anySpawnHasDigest = routes.some((rt) => rt.action === "spawn_parallel" && rt.hasTopicDigest);
+    const aiPlanned = Boolean(pendingProposal.aiPlanned);
+    const aiModel = String(pendingProposal.aiModel || "").trim();
+    return `
+      <div class="sprite-preview-card is-proposal-card" role="region" aria-label="待确认派工预览">
+        <div class="sprite-preview-head">
+          <strong>${iconSvg("split", { size: 12 })} 派工预览（共 ${routes.length} 单 · 待你确认）</strong>
+          ${aiPlanned ? `<span class="sprite-ai-badge" title="${escapeHtml(aiModel ? `由 ${aiModel} 规划` : "由 AI 规划")}">AI 分配${aiModel ? ` · ${escapeHtml(aiModel)}` : ""}</span>` : ""}
+        </div>
+        <div class="sprite-preview-routes">
+          ${routes.map((rt) => {
+            const actLabel = rt.action === "reuse_clean" ? "复用干净工位" : "新开并发分身";
+            const agentLabel = rt.agentLabel || rt.providerLabel || rt.provider || "自动匹配账号";
+            const modelBase = rt.modelLabel || rt.model || chosenModel || "账号默认模型";
+            const modelLabel = rt.effort && !String(modelBase).includes(rt.effort) ? `${modelBase} · ${rt.effort}` : modelBase;
+            const diffLabel = rt.diffLabel || rt.taskDifficultyLabel || "";
+            const taskBrief = String(rt.taskBrief || rt.segmentText || "").trim();
+            return `
+              <div class="sprite-preview-route">
+                <p class="sprite-dispatch-confirm">${escapeHtml(t("我理解为：让 {agent} 在 {topic}（{station}）做 {task}，这样派吗？", { agent: agentLabel, topic: rt.topicName || t("未指定产线"), station: rt.action === "reuse_clean" ? t("原工位") : t("新工位"), task: taskBrief || pendingProposal.instruction || "" }))}</p>
+                <div class="sprite-preview-line1">
+                  <span class="sprite-route-act ${rt.action === "reuse_clean" ? "is-reuse" : "is-spawn"}">${escapeHtml(actLabel)}</span>
+                  <strong class="sprite-route-topic">${escapeHtml(rt.topicName || "未指定产线")}</strong>
+                  ${diffLabel ? `<span class="mo-inherit-pill">${escapeHtml(diffLabel)}</span>` : ""}
+                  ${rt.action === "spawn_parallel" && rt.hasTopicDigest && inheritEnabled ? `<span class="mo-inherit-pill">继承归档记忆</span>` : ""}
+                </div>
+                ${taskBrief ? `<div class="sprite-route-task">${escapeHtml(taskBrief)}</div>` : ""}
+                <div class="sprite-preview-meta">
+                  <span>账号：<strong>${escapeHtml(agentLabel)}</strong></span>
+                  <span>模型：<strong>${escapeHtml(modelLabel)}</strong></span>
+                </div>
+                ${(rt.agentReason || rt.reason) ? `<div class="sprite-preview-reason">${escapeHtml([rt.agentReason, rt.reason].filter(Boolean).join(" · "))}</div>` : ""}
+              </div>
+            `;
+          }).join("")}
+        </div>
+        ${anySpawnHasDigest ? `
+          <label class="sprite-inherit-row">
+            <input type="checkbox" data-sprite-toggle-inherit="1" ${inheritEnabled ? "checked" : ""} ${busy ? "disabled" : ""} />
+            <span>新开分身自动注入该产线的历史归档摘要（复用工位不重复注入）</span>
+          </label>
+        ` : ""}
+        <div class="sprite-preview-actions">
+          <span class="sprite-preview-hint">${t("可点确认，或直接说「确认」")}</span>
+          <div class="sprite-preview-btns">
+            <button type="button" class="mo-ctrl-btn sprite-btn-cancel" data-sprite-action="cancel-proposal" ${busy ? "disabled" : ""}>${t("取消")}</button>
+            <button type="button" class="mo-ctrl-btn sprite-btn-cancel" data-sprite-action="edit-proposal" ${busy ? "disabled" : ""}>${t("修改")}</button>
+            <button type="button" class="btn-primary btn-xs sprite-btn-confirm" data-sprite-action="confirm-proposal" ${busy ? "disabled" : ""}>
+              ${iconSvg("send", { size: 11 })}<span>${busy ? t("派出中…") : t("确认派出")}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  if (!pendingProposal.summary) return "";
   const routesHtml = routes.length > 1
     ? `<div class="sprite-preview-routes">${routes.map((r, i) => `
         <div class="sprite-preview-route">
@@ -1069,7 +1062,6 @@ export function renderSpriteAssistantHtml(spriteState = {}, {
     unreadCount = 0,
     toastBubble = null,
     messages = [],
-    pendingPreview = null,
     pendingArchive = null,
     pendingReorg = null,
     pendingProposal = null,
@@ -1086,7 +1078,7 @@ export function renderSpriteAssistantHtml(spriteState = {}, {
     draft = "",
   } = spriteState;
 
-  const hasPendingCard = Boolean(pendingPreview || pendingArchive || pendingReorg || pendingProposal);
+  const hasPendingCard = Boolean(pendingArchive || pendingReorg || pendingProposal);
   const effectiveMood = hasPendingCard ? "coin" : mood;
   const badgeCount = unreadCount + (hasPendingCard ? 1 : 0);
 
@@ -1205,7 +1197,6 @@ export function renderSpriteAssistantHtml(spriteState = {}, {
           ${renderPendingProposalCardHtml(pendingProposal, busy)}
           ${renderPendingReorgCardHtml(pendingReorg, busy)}
           ${renderPendingArchiveCardHtml(pendingArchive, busy)}
-          ${renderPendingPreviewCardHtml(pendingPreview, busy)}
 
           <div class="sprite-quick-row">${(spriteState.context?.quick || [t("汇报进展")]).map((label) => `<button type="button" class="sprite-quick-chip" data-sprite-say="${escapeHtml(label)}">${escapeHtml(label)}</button>`).join("")}${scopedTopicId ? `<button class="sprite-quick-chip" data-sprite-archive-topic="${escapeHtml(scopedTopicId)}">${t("归档历史")}</button>` : ""}</div>
 
@@ -1259,7 +1250,6 @@ export function renderSpriteFullscreenHtml(spriteState = {}, {
     ttsEnabled = false,
     mood = "idle",
     messages = [],
-    pendingPreview = null,
     pendingArchive = null,
     pendingReorg = null,
     pendingProposal = null,
@@ -1277,7 +1267,7 @@ export function renderSpriteFullscreenHtml(spriteState = {}, {
     phoneCallActive = false,
   } = spriteState;
 
-  const hasPendingCard = Boolean(pendingPreview || pendingArchive || pendingReorg || pendingProposal);
+  const hasPendingCard = Boolean(pendingArchive || pendingReorg || pendingProposal);
   const effectiveMood = hasPendingCard ? "coin" : mood;
   const starters = [
     "今天园子里最需要我盯什么？",
@@ -1337,7 +1327,6 @@ export function renderSpriteFullscreenHtml(spriteState = {}, {
           ${renderPendingProposalCardHtml(pendingProposal, busy)}
           ${renderPendingReorgCardHtml(pendingReorg, busy)}
           ${renderPendingArchiveCardHtml(pendingArchive, busy)}
-          ${renderPendingPreviewCardHtml(pendingPreview, busy)}
         </div>
       ` : ""}
 
