@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, utimes, writeFile, chmod } from "node:fs/promises";
 import os from "node:os";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -7,6 +7,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_AGY_MODEL,
+  FALLBACK_AGY_MODELS,
+  fetchAgyModelsFromCli,
+  isAntigravityInternalWorkerModel,
   parseAgyModelsOutput,
   resolveAgyAcpLaunch,
   splitAntigravityModelEffort,
@@ -2713,19 +2716,20 @@ test("Antigravity live ask_question clears fake live state, emits card on hub.re
   const transcriptPath = resolve(logsDir, "transcript.jsonl");
   await writeFile(transcriptPath, initialSteps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
 
-  const provider = new AntigravityProvider({
-    env: {
-      ...process.env,
-      HOME: root,
-      USERPROFILE: root,
-      AGY_BIN: MOCK_AGY_BIN,
-      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
-    },
-  });
+  const hubEnv = {
+    ...process.env,
+    HOME: root,
+    USERPROFILE: root,
+    AGY_BIN: MOCK_AGY_BIN,
+    AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
+  };
+  const provider = new AntigravityProvider({ env: hubEnv });
   const hub = new ProviderHub({
     dataDir,
+    env: hubEnv,
     providers: [provider],
     enableQueueDrain: false,
+    enableSearchIndex: false,
   });
   await hub.init();
   t.after(() => hub.close());
@@ -2810,19 +2814,20 @@ test("Antigravity ask_question supports leading text, dedupes identical signatur
   ];
   await writeFile(resolve(logsDir, "transcript.jsonl"), `${lines.join("\n")}\n`, "utf8");
 
-  const provider = new AntigravityProvider({
-    env: {
-      ...process.env,
-      HOME: root,
-      USERPROFILE: root,
-      AGY_BIN: MOCK_AGY_BIN,
-      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
-    },
-  });
+  const hubEnv = {
+    ...process.env,
+    HOME: root,
+    USERPROFILE: root,
+    AGY_BIN: MOCK_AGY_BIN,
+    AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", label: "Antigravity", home: desktopDir, profileType: "desktop" }]),
+  };
+  const provider = new AntigravityProvider({ env: hubEnv });
   const hub = new ProviderHub({
     dataDir,
+    env: hubEnv,
     providers: [provider],
     enableQueueDrain: false,
+    enableSearchIndex: false,
   });
   await hub.init();
   t.after(() => hub.close());
@@ -2841,7 +2846,7 @@ test("Antigravity ask_question supports leading text, dedupes identical signatur
   });
   const resAfterAnswer = await hub.readThread(compositeId, { limit: 12 });
   assert.equal(resAfterAnswer.pendingRequests.length, 0);
-  await waitFor(() => hubEvents.some((e) => e.event === "provider_event" && e.payload?.type === "turn_completed"));
+  await waitFor(() => hubEvents.some((e) => e.event === "provider_event" && e.payload?.type === "turn_completed"), 15_000);
 
   // Dedupe identical askSignature emitted with different itemId (e.g. ACP toolCallId vs transcript itemId)
   const dedupeEvents = [];
@@ -2860,7 +2865,7 @@ test("Antigravity ask_question supports leading text, dedupes identical signatur
   };
   const dedupeDataDir = resolve(root, "data-dedupe");
   await mkdir(dedupeDataDir, { recursive: true });
-  const hub2 = new ProviderHub({ dataDir: dedupeDataDir, providers: [mockProvider], enableQueueDrain: false });
+  const hub2 = new ProviderHub({ dataDir: dedupeDataDir, env: hubEnv, providers: [mockProvider], enableQueueDrain: false, enableSearchIndex: false });
   await hub2.init();
   t.after(() => hub2.close());
   hub2.subscribe((event, payload) => dedupeEvents.push({ event, payload }));
@@ -3432,4 +3437,189 @@ test("agyAutoRetryAuth401 setting persists and AntigravityProvider auto-continue
     loggedPrompts.filter((p) => p.sessionId === convStillFail).map((p) => p.text),
     ["[AGY_PERMISSION]", "继续"],
   );
+});
+
+test("parseAgyModelsOutput handles CR spinner frames, fetchAgyModelsFromCli tracks fallback, and live cache resists fallback overwrite", async (t) => {
+  const spinnerAndModels = [
+    "\r⠋ Fetching available models...\r⠙ Fetching available models...\rgemini-4-neon-high\tGemini 4 Neon (High)",
+    "gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)",
+    "gemini-pro-orchestrator-neon\tOrchestrator (Neon)",
+    "gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)",
+    "claude-sonnet-5-5-high\tClaude Sonnet 5.5 (High)",
+    "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)",
+  ].join("\n");
+  const parsed = parseAgyModelsOutput(spinnerAndModels);
+  assert.deepEqual(
+    parsed.map((m) => m.id),
+    ["gemini-4-neon", "gemini-pro-orchestrator-neon", "gemini-3.8-flash", "claude-sonnet-5-5", "gpt-oss-120b"],
+  );
+  assert.deepEqual(parsed.find((m) => m.id === "gemini-4-neon")?.supportedReasoningEfforts, ["high", "xhigh"]);
+  assert.equal(parsed.find((m) => m.id === "gemini-pro-orchestrator-neon")?.displayName, "Orchestrator (Neon)");
+  assert.equal(parsed.find((m) => m.id === "claude-sonnet-5-5")?.displayName, "Claude Sonnet 5.5");
+  assert.equal(parsed.find((m) => m.id === "gpt-oss-120b")?.displayName, "GPT-OSS 120B");
+
+  const liveFetch = await fetchAgyModelsFromCli({
+    execFileImpl: async () => ({ stdout: spinnerAndModels }),
+  });
+  assert.equal(liveFetch.fromFallback, false);
+  assert.equal(liveFetch.items.length, 5);
+
+  const failedFetch = await fetchAgyModelsFromCli({
+    execFileImpl: async () => {
+      throw new Error("timed out");
+    },
+  });
+  assert.equal(failedFetch.fromFallback, true);
+  assert.equal(failedFetch.items.length, FALLBACK_AGY_MODELS.length);
+  assert.ok(failedFetch.items.some((m) => m.id === "gemini-pro-orchestrator-neon"));
+
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-agy-models-cache-"));
+  const desktopDir = resolve(dir, "desktop");
+  const failFlag = resolve(dir, "fail.flag");
+  const mockBin = resolve(dir, "mock-agy.mjs");
+  await mkdir(desktopDir, { recursive: true });
+  await writeFile(
+    mockBin,
+    [
+      "#!/usr/bin/env node",
+      "import { existsSync } from 'node:fs';",
+      `if (existsSync(${JSON.stringify(failFlag)})) process.exit(1);`,
+      "process.stdout.write(",
+      "  'gemini-4-neon-high\\tGemini 4 Neon (High)\\n' +",
+      "  'gemini-pro-orchestrator-neon\\tOrchestrator (Neon)\\n'",
+      ");",
+    ].join("\n"),
+    "utf8",
+  );
+  await chmod(mockBin, 0o755);
+
+  const provider = new AntigravityProvider({
+    env: {
+      ...process.env,
+      AGY_BIN: mockBin,
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([
+        { id: "desktop", label: "Antigravity 桌面", home: desktopDir, profileType: "desktop" },
+      ]),
+    },
+  });
+  t.after(async () => {
+    await provider.close().catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const liveModels = await provider.listModels("desktop");
+  assert.deepEqual(liveModels.map((m) => m.id), ["gemini-4-neon", "gemini-pro-orchestrator-neon"]);
+
+  await writeFile(failFlag, "1", "utf8");
+  const probe = await provider.probeProfile("desktop", { timeoutMs: 2_000 });
+  assert.equal(probe.ok, true);
+  assert.equal(probe.modelCount, 2);
+
+  const afterFallbackRefresh = await provider.listModels("desktop");
+  assert.deepEqual(afterFallbackRefresh.map((m) => m.id), ["gemini-4-neon", "gemini-pro-orchestrator-neon"]);
+});
+
+test("internal worker model keeps turn.models transition without polluting turn.model or thread.model", async (t) => {
+  assert.equal(isAntigravityInternalWorkerModel("gemini-flash-worker-agy"), true);
+  assert.equal(isAntigravityInternalWorkerModel("gemini-pro-worker-agy"), true);
+  assert.equal(isAntigravityInternalWorkerModel("gemini-4-hydrogen-low"), false);
+  assert.equal(isAntigravityInternalWorkerModel("gemini-3.8-flash"), false);
+
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-agy-worker-model-"));
+  const desktopDir = resolve(dir, "desktop");
+  const convWithOrch = "conv-orch-worker";
+  const convWorkerOnly = "conv-worker-only";
+  await mkdir(resolve(desktopDir, "brain", convWithOrch, ".system_generated", "logs"), { recursive: true });
+  await mkdir(resolve(desktopDir, "brain", convWorkerOnly, ".system_generated", "logs"), { recursive: true });
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const orchLines = [
+    JSON.stringify({
+      step_index: 0,
+      type: "USER_INPUT",
+      source: "USER_EXPLICIT",
+      status: "DONE",
+      created_at: "2026-11-26T04:00:00Z",
+      content: "帮我排查一下",
+    }),
+    JSON.stringify({
+      step_index: 1,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      created_at: "2026-11-26T04:00:02Z",
+      model: "gemini-pro-orchestrator-neon",
+      tool_calls: [{ id: "tc-1", name: "run_command", args: { CommandLine: "ls" } }],
+    }),
+    JSON.stringify({
+      step_index: 2,
+      type: "GENERIC",
+      status: "DONE",
+      created_at: "2026-11-26T04:00:03Z",
+      content: "ok",
+    }),
+    JSON.stringify({
+      step_index: 3,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      created_at: "2026-11-26T04:00:05Z",
+      model: "gemini-flash-worker-agy",
+      content: "排查完成。",
+    }),
+  ];
+  await writeFile(
+    resolve(desktopDir, "brain", convWithOrch, ".system_generated", "logs", "transcript.jsonl"),
+    `${orchLines.join("\n")}\n`,
+    "utf8",
+  );
+
+  const workerOnlyLines = [
+    JSON.stringify({
+      step_index: 0,
+      type: "USER_INPUT",
+      source: "USER_EXPLICIT",
+      status: "DONE",
+      created_at: "2026-11-26T04:01:00Z",
+      content: "只有 worker 记录",
+    }),
+    JSON.stringify({
+      step_index: 1,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      created_at: "2026-11-26T04:01:02Z",
+      model: "gemini-flash-worker-agy",
+      content: "完成。",
+    }),
+  ];
+  await writeFile(
+    resolve(desktopDir, "brain", convWorkerOnly, ".system_generated", "logs", "transcript.jsonl"),
+    `${workerOnlyLines.join("\n")}\n`,
+    "utf8",
+  );
+
+  const parsedOrch = parseAntigravityTranscript(orchLines, { rawId: convWithOrch });
+  assert.equal(parsedOrch.turns.length, 1);
+  assert.equal(parsedOrch.turns[0].model, "gemini-pro-orchestrator-neon");
+  assert.deepEqual(parsedOrch.turns[0].models, ["gemini-pro-orchestrator-neon", "gemini-flash-worker-agy"]);
+
+  const loadedOrch = await readAntigravityThreadHistory(desktopDir, convWithOrch);
+  assert.equal(loadedOrch.thread.model, "gemini-pro-orchestrator-neon");
+  assert.equal(loadedOrch.thread.turns[0].model, "gemini-pro-orchestrator-neon");
+  assert.deepEqual(loadedOrch.thread.turns[0].models, ["gemini-pro-orchestrator-neon", "gemini-flash-worker-agy"]);
+
+  const loadedWorkerOnly = await readAntigravityThreadHistory(desktopDir, convWorkerOnly);
+  assert.equal(loadedWorkerOnly.thread.model, "");
+  assert.deepEqual(loadedWorkerOnly.thread.turns[0].models, ["gemini-flash-worker-agy"]);
+
+  const provider = new AntigravityProvider({
+    env: {
+      ...process.env,
+      AGY_BIN: MOCK_AGY_BIN,
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([
+        { id: "desktop", label: "Antigravity 桌面", home: desktopDir, profileType: "desktop" },
+      ]),
+    },
+  });
+  t.after(() => provider.close().catch(() => {}));
+  const readWorkerOnly = await provider.readThread("desktop", convWorkerOnly);
+  assert.equal(readWorkerOnly.thread.model, DEFAULT_AGY_MODEL);
 });

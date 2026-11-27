@@ -408,3 +408,77 @@ test("AutomationScheduler auto-unarchives archived target sessions, falls back t
   reloaded.close();
   scheduler.close();
 });
+
+test("saveCustomTask supports editing provider, profile, model, and effort while migrating overrides safely", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-automations-edit-"));
+  const dataDir = resolve(dir, "data");
+  await mkdir(dataDir, { recursive: true });
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const started = [];
+  const hub = {
+    async listProvidersAndProfiles() {
+      return {
+        profiles: [
+          { provider: "codex", id: "codex", label: "Codex 默认", installed: true },
+          { provider: "claude", id: "claude-work", label: "Claude 工作号", installed: true },
+        ],
+      };
+    },
+    async startThread(args) {
+      started.push(args);
+      return { thread: { id: `${args.provider}:${args.profileId}:thread-1` } };
+    },
+  };
+
+  const scheduler = new AutomationScheduler({ hub, dataDir });
+  await scheduler.load();
+
+  const createdSnap = await scheduler.saveCustomTask({
+    name: "每日巡检",
+    provider: "codex",
+    profileId: "codex",
+    model: "gpt-5.4",
+    reasoningEffort: "medium",
+    rrule: "FREQ=DAILY;BYHOUR=21;BYMINUTE=15",
+    prompt: "执行巡检",
+  });
+  const createdTask = createdSnap.tasks.find((item) => item.name === "每日巡检");
+  assert.ok(createdTask);
+  assert.equal(createdTask.model, "gpt-5.4");
+  assert.equal(createdTask.reasoningEffort, "medium");
+
+  // Simulate an override state (e.g. paused + prior runCount)
+  await scheduler.configure({ taskKey: createdTask.taskKey, managed: false });
+
+  // Edit the same task to switch provider/profile/model/effort
+  const updatedSnap = await scheduler.saveCustomTask({
+    id: createdTask.id,
+    name: "每日巡检（Claude）",
+    provider: "claude",
+    profileId: "claude-work",
+    model: "claude-sonnet-4-6",
+    reasoningEffort: "high",
+    rrule: "FREQ=DAILY;BYHOUR=21;BYMINUTE=15",
+    prompt: "执行巡检 v2",
+  });
+  const updatedTask = updatedSnap.tasks.find((item) => item.id === createdTask.id);
+  assert.ok(updatedTask);
+  assert.equal(updatedTask.taskKey, `custom:claude:${createdTask.id}`);
+  assert.equal(updatedTask.provider, "claude");
+  assert.equal(updatedTask.profileId, "claude-work");
+  assert.equal(updatedTask.profileLabel, "Claude 工作号");
+  assert.equal(updatedTask.model, "claude-sonnet-4-6");
+  assert.equal(updatedTask.reasoningEffort, "high");
+  assert.equal(updatedTask.createdAtMs, createdTask.createdAtMs);
+  assert.equal(updatedTask.managed, false);
+
+  await scheduler.runNow(updatedTask.taskKey);
+  assert.equal(started.length, 1);
+  assert.equal(started[0].provider, "claude");
+  assert.equal(started[0].profileId, "claude-work");
+  assert.equal(started[0].model, "claude-sonnet-4-6");
+  assert.equal(started[0].effort, "high");
+
+  scheduler.close();
+});

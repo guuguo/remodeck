@@ -11,7 +11,8 @@ import {
   AntigravityAcpClient,
   createAcpPermissionResponse,
   DEFAULT_AGY_MODEL,
-  listAgyModelsFromCli,
+  fetchAgyModelsFromCli,
+  isAntigravityInternalWorkerModel,
   normalizeAcpPermissionRequest,
 } from "./antigravity-acp-client.mjs";
 import {
@@ -571,24 +572,40 @@ export class AntigravityProvider {
     return { ok: true };
   }
 
-  #refreshModelsCache() {
+  #refreshModelsCache({ force = false, timeoutMs } = {}) {
+    if (force) {
+      this.#modelsRefreshPromise = null;
+    }
     if (!this.#modelsRefreshPromise) {
-      this.#modelsRefreshPromise = listAgyModelsFromCli({ env: this.#env })
-        .then((items) => {
-          this.#modelsCache = { at: Date.now(), items };
-          return items;
+      const promise = fetchAgyModelsFromCli({
+        env: this.#env,
+        ...(timeoutMs ? { timeoutMs } : {}),
+      })
+        .then((result) => {
+          if (!result?.fromFallback) {
+            this.#modelsCache = { at: Date.now(), items: result.items, fromFallback: false };
+          } else if (this.#modelsCache && !this.#modelsCache.fromFallback) {
+            this.#modelsCache = { ...this.#modelsCache, at: Date.now() };
+          } else {
+            this.#modelsCache = { at: Date.now(), items: result.items, fromFallback: true };
+          }
+          return this.#modelsCache.items;
         })
         .finally(() => {
-          this.#modelsRefreshPromise = null;
+          if (this.#modelsRefreshPromise === promise) {
+            this.#modelsRefreshPromise = null;
+          }
         });
+      this.#modelsRefreshPromise = promise;
     }
     return this.#modelsRefreshPromise;
   }
 
   async listModels(profileId = "desktop") {
+    const ttlMs = this.#modelsCache?.fromFallback ? 15_000 : 120_000;
     if (!this.#modelsCache) {
       await this.#refreshModelsCache();
-    } else if (Date.now() - this.#modelsCache.at > 120_000) {
+    } else if (Date.now() - this.#modelsCache.at > ttlMs) {
       void this.#refreshModelsCache().catch(() => {});
     }
     return this.#modelsCache.items.map((item) => ({
@@ -597,15 +614,13 @@ export class AntigravityProvider {
     }));
   }
 
-  async probeProfile(profileId = "desktop", { timeoutMs = 8_000 } = {}) {
+  async probeProfile(profileId = "desktop", { timeoutMs = 15_000 } = {}) {
     await this.#getProfile(profileId);
     const started = Date.now();
-    this.#modelsCache = null;
-    this.#modelsRefreshPromise = null;
     let timer;
     try {
       const items = await Promise.race([
-        this.listModels(profileId),
+        this.#refreshModelsCache({ force: true, timeoutMs }),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error(`Antigravity 测通超时 (${timeoutMs}ms)`)), timeoutMs);
         }),
@@ -627,6 +642,11 @@ export class AntigravityProvider {
     const permMode = this.#sessionPermissionModes.get(`${profile.id}:${rawId}`) || rawThread.permissionMode || "";
     const live = Boolean(active || (rawThread.live && !this.#isStalePostTurnDiskLive(profile, rawId)));
     const hasError = !live && Boolean(rawThread.lastTurnStatus === "failed" || rawThread.lastError);
+    const rawModel = String(rawThread.model || "").trim();
+    const knownModel = String(known?.model || "").trim();
+    const resolvedModel = (rawModel && !isAntigravityInternalWorkerModel(rawModel))
+      ? rawModel
+      : ((knownModel && !isAntigravityInternalWorkerModel(knownModel)) ? knownModel : DEFAULT_AGY_MODEL);
     return {
       id: formatCompositeThreadId("antigravity", profile.id, rawId),
       rawId,
@@ -645,7 +665,7 @@ export class AntigravityProvider {
       cwd: rawThread.cwd || os.homedir(),
       createdAt: Number(rawThread.createdAt) || 0,
       updatedAt: Number(rawThread.updatedAt) || 0,
-      model: rawThread.model || known?.model || DEFAULT_AGY_MODEL,
+      model: resolvedModel,
       reasoningEffort: rawThread.reasoningEffort || known?.reasoningEffort || "high",
       ...(permMode ? { permissionMode: permMode } : {}),
       threadSource: rawThread.threadSource || "user",

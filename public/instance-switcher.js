@@ -31,6 +31,33 @@ export const CLIENT_FALLBACK_MODELS = Object.freeze({
       supportedReasoningEfforts: [],
     },
     {
+      id: "gemini-pro-orchestrator-neon",
+      model: "gemini-pro-orchestrator-neon",
+      displayName: "Orchestrator (Neon)",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: [],
+    },
+    {
+      id: "gemini-pro-orchestrator-argon",
+      model: "gemini-pro-orchestrator-argon",
+      displayName: "Orchestrator (Argon)",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: [],
+    },
+    {
+      id: "gemini-4-neon",
+      model: "gemini-4-neon",
+      displayName: "Gemini 4 Neon",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+    },
+    {
       id: "gemini-4-carbon",
       model: "gemini-4-carbon",
       displayName: "Gemini 4 Carbon",
@@ -58,6 +85,15 @@ export const CLIENT_FALLBACK_MODELS = Object.freeze({
       supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
     },
     {
+      id: "gemini-3.8-flash",
+      model: "gemini-3.8-flash",
+      displayName: "Gemini 3.8 Flash",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    },
+    {
       id: "claude-opus-5-5",
       model: "claude-opus-5-5",
       displayName: "Claude Opus 5.5",
@@ -67,13 +103,22 @@ export const CLIENT_FALLBACK_MODELS = Object.freeze({
       supportedReasoningEfforts: ["low", "medium", "high"],
     },
     {
-      id: "claude-sonnet-4-6",
-      model: "claude-sonnet-4-6",
-      displayName: "Claude Sonnet 4.6",
+      id: "claude-sonnet-5-5",
+      model: "claude-sonnet-5-5",
+      displayName: "Claude Sonnet 5.5",
       provider: "antigravity",
       isDefault: false,
       defaultReasoningEffort: "medium",
       supportedReasoningEfforts: ["low", "medium", "high"],
+    },
+    {
+      id: "gpt-oss-120b",
+      model: "gpt-oss-120b",
+      displayName: "GPT-OSS 120B",
+      provider: "antigravity",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["medium"],
     },
   ]),
   codex: Object.freeze([
@@ -368,6 +413,12 @@ export function compactModelBadgeLabel(rawModel = "") {
     return `${word}${effortSuffix}`;
   }
 
+  const geminiWorker = clean.match(/^gemini[- ](flash|pro|lite|ultra|nano)[- ]worker(?:[- ](?:agy|[a-z0-9]+))?(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
+  if (geminiWorker) {
+    const tier = geminiWorker[1].charAt(0).toUpperCase() + geminiWorker[1].slice(1).toLowerCase();
+    return `${tier} Worker${effortSuffix}`;
+  }
+
   const geminiCodename = clean.match(/^gemini[- ]\d+(?:[.-]\d+)*[- ]([a-z][a-z0-9]+)(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
   if (geminiCodename?.[1] && !/^(?:pro|flash|lite|ultra|nano|exp|preview)$/i.test(geminiCodename[1])) {
     const word = geminiCodename[1].charAt(0).toUpperCase() + geminiCodename[1].slice(1).toLowerCase();
@@ -420,6 +471,11 @@ export function compactModelBadgeLabel(rawModel = "") {
   }
   if (clean === "gpt-5.3-codex" || /5\.3.*codex/i.test(clean)) {
     return "5.3 Codex";
+  }
+  const gptOss = clean.match(/^gpt[- ]oss(?:[\s-]+(\d+[a-z]*))?(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
+  if (gptOss) {
+    const size = gptOss[1] ? ` ${gptOss[1].toUpperCase()}` : "";
+    return `GPT-OSS${size}${effortSuffix}`;
   }
   if (lower.includes("gpt-")) {
     const baseGpt = clean
@@ -1818,7 +1874,7 @@ export function renderProfilePillsHtml(profiles = [], {
               data-login-profile="${escapeAttrHtml(p.id)}"
               data-login-provider="${escapeAttrHtml(p.provider || "")}"
               data-login-mode="${p.provider === "codex" ? "oauth" : "terminal"}"
-              title="登录此独立实例并交给 Agent Control 后台控制"
+              title="登录此独立实例并交给 RemoteDeck 后台控制"
             >去登录</button>
           ` : ""}
           ${copyLoginCmd ? `
@@ -1889,7 +1945,7 @@ export function renderInstanceManagerListHtml(profiles = [], {
           data-login-profile="${escapeAttrHtml(p.id)}"
           data-login-provider="codex"
           data-login-mode="oauth"
-          title="拉起独立浏览器 OAuth 登录，完成后自动由 Agent Control 接管"
+          title="拉起独立浏览器 OAuth 登录，完成后自动由 RemoteDeck 接管"
         >${p.needsLogin ? "浏览器登录" : "换绑账号"}</button>
         <button
           type="button"
@@ -2012,6 +2068,9 @@ export function ensurePreferredModelInList(models = [], provider = "", preferred
     return list;
   }
   if (provider === "antigravity") {
+    if (/(?:^|-)worker(?:-agy)?$/i.test(cleanPreferred)) {
+      return list;
+    }
     const { baseModel } = resolveAntigravityModelSelection(cleanPreferred);
     if (baseModel && list.some((m) => m?.id === baseModel || m?.model === baseModel || m?.baseModel === baseModel)) {
       return list;
@@ -2019,18 +2078,28 @@ export function ensurePreferredModelInList(models = [], provider = "", preferred
   }
   if (provider === "claude" && !/^claude-/i.test(cleanPreferred)) return list;
   if (provider === "codex" && /^(claude-|gemini-|grok-)/i.test(cleanPreferred)) return list;
-  if (provider === "antigravity" && /^(gpt-|grok-)/i.test(cleanPreferred)) return list;
+  if (provider === "antigravity" && /^(gpt-(?!oss\b)|grok-)/i.test(cleanPreferred)) return list;
   if (provider === "grok" && !/^grok-/i.test(cleanPreferred)) return list;
+  const orchMatch = provider === "antigravity"
+    ? cleanPreferred.match(/^gemini-pro-orchestrator(?:-([a-z0-9]+))?$/i)
+    : null;
+  const rawCodename = orchMatch?.[1] && !/^(?:low|medium|high|xhigh)$/i.test(orchMatch[1])
+    ? orchMatch[1]
+    : "Carbon";
+  const orchDisplayName = orchMatch
+    ? `Orchestrator (${rawCodename.charAt(0).toUpperCase() + rawCodename.slice(1).toLowerCase()})`
+    : "";
   return [
     {
       id: cleanPreferred,
       model: cleanPreferred,
-      displayName: cleanPreferred,
+      ...(provider === "antigravity" ? { baseModel: cleanPreferred } : {}),
+      displayName: orchDisplayName || cleanPreferred,
       section: "main",
       provider: provider || "",
       isDefault: false,
-      defaultReasoningEffort: "medium",
-      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultReasoningEffort: orchMatch ? "high" : "medium",
+      supportedReasoningEfforts: orchMatch ? [] : ["low", "medium", "high", "xhigh", "max"],
     },
     ...list,
   ];

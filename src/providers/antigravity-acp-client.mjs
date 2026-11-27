@@ -24,6 +24,10 @@ export const DEFAULT_AGY_MODEL = "gemini-pro-orchestrator";
 
 const AGY_EFFORT_ORDER = ["low", "medium", "high", "xhigh"];
 
+export function isAntigravityInternalWorkerModel(modelId = "") {
+  return /(?:^|-)worker(?:-agy)?$/i.test(String(modelId || "").trim());
+}
+
 export const FALLBACK_AGY_MODELS = Object.freeze([
   {
     id: "gemini-pro-orchestrator",
@@ -34,6 +38,36 @@ export const FALLBACK_AGY_MODELS = Object.freeze([
     isDefault: true,
     defaultReasoningEffort: "high",
     supportedReasoningEfforts: [],
+  },
+  {
+    id: "gemini-pro-orchestrator-neon",
+    model: "gemini-pro-orchestrator-neon",
+    baseModel: "gemini-pro-orchestrator-neon",
+    displayName: "Orchestrator (Neon)",
+    provider: "antigravity",
+    isDefault: false,
+    defaultReasoningEffort: "high",
+    supportedReasoningEfforts: [],
+  },
+  {
+    id: "gemini-pro-orchestrator-argon",
+    model: "gemini-pro-orchestrator-argon",
+    baseModel: "gemini-pro-orchestrator-argon",
+    displayName: "Orchestrator (Argon)",
+    provider: "antigravity",
+    isDefault: false,
+    defaultReasoningEffort: "high",
+    supportedReasoningEfforts: [],
+  },
+  {
+    id: "gemini-4-neon",
+    model: "gemini-4-neon",
+    baseModel: "gemini-4-neon",
+    displayName: "Gemini 4 Neon",
+    provider: "antigravity",
+    isDefault: false,
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
   },
   {
     id: "gemini-4-carbon",
@@ -66,6 +100,16 @@ export const FALLBACK_AGY_MODELS = Object.freeze([
     supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
   },
   {
+    id: "gemini-3.8-flash",
+    model: "gemini-3.8-flash",
+    baseModel: "gemini-3.8-flash",
+    displayName: "Gemini 3.8 Flash",
+    provider: "antigravity",
+    isDefault: false,
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: ["low", "medium", "high"],
+  },
+  {
     id: "claude-opus-5-5",
     model: "claude-opus-5-5",
     baseModel: "claude-opus-5-5",
@@ -76,14 +120,24 @@ export const FALLBACK_AGY_MODELS = Object.freeze([
     supportedReasoningEfforts: ["low", "medium", "high"],
   },
   {
-    id: "claude-sonnet-4-6",
-    model: "claude-sonnet-4-6",
-    baseModel: "claude-sonnet-4-6",
-    displayName: "Claude Sonnet 4.6",
+    id: "claude-sonnet-5-5",
+    model: "claude-sonnet-5-5",
+    baseModel: "claude-sonnet-5-5",
+    displayName: "Claude Sonnet 5.5",
     provider: "antigravity",
     isDefault: false,
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: ["low", "medium", "high"],
+  },
+  {
+    id: "gpt-oss-120b",
+    model: "gpt-oss-120b",
+    baseModel: "gpt-oss-120b",
+    displayName: "GPT-OSS 120B",
+    provider: "antigravity",
+    isDefault: false,
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: ["medium"],
   },
 ]);
 
@@ -102,7 +156,7 @@ export function splitAntigravityModelEffort(modelId = "", explicitEffort = "") {
 
 export function parseAgyModelsOutput(stdout) {
   const byBase = new Map();
-  for (const line of String(stdout || "").split("\n")) {
+  for (const line of String(stdout || "").split(/[\r\n]+/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     const match = trimmed.match(/^([a-z0-9._-]+)\s+(.+)$/i);
@@ -156,24 +210,32 @@ export function parseAgyModelsOutput(stdout) {
   return items;
 }
 
-export async function listAgyModelsFromCli({
+export async function fetchAgyModelsFromCli({
   env = process.env,
   execFileImpl = execFileCrossPlatform,
   platform = process.platform,
+  timeoutMs = 15_000,
 } = {}) {
   try {
     const { stdout = "" } = await execFileImpl(agyExecutable(env), ["models"], {
       cwd: resolveUserHome(env, platform, os.homedir()),
       env,
       shell: false,
-      timeout: 8_000,
+      timeout: timeoutMs,
       maxBuffer: 128 * 1024,
     });
     const parsed = parseAgyModelsOutput(stdout);
-    return parsed.length ? parsed : [...FALLBACK_AGY_MODELS];
+    return parsed.length
+      ? { items: parsed, fromFallback: false }
+      : { items: [...FALLBACK_AGY_MODELS], fromFallback: true };
   } catch {
-    return [...FALLBACK_AGY_MODELS];
+    return { items: [...FALLBACK_AGY_MODELS], fromFallback: true };
   }
+}
+
+export async function listAgyModelsFromCli(options = {}) {
+  const result = await fetchAgyModelsFromCli(options);
+  return result.items;
 }
 
 export function resolveAgyAcpLaunch({
@@ -624,6 +686,7 @@ export class AntigravityAcpClient extends EventEmitter {
           killProcessTreeCrossPlatform(proc, { signal: "SIGKILL", platform: this.#platform });
           resolveClose();
         }, 1_500);
+        timer.unref?.();
         proc.once("exit", () => {
           clearTimeout(timer);
           resolveClose();
@@ -631,6 +694,7 @@ export class AntigravityAcpClient extends EventEmitter {
         try {
           killProcessTreeCrossPlatform(proc, { signal: "SIGTERM", platform: this.#platform });
         } catch {
+          clearTimeout(timer);
           resolveClose();
         }
       });

@@ -12,6 +12,7 @@ import {
   formatToolExecutionError,
   stripStepEchoPrefix,
 } from "../tool-errors.mjs";
+import { isAntigravityInternalWorkerModel } from "./antigravity-acp-client.mjs";
 
 export function antigravitySummaryDbPath(appDataDir) {
   return resolve(appDataDir, "conversation_summaries.db");
@@ -1602,10 +1603,14 @@ function parseAntigravityTranscriptInternal(lines, { rawId = "", fullLinesMap = 
       const turn = ensureTurn(`agy-step-${step.step_index ?? idx}`, ts, idx);
       const stepModel = String(step.model || "").trim();
       if (stepModel) {
-        turn.model = stepModel;
         if (!Array.isArray(turn.models)) turn.models = [];
         if (!turn.models.includes(stepModel)) turn.models.push(stepModel);
-        lastModel = stepModel;
+        if (!isAntigravityInternalWorkerModel(stepModel)) {
+          turn.model = stepModel;
+          lastModel = stepModel;
+        } else if (!turn.model) {
+          turn.model = stepModel;
+        }
       }
       const stepStatus = step.status === "RUNNING" ? "inProgress" : (step.status === "ERROR" ? "failed" : "completed");
       if (stepStatus === "inProgress") {
@@ -1655,7 +1660,9 @@ function parseAntigravityTranscriptInternal(lines, { rawId = "", fullLinesMap = 
         if (!turn.model) turn.model = stepModel;
         if (!Array.isArray(turn.models)) turn.models = [];
         if (!turn.models.includes(stepModel)) turn.models.push(stepModel);
-        lastModel = stepModel;
+        if (!isAntigravityInternalWorkerModel(stepModel)) {
+          lastModel = stepModel;
+        }
       }
       const errText = String(step.content || "").trim();
       if (errText) {
@@ -1812,7 +1819,7 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
   const convDbPath = resolve(appDataDir, "conversations", `${rawId}.db`);
   const convDbWalPath = `${convDbPath}-wal`;
   const normalizedDetail = detail === "full" ? "full" : "auto";
-  const cacheKey = `${compactPath}|${normalizedDetail}|v4`;
+  const cacheKey = `${compactPath}|${normalizedDetail}|v5`;
 
   const [compactStat, fullStat, dbStat, walStat] = await Promise.all([
     stat(compactPath).catch(() => null),

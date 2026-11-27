@@ -481,15 +481,27 @@ export class AutomationScheduler {
       }
     }
 
+    const profileLabelMap = new Map();
+    for (const profile of profiles) {
+      if (!profile?.provider || !profile?.id) continue;
+      profileLabelMap.set(`${profile.provider}:${profile.id}`, profile.label || profile.id);
+    }
+
     for (const custom of this.#state.customTasks) {
       if (!custom?.id) continue;
+      const customProvider = custom.provider || "codex";
+      const customProfileId = custom.profileId || "default";
+      const resolvedProfileLabel = profileLabelMap.get(`${customProvider}:${customProfileId}`)
+        || custom.profileLabel
+        || customProvider
+        || "自定义";
       rawTasks.push({
         id: custom.id,
-        taskKey: `custom:${custom.provider || "codex"}:${custom.id}`,
+        taskKey: `custom:${customProvider}:${custom.id}`,
         source: "agent-control",
-        provider: custom.provider || "codex",
-        profileId: custom.profileId || "default",
-        profileLabel: custom.profileLabel || custom.provider || "自定义",
+        provider: customProvider,
+        profileId: customProfileId,
+        profileLabel: resolvedProfileLabel,
         name: custom.name || custom.id,
         prompt: custom.prompt || "",
         status: custom.status === "PAUSED" ? "PAUSED" : "ACTIVE",
@@ -603,20 +615,40 @@ export class AutomationScheduler {
     }
     const nowMs = Date.now();
     const taskId = String(id || "").trim() || `ac-${nowMs.toString(36)}`;
+    const existing = this.#state.customTasks.find((t) => t.id === taskId);
+    const nextProvider = String(provider || "codex").trim();
+    const nextProfileId = String(profileId || "default").trim();
     const record = {
       id: taskId,
       name: String(name || "").trim() || cleanPrompt.slice(0, 28),
-      provider: String(provider || "codex").trim(),
-      profileId: String(profileId || "default").trim(),
+      provider: nextProvider,
+      profileId: nextProfileId,
       cwd: String(cwd || "").trim() || os.homedir(),
       prompt: cleanPrompt,
       rrule: String(rrule || "FREQ=DAILY;BYHOUR=9;BYMINUTE=0").trim(),
       model: String(model || "").trim(),
       reasoningEffort: String(reasoningEffort || "").trim(),
-      status: "ACTIVE",
-      createdAtMs: nowMs,
+      status: existing?.status === "PAUSED" ? "PAUSED" : "ACTIVE",
+      createdAtMs: Number(existing?.createdAtMs) || nowMs,
       updatedAtMs: nowMs,
     };
+    if (existing) {
+      const oldKey = `custom:${existing.provider || "codex"}:${existing.id}`;
+      const newKey = `custom:${nextProvider}:${taskId}`;
+      const oldOv = this.#state.overrides?.[oldKey];
+      const providerOrProfileChanged = (existing.provider || "codex") !== nextProvider
+        || (existing.profileId || "default") !== nextProfileId;
+      if (oldKey !== newKey && oldOv) {
+        const { targetThreadId: _dropTarget, lastThreadId: _dropLast, ...restOv } = oldOv;
+        this.#state.overrides[newKey] = {
+          ...restOv,
+          ...(this.#state.overrides[newKey] || {}),
+        };
+        delete this.#state.overrides[oldKey];
+      } else if (providerOrProfileChanged && this.#state.overrides?.[newKey]?.targetThreadId) {
+        delete this.#state.overrides[newKey].targetThreadId;
+      }
+    }
     this.#state.customTasks = [
       record,
       ...this.#state.customTasks.filter((t) => t.id !== taskId),
