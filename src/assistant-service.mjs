@@ -3,11 +3,15 @@ import { MemoryVault, resolveEffectiveVaultPath, resolveVaultPath } from "./memo
 import { AssistantLLM, cleanForSpeech } from "./assistant-llm.mjs";
 import { AssistantStore } from "./assistant-store.mjs";
 import { TaskStore, buildTaskTree, cleanTaskCriteria } from "./task-store.mjs";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { normalizeWorkspacePath } from "./platform.mjs";
-import { computeTopicSignals, cardSubject, SIGNAL_TYPES, shortText, timestamp, isoTime, threadTail, threadSource, judgeInputOf, automationFailureCard, isCardHandled, isInternalAssistantThread, plainText } from "./assistant-signals.mjs";
+import { computeTopicSignals, cardSubject, SIGNAL_TYPES, shortText, timestamp, isoTime, threadTail, threadSource, judgeInputOf, automationFailureCard } from "./assistant-signals.mjs";
+import { AssistantNoticeTracker } from "./assistant-notices.mjs";
+import { ACTION_RISK_TIERS, AssistantProposalManager, resolveActionRisk } from "./assistant-proposals.mjs";
 
 export { computeTopicSignals } from "./assistant-signals.mjs";
+export { ACTION_RISK_TIERS, resolveActionRisk } from "./assistant-proposals.mjs";
+
 const topicsOf = (overview) => (overview.domains || []).flatMap((d) => d.topics || []);
 const error = (message, status = 400) => Object.assign(new Error(message), { status });
 const subjectOf = (text) => text.replace(/(?:做到哪.*|进度.*|卡在哪.*|怎么样.*|怎么解决.*|还有什么.*|呢[？?]?|[？?])$/g, "").replace(/^(?:请问|问一下|那个|这个)/, "").trim() || text;
@@ -27,23 +31,6 @@ function cleanCriteria(value) {
   return cleanTaskCriteria(value);
 }
 const underPath = (cwd, root) => Boolean(cwd && root && (cwd === root || cwd.startsWith(`${root.replace(/\/+$/, "")}/`)));
-const ASSISTANT_PROVIDERS = new Set(["codex", "claude", "antigravity", "grok", "qoder"]);
-
-export const ACTION_RISK_TIERS = Object.freeze({
-  direct: Object.freeze(["focus_topic", "open_thread", "archive_preview", "reorg_preview"]),
-  toggle: Object.freeze(["continue_thread", "pin_ticket", "update_ticket", "approve_request:decline"]),
-  confirm: Object.freeze(["dispatch", "interrupt_thread", "approve_request:accept"]),
-});
-
-export function resolveActionRisk(intent = "", action = {}) {
-  const cleanIntent = String(intent || "").trim();
-  if (ACTION_RISK_TIERS.direct.includes(cleanIntent)) return "direct";
-  if (cleanIntent === "approve_request") {
-    return action?.decision === "decline" ? "toggle" : "confirm";
-  }
-  if (ACTION_RISK_TIERS.confirm.includes(cleanIntent)) return "confirm";
-  return "toggle";
-}
 
 const CHITCHAT_NO_SEARCH_RE = /^(?:你好|您好|在吗|你在吗|喂|哈喽|早|早上好|中午好|下午好|晚上好|晚安|谢谢|多谢|辛苦了|好的|好|好呀|好啊|行|行的|可以|明白|知道了|收到|嗯|嗯嗯|嗯对|对|对的|是的|是|没问题|没毛病|就这么办|不用了|不用|算了|拜拜|再见|听得到吗|能听见吗|再说一遍|啥|什么|哈哈|ok|okay|hi|hello|hey|thanks|thankyou|yes|no)$/i;
 
@@ -54,56 +41,6 @@ export function shouldSearchParkSources(text = "", { topic = null } = {}) {
   if (Array.from(normalized).length < 2) return false;
   if (CHITCHAT_NO_SEARCH_RE.test(normalized)) return false;
   return true;
-}
-
-function normalizeAssistantProvider(value) {
-  const lower = String(value || "").trim().toLowerCase();
-  if (!lower || lower === "auto") return "";
-  if (lower === "agy") return "antigravity";
-  return ASSISTANT_PROVIDERS.has(lower) ? lower : "";
-}
-
-function resolveAssistantDispatchAgent(rawAgentKey, availableProfiles = []) {
-  const raw = String(rawAgentKey || "").trim();
-  const lower = raw.toLowerCase();
-  if (!raw || lower === "auto") return { agentKey: "", preferredProvider: "" };
-
-  const profiles = Array.isArray(availableProfiles) ? availableProfiles : [];
-  const keyOf = (p) => `${p.provider}:${p.id || "default"}`;
-
-  const exact = profiles.find((p) => keyOf(p) === raw)
-    || profiles.find((p) => keyOf(p).toLowerCase() === lower);
-  if (exact) return { agentKey: keyOf(exact), preferredProvider: "" };
-
-  const provider = normalizeAssistantProvider(raw);
-  if (provider) {
-    if (!profiles.length || profiles.some((p) => p.provider === provider)) {
-      return { agentKey: "", preferredProvider: provider };
-    }
-    return { agentKey: provider, preferredProvider: "" };
-  }
-
-  if (profiles.length) {
-    const aliasMatches = profiles.filter((p) => {
-      const candidates = [p?.health?.alias, p?.alias, p?.label, p?.account?.email]
-        .map((v) => String(v || "").trim().toLowerCase())
-        .filter(Boolean);
-      return candidates.includes(lower);
-    });
-    if (aliasMatches.length === 1) {
-      return { agentKey: keyOf(aliasMatches[0]), preferredProvider: "" };
-    }
-  }
-
-  if (raw.includes(":")) {
-    const prefixProv = normalizeAssistantProvider(raw.split(":")[0]);
-    if (prefixProv && profiles.some((p) => p.provider === prefixProv)) {
-      return { agentKey: "", preferredProvider: prefixProv };
-    }
-    return { agentKey: raw, preferredProvider: "" };
-  }
-
-  return { agentKey: "", preferredProvider: "" };
 }
 
 // What the park shows for a 任务: where its latest session stands.
@@ -170,9 +107,8 @@ export class AssistantService {
   #judgedTimer = null;
   #wipCache = new Map();
   #judgeInFlight = new Set();
-  #proposals = new Map();
-  #dispatchedThreads = new Set();
-  #proposalTtlMs = 60_000;
+  #notices;
+  #proposals;
   // `automations` ({ list, run }) is attached by the host once the scheduler exists.
   constructor({ hub, getOverview, dataDir, env = process.env, now = () => Date.now(), vault = null, taskStore = null, llm = null, llmOptions = {}, evidenceBudgetMs = 1500, proposalTtlMs = 60_000, onJudged = null, automations = null, dispatchImpl = null } = {}) {
     this.hub = hub;
@@ -183,269 +119,62 @@ export class AssistantService {
     this.vault = vault;
     this.taskStore = taskStore || hub?.taskStore || (dataDir ? new TaskStore({ dataDir, now }) : null);
     this.evidenceBudgetMs = evidenceBudgetMs;
-    this.#proposalTtlMs = Math.max(5_000, Number(proposalTtlMs) || 60_000);
     this.onJudged = onJudged;
     this.automations = automations;
     this.dispatchImpl = typeof dispatchImpl === "function" ? dispatchImpl : null;
     this.store = new AssistantStore(dataDir);
     this.llm = llm || new AssistantLLM({ dataDir, now, store: this.store, ...llmOptions });
-  }
-
-  #pruneProposals() {
-    const t = this.now();
-    for (const [id, entry] of this.#proposals.entries()) {
-      if (!entry || entry.expiresAt <= t) this.#proposals.delete(id);
-    }
-    while (this.#proposals.size > 200) {
-      const oldest = this.#proposals.keys().next().value;
-      if (!oldest) break;
-      this.#proposals.delete(oldest);
-    }
-  }
-
-  #registerProposal(proposal, { callKey = "" } = {}) {
-    if (!proposal || !proposal.intent) return null;
-    this.#pruneProposals();
-    const cleanKey = String(callKey || "").trim();
-    if (cleanKey) {
-      for (const [oldId, oldEntry] of this.#proposals.entries()) {
-        if (oldEntry.callKey === cleanKey) this.#proposals.delete(oldId);
-      }
-    }
-    const id = String(proposal.id || `act_${randomUUID().slice(0, 8)}`).trim();
-    const risk = proposal.risk || resolveActionRisk(proposal.intent, proposal.payload);
-    const routesSummary = Array.isArray(proposal.routesSummary) && proposal.routesSummary.length ? proposal.routesSummary : null;
-    const nowMs = this.now();
-    this.#proposals.set(id, {
-      id,
-      callKey: cleanKey,
-      intent: proposal.intent,
-      risk,
-      summary: proposal.summary || "",
-      payload: proposal.payload || {},
-      routesSummary,
-      createdAt: nowMs,
-      expiresAt: nowMs + this.#proposalTtlMs,
+    this.#notices = new AssistantNoticeTracker({
+      getDataDir: () => this.dataDir,
+      now: () => this.now(),
+      getStore: () => this.store,
+      getHub: () => this.hub,
+      getOverview: () => this.getOverview?.(),
+      openTickets: () => this.openTickets(),
     });
-    return {
-      id,
-      intent: proposal.intent,
-      risk,
-      summary: proposal.summary || "",
-      ...(routesSummary ? { routes: routesSummary } : {}),
-    };
+    this.#proposals = new AssistantProposalManager({
+      proposalTtlMs,
+      now: () => this.now(),
+      getHub: () => this.hub,
+      getLlm: () => this.llm,
+      getTaskStore: () => this.taskStore,
+      getDispatchImpl: () => this.dispatchImpl,
+      getOverview: () => this.getOverview(),
+      cardAction: (id, opts) => this.cardAction(id, opts),
+      createTicket: (opts) => this.createTicket(opts),
+      updateTicket: (id, opts) => this.updateTicket(id, opts),
+      clearThreadTail: (threadId) => this.#tails.delete(threadId),
+      notifyJudged: () => this.#notifyJudged(),
+      rememberDispatchedThread: (threadId) => this.#notices.rememberDispatchedThread(threadId),
+    });
   }
 
   getPendingProposal(proposalId = "", { callKey = "" } = {}) {
-    this.#pruneProposals();
-    const id = String(proposalId || "").trim();
-    if (!id) return null;
-    const entry = this.#proposals.get(id);
-    if (!entry) return null;
-    const cleanKey = String(callKey || "").trim();
-    if (cleanKey && entry.callKey && entry.callKey !== cleanKey) return null;
-    return {
-      id: entry.id,
-      intent: entry.intent,
-      risk: entry.risk,
-      summary: entry.summary,
-      ...(entry.routesSummary ? { routes: entry.routesSummary } : {}),
-      expiresAt: entry.expiresAt,
-    };
+    return this.#proposals.getPendingProposal(proposalId, { callKey });
   }
 
   cancelProposal(proposalId = "") {
-    this.#pruneProposals();
-    const id = String(proposalId || "").trim();
-    const cleared = id ? this.#proposals.delete(id) : false;
-    return { ok: true, cleared };
-  }
-
-  #rememberDispatchedThread(threadId = "") {
-    const id = String(threadId || "").trim();
-    if (!id) return;
-    this.#dispatchedThreads.delete(id);
-    this.#dispatchedThreads.add(id);
-    while (this.#dispatchedThreads.size > 500) {
-      const oldest = this.#dispatchedThreads.values().next().value;
-      if (!oldest) break;
-      this.#dispatchedThreads.delete(oldest);
-    }
-  }
-
-  async #draftDispatchCriteriaAsync(tasks = []) {
-    if (!this.taskStore || typeof this.llm?.draftTicket !== "function") return;
-    for (const tk of tasks) {
-      try {
-        const draft = await this.llm.draftTicket({
-          title: tk.title,
-          ask: tk.goal || tk.title,
-          reply: "",
-          background: true,
-        });
-        if (Array.isArray(draft?.criteria) && draft.criteria.length) {
-          await this.taskStore.update(tk.id, { criteria: draft.criteria, actor: "assistant" });
-          this.#notifyJudged();
-        }
-      } catch { /* best-effort background criteria drafting */ }
-    }
-  }
-
-  async #enrichDispatchProposal(proposal) {
-    if (!proposal || proposal.intent !== "dispatch" || typeof this.dispatchImpl !== "function") {
-      return null;
-    }
-    const payload = proposal.payload || {};
-    const preview = await this.dispatchImpl({
-      text: payload.instruction || "",
-      topicId: payload.topicId || "",
-      mode: payload.mode || "auto",
-      preferredProvider: payload.preferredProvider || "auto",
-      agentKey: payload.agentKey || "auto",
-      confirmOnly: true,
-      useAiPlanner: true,
-    }).catch(() => null);
-    const routes = Array.isArray(preview?.routes) ? preview.routes : [];
-    if (!routes.length) return null;
-    payload.approvedRoutes = routes;
-    const routesSummary = routes.map((r) => ({
-      topicId: r.topicId || "",
-      topicName: r.topicName || "",
-      agentLabel: r.agentLabel || r.provider || "自动匹配",
-      segmentText: shortText(r.segmentText || "", 60),
-      action: r.action || "spawn_parallel",
-    }));
-    const shortAgent = (r) => shortText(String(r.agentLabel || r.provider || "自动").replace(/\s*[（(].*?[）)]/g, "").trim(), 16) || "自动";
-    const confirmText = routesSummary.length === 1
-      ? `准备派给「${routesSummary[0].topicName || "工作区"}」的${shortAgent(routesSummary[0])}处理：${shortText(routesSummary[0].segmentText || payload.instruction, 24)}，确认发吗？`
-      : `准备拆 ${routesSummary.length} 路：${routesSummary.map((r, i) => `${i + 1}给「${r.topicName || "工作区"}」的${shortAgent(r)}`).join("，")}，确认发吗？`;
-    proposal.summary = confirmText;
-    proposal.routesSummary = routesSummary;
-    return { proposal, confirmText };
+    return this.#proposals.cancelProposal(proposalId);
   }
 
   async handleHubEvent(eventName, payload = {}) {
-    if (!this.dataDir) return null;
-    if (eventName !== "provider_event" && eventName !== "turn_completed") return null;
-    const evt = payload || {};
-    const isCodexCompleted = evt.method === "turn/completed";
-    const isUnifiedCompleted = evt.type === "turn_completed" || eventName === "turn_completed";
-    if (!isCodexCompleted && !isUnifiedCompleted) return null;
-
-    const threadId = String(evt.threadId || "").trim();
-    if (!threadId) return null;
-    const rawStatus = isCodexCompleted
-      ? (evt.params?.turn?.status || "completed")
-      : (evt.status || "completed");
-    if (rawStatus === "interrupted") return null;
-
-    const meta = this.hub?.listThreadsMeta?.() || {};
-    if (meta[threadId]?.internal || isInternalAssistantThread({ id: threadId, title: evt.title, cwd: evt.cwd, internal: evt.internal })) {
-      return null;
-    }
-
-    const openTickets = await this.openTickets().catch(() => []);
-    const matchedTicket = openTickets.find((tk) => Array.isArray(tk.threadIds) && tk.threadIds.includes(threadId)) || null;
-    const wasDispatched = this.#dispatchedThreads.has(threadId);
-    if (!wasDispatched && !matchedTicket) return null;
-
-    let topicId = matchedTicket?.topicId || "";
-    let topicName = "";
-    let threadTitle = matchedTicket?.title || meta[threadId]?.customName || String(evt.title || "").trim();
-    if (typeof this.getOverview === "function") {
-      const overview = await this.getOverview().catch(() => null);
-      for (const tp of topicsOf(overview || {})) {
-        const th = threadsOfTopic(tp).find((t) => t.id === threadId);
-        if (th || (topicId && tp.id === topicId)) {
-          if (!topicId) topicId = tp.id;
-          topicName = tp.name || "";
-          if (th?.title && !matchedTicket?.title) threadTitle = th.title;
-          break;
-        }
-      }
-    }
-
-    const label = shortText(threadTitle || topicName || "后台任务", 24);
-    const failed = rawStatus === "failed";
-    const turnId = String(isCodexCompleted ? (evt.params?.turn?.id || "") : (evt.turnId || evt.turn?.id || "")).trim();
-    const dedupeKey = `${matchedTicket?.id || threadId}:${turnId || rawStatus}`;
-    const text = failed
-      ? `「${label}」执行出错了，可以打开看看`
-      : `「${label}」已经跑完了，可以验收`;
-    const entry = {
-      id: `ntc_${randomUUID().slice(0, 8)}`,
-      dedupeKey,
-      kind: failed ? "failed" : "completed",
-      taskId: matchedTicket?.id || "",
-      threadId,
-      topicId,
-      topicName,
-      title: label,
-      text,
-      createdAt: new Date(this.now()).toISOString(),
-      deliveredVoiceAt: "",
-      seenAt: "",
-    };
-
-    let inserted = false;
-    await this.store.update("notices", (rawList) => {
-      const list = Array.isArray(rawList) ? rawList : [];
-      if (list.some((item) => item?.dedupeKey === dedupeKey)) return list;
-      inserted = true;
-      return [...list, entry].slice(-50);
-    }, []);
-    return inserted ? entry : null;
+    return this.#notices.handleHubEvent(eventName, payload);
   }
 
   async popPendingVoiceNotices({ limit = 1 } = {}) {
-    if (!this.dataDir) return { notices: [], remainingCount: 0 };
-    const cap = Math.max(0, Math.min(10, Number(limit) || 1));
-    if (!cap) return { notices: [], remainingCount: 0 };
-    const popped = [];
-    let remainingCount = 0;
-    const nowIso = new Date(this.now()).toISOString();
-    await this.store.update("notices", (rawList) => {
-      const list = Array.isArray(rawList) ? rawList : [];
-      const updated = list.map((item) => {
-        if (item && !item.deliveredVoiceAt && popped.length < cap) {
-          const nextItem = { ...item, deliveredVoiceAt: nowIso };
-          popped.push(nextItem);
-          return nextItem;
-        }
-        return item;
-      });
-      remainingCount = updated.filter((item) => item && !item.deliveredVoiceAt).length;
-      return updated;
-    }, []);
-    return { notices: popped, remainingCount };
+    return this.#notices.popPendingVoiceNotices({ limit });
   }
 
   async listUnreadNotices({ limit = 10 } = {}) {
-    if (!this.dataDir) return { notices: [], unreadCount: 0 };
-    const cap = Math.max(1, Math.min(50, Number(limit) || 10));
-    const rawList = await this.store.read("notices", []);
-    const list = Array.isArray(rawList) ? rawList : [];
-    const unread = list.filter((n) => n && !n.seenAt);
-    return { notices: unread.slice(-cap).reverse(), unreadCount: unread.length };
+    return this.#notices.listUnreadNotices({ limit });
   }
 
   async ackNotices(ids = []) {
-    if (!this.dataDir) return { ok: true, updatedCount: 0 };
-    const idSet = new Set((Array.isArray(ids) ? ids : []).map((x) => String(x || "").trim()).filter(Boolean));
-    const nowIso = new Date(this.now()).toISOString();
-    let updatedCount = 0;
-    await this.store.update("notices", (rawList) => {
-      const list = Array.isArray(rawList) ? rawList : [];
-      return list.map((item) => {
-        if (!item || item.seenAt) return item;
-        if (!idSet.size || idSet.has(item.id)) {
-          updatedCount += 1;
-          return { ...item, seenAt: nowIso };
-        }
-        return item;
-      });
-    }, []);
-    return { ok: true, updatedCount };
+    return this.#notices.ackNotices(ids);
+  }
+
+  async executeProposedAction(input = {}) {
+    return this.#proposals.executeProposedAction(input);
   }
 
   async memoryVault() {
@@ -877,334 +606,6 @@ export class AssistantService {
     };
   }
 
-  #validateAndBuildAction(parsed, overview, pendingRequests = [], availableProfiles = []) {
-    if (!parsed || !parsed.intent || parsed.intent === "chat") return {};
-    const action = parsed.action || {};
-    const topics = topicsOf(overview);
-    const topicIds = new Set(topics.map((t) => t.id));
-    const allThreads = [...topics.flatMap(threadsOfTopic), ...(overview.unassignedActive || [])];
-    const allCards = [...topics.flatMap((t) => t.assistantSignals?.cards || []), ...(overview.assistantInbox?.cards || [])];
-    const allTickets = overview.assistantTickets || [];
-    const findThread = (id) => (typeof id === "string" && id ? allThreads.find((t) => t.id === id) : null);
-    const findReq = (id) => (typeof id === "string" && id ? pendingRequests.find((r) => r.id === id) : null);
-    const findTicket = (id) => (typeof id === "string" && id ? allTickets.find((tk) => tk.id === id) : null);
-
-    if (parsed.intent === "focus_topic") {
-      const tid = topicIds.has(action.topicId) ? action.topicId : (topicIds.has(parsed.focusTopicId) ? parsed.focusTopicId : "");
-      return tid ? { clientEffect: { type: "focus", topicId: tid } } : {};
-    }
-    if (parsed.intent === "open_thread") {
-      const th = findThread(action.threadId);
-      return th ? { clientEffect: { type: "open_thread", threadId: th.id } } : {};
-    }
-    if (parsed.intent === "archive_preview") {
-      const tid = topicIds.has(action.topicId) ? action.topicId : (topicIds.has(parsed.focusTopicId) ? parsed.focusTopicId : "");
-      const staleDays = Number(action.staleDays) > 0 ? Math.min(365, Math.round(Number(action.staleDays))) : 3;
-      return { clientEffect: { type: "archive_preview", topicId: tid, staleDays } };
-    }
-    if (parsed.intent === "reorg_preview") {
-      const instruction = shortText(action.instruction || "", 400);
-      return instruction ? { clientEffect: { type: "reorg_preview", instruction } } : {};
-    }
-    if (parsed.intent === "approve_request") {
-      const req = findReq(action.requestId);
-      const decision = action.decision === "decline" ? "decline" : action.decision === "accept" ? "accept" : "";
-      if (!req || !decision) return {};
-      return {
-        proposal: {
-          id: `act_${randomUUID().slice(0, 8)}`,
-          intent: "approve_request",
-          risk: resolveActionRisk("approve_request", { decision }),
-          summary: `${decision === "accept" ? "批准" : "拒绝"}待拍板「${shortText(req.title || req.command || req.id, 30)}」`,
-          payload: { intent: "approve_request", requestId: req.id, decision, threadId: req.threadId || "" },
-        },
-      };
-    }
-    if (parsed.intent === "continue_thread") {
-      const th = findThread(action.threadId);
-      if (!th) return {};
-      const card = (typeof action.cardId === "string" && allCards.find((c) => c.id === action.cardId))
-        || allCards.find((c) => c.threadId === th.id) || null;
-      const message = shortText(action.message || "", 500) || "请从当前工位继续推进未完成工作。";
-      return {
-        proposal: {
-          id: `act_${randomUUID().slice(0, 8)}`,
-          intent: "continue_thread",
-          risk: resolveActionRisk("continue_thread", action),
-          summary: `让「${shortText(th.title || th.id, 24)}」续做：${shortText(message, 36)}`,
-          payload: { intent: "continue_thread", threadId: th.id, ...(card ? { cardId: card.id } : {}), message },
-        },
-      };
-    }
-    if (parsed.intent === "interrupt_thread") {
-      const th = findThread(action.threadId);
-      if (!th) return {};
-      return {
-        proposal: {
-          id: `act_${randomUUID().slice(0, 8)}`,
-          intent: "interrupt_thread",
-          risk: resolveActionRisk("interrupt_thread", action),
-          summary: `中断「${shortText(th.title || th.id, 28)}」当前执行`,
-          payload: { intent: "interrupt_thread", threadId: th.id },
-        },
-      };
-    }
-    if (parsed.intent === "pin_ticket") {
-      const th = findThread(action.threadId);
-      if (!th) return {};
-      const criteria = Array.isArray(action.criteria) ? cleanCriteria(action.criteria) : undefined;
-      return {
-        proposal: {
-          id: `act_${randomUUID().slice(0, 8)}`,
-          intent: "pin_ticket",
-          risk: resolveActionRisk("pin_ticket", action),
-          summary: `把「${shortText(action.title || th.title || th.id, 24)}」钉成任务`,
-          payload: {
-            intent: "pin_ticket",
-            threadId: th.id,
-            ...(action.title ? { title: shortText(action.title, 40) } : {}),
-            ...(action.goal ? { goal: shortText(action.goal, 200) } : {}),
-            ...(criteria ? { criteria } : {}),
-          },
-        },
-      };
-    }
-    if (parsed.intent === "update_ticket") {
-      const tk = findTicket(action.ticketId);
-      if (!tk) return {};
-      const criteria = action.criteria !== undefined ? cleanCriteria(action.criteria) : undefined;
-      const status = action.status && ["open", "done", "dropped"].includes(action.status) ? action.status : undefined;
-      return {
-        proposal: {
-          id: `act_${randomUUID().slice(0, 8)}`,
-          intent: "update_ticket",
-          risk: resolveActionRisk("update_ticket", action),
-          summary: `更新任务「${shortText(tk.title, 24)}」`,
-          payload: {
-            intent: "update_ticket",
-            ticketId: tk.id,
-            ...(action.goal !== undefined ? { goal: shortText(action.goal, 200) } : {}),
-            ...(criteria !== undefined ? { criteria } : {}),
-            ...(status ? { status } : {}),
-          },
-        },
-      };
-    }
-    if (parsed.intent === "dispatch") {
-      const instruction = shortText(action.instruction || "", 600);
-      if (!instruction) return {};
-      const tid = topicIds.has(action.topicId) ? action.topicId : (topicIds.has(parsed.focusTopicId) ? parsed.focusTopicId : "");
-      const topicName = tid ? topics.find((t) => t.id === tid)?.name : "";
-      const resolvedAgent = resolveAssistantDispatchAgent(action.agentKey, availableProfiles);
-      return {
-        proposal: {
-          id: `act_${randomUUID().slice(0, 8)}`,
-          intent: "dispatch",
-          risk: resolveActionRisk("dispatch", action),
-          summary: topicName ? `向「${topicName}」派工：${shortText(instruction, 36)}` : `派工：${shortText(instruction, 40)}`,
-          payload: {
-            intent: "dispatch",
-            instruction,
-            topicId: tid,
-            ...(resolvedAgent.agentKey ? { agentKey: resolvedAgent.agentKey } : {}),
-            ...(resolvedAgent.preferredProvider ? { preferredProvider: resolvedAgent.preferredProvider } : {}),
-            ...(action.mode === "new" ? { mode: "new" } : {}),
-          },
-        },
-      };
-    }
-    return {};
-  }
-
-  async executeProposedAction(input = {}) {
-    const rawProposalId = typeof input?.proposalId === "string" ? input.proposalId.trim() : "";
-    const actFallbackId = !rawProposalId && typeof input?.id === "string" && /^act_/.test(input.id.trim()) && !input?.payload
-      ? input.id.trim()
-      : "";
-    const proposalId = rawProposalId || actFallbackId;
-
-    if (proposalId && input?.cancel === true) {
-      const canceled = this.cancelProposal(proposalId);
-      return { ok: true, canceled: canceled.cleared, clearedProposal: true };
-    }
-
-    let data;
-    if (proposalId) {
-      this.#pruneProposals();
-      const entry = this.#proposals.get(proposalId);
-      if (!entry) {
-        throw error("该待确认操作已过期或已执行，请重新说明", 410);
-      }
-      // Consume immediately before async dispatch so duplicate retries cannot double-execute.
-      this.#proposals.delete(proposalId);
-      data = { intent: entry.intent, ...(entry.payload || {}) };
-    } else {
-      data = input?.payload && typeof input.payload === "object"
-        ? { intent: input.intent || input.payload.intent, ...input.payload }
-        : (input || {});
-    }
-
-    const intent = String(data.intent || "").trim();
-    if (!intent) throw error("缺少执行动作类型");
-
-    if (intent === "approve_request") {
-      const pendingRequests = await Promise.resolve(this.hub?.allPendingRequests?.() || []);
-      const req = pendingRequests.find((r) => r.id === data.requestId);
-      if (!req) throw error("待拍板请求不存在或已处理", 404);
-      const decision = data.decision === "decline" ? "decline" : "accept";
-      if (typeof this.hub?.respondToRequest !== "function") throw error("当前不支持语音/助手审批", 409);
-      await this.hub.respondToRequest(req.id, { decision });
-      return { ok: true, intent, summary: decision === "accept" ? "已批准继续执行" : "已拒绝该请求", threadId: req.threadId || "" };
-    }
-
-    if (intent === "continue_thread") {
-      const threadId = String(data.threadId || "").trim();
-      if (!threadId) throw error("缺少工位 ID");
-      const overview = await this.getOverview();
-      const allThreads = [...topicsOf(overview).flatMap(threadsOfTopic), ...(overview.unassignedActive || [])];
-      const th = allThreads.find((t) => t.id === threadId);
-      if (!th) throw error("工位不存在", 404);
-      const message = String(data.message || "").trim() || "请从当前工位继续推进未完成工作。";
-      if (data.cardId) {
-        const res = await this.cardAction(data.cardId, { type: "continue", message });
-        return {
-          ok: true,
-          intent,
-          ...(res.queued ? { queued: true } : {}),
-          summary: res.queued ? "工位正在运行，已挂到下一轮排队执行" : "已发回原工位继续执行",
-          threadId: res.threadId || threadId,
-        };
-      }
-      if (th.live && typeof this.hub?.queueTurn === "function") {
-        await this.hub.queueTurn({ threadId, text: message });
-        return { ok: true, intent, queued: true, summary: "工位正在运行，已挂到下一轮排队执行", threadId };
-      }
-      if (typeof this.hub?.sendTurn !== "function") throw error("原工位暂不可续做", 409);
-      await this.hub.sendTurn({ threadId, text: message });
-      this.#tails.delete(threadId);
-      return { ok: true, intent, summary: "已发回原工位继续执行", threadId };
-    }
-
-    if (intent === "interrupt_thread") {
-      const threadId = String(data.threadId || "").trim();
-      if (!threadId) throw error("缺少工位 ID");
-      const overview = await this.getOverview();
-      const allThreads = [...topicsOf(overview).flatMap(threadsOfTopic), ...(overview.unassignedActive || [])];
-      if (!allThreads.some((t) => t.id === threadId)) throw error("工位不存在", 404);
-      if (typeof this.hub?.interrupt !== "function") throw error("当前不支持中断工位", 409);
-      await this.hub.interrupt({ threadId });
-      return { ok: true, intent, summary: "已发送中断指令", threadId };
-    }
-
-    if (intent === "pin_ticket") {
-      const res = await this.createTicket({
-        threadId: data.threadId,
-        ...(data.title !== undefined ? { title: data.title } : {}),
-        ...(data.goal !== undefined ? { goal: data.goal } : {}),
-        ...(data.criteria !== undefined ? { criteria: data.criteria } : {}),
-      });
-      return { ok: true, intent, summary: `已钉成任务「${res.ticket.title}」`, ticket: res.ticket, threadId: data.threadId };
-    }
-
-    if (intent === "update_ticket") {
-      const ticketId = String(data.ticketId || "").trim();
-      if (!ticketId) throw error("缺少任务 ID");
-      const res = await this.updateTicket(ticketId, {
-        ...(data.goal !== undefined ? { goal: data.goal } : {}),
-        ...(data.criteria !== undefined ? { criteria: data.criteria } : {}),
-        ...(data.status !== undefined ? { status: data.status } : {}),
-      });
-      return { ok: true, intent, summary: `已更新任务「${res.ticket.title}」`, ticket: res.ticket };
-    }
-
-    if (intent === "dispatch") {
-      if (typeof this.dispatchImpl !== "function") throw error("派工通道暂不可用", 409);
-      const instruction = String(data.instruction || "").trim();
-      if (!instruction && (!Array.isArray(data.approvedRoutes) || !data.approvedRoutes.length)) {
-        throw error("缺少派工指令");
-      }
-      const approvedRoutes = Array.isArray(data.approvedRoutes) && data.approvedRoutes.length ? data.approvedRoutes : null;
-      const res = await this.dispatchImpl({
-        text: instruction,
-        topicId: data.topicId || "",
-        mode: data.mode || "auto",
-        preferredProvider: data.preferredProvider || "auto",
-        agentKey: data.agentKey || "auto",
-        confirmOnly: false,
-        useAiPlanner: false,
-        ...(approvedRoutes ? { approvedRoutes } : {}),
-      });
-      const dispatched = Array.isArray(res?.dispatched) ? res.dispatched : [];
-      const taskIds = [];
-      const leafTasks = [];
-      if (dispatched.length) {
-        for (const item of dispatched) {
-          if (item?.threadId) this.#rememberDispatchedThread(item.threadId);
-        }
-        if (this.taskStore) {
-          let parentId = "";
-          if (dispatched.length > 1) {
-            const parent = await this.taskStore.create({
-              title: shortText(instruction, 40) || "语音派工任务",
-              goal: shortText(instruction, 200),
-              criteria: [],
-              topicId: data.topicId || dispatched[0]?.topicId || "",
-              cwd: dispatched[0]?.cwd || "",
-              threadIds: [],
-              draftedBy: "assistant",
-              actor: "assistant",
-            }).catch(() => null);
-            if (parent?.id) {
-              parentId = parent.id;
-              taskIds.push(parent.id);
-            }
-          }
-          for (const item of dispatched) {
-            const tid = String(item?.threadId || "").trim();
-            const title = shortText(item?.segmentText || item?.threadTitle || instruction, 40) || "派工子任务";
-            const goal = shortText(item?.segmentText || instruction, 200);
-            const createdTask = await this.taskStore.create({
-              title,
-              goal,
-              criteria: [],
-              topicId: item?.topicId || data.topicId || "",
-              cwd: item?.cwd || "",
-              parentId,
-              threadIds: tid ? [tid] : [],
-              draftedBy: "assistant",
-              actor: "assistant",
-            }).catch(() => null);
-            if (createdTask?.id) {
-              taskIds.push(createdTask.id);
-              leafTasks.push(createdTask);
-              if (tid) await this.hub?.setThreadTask?.(tid, createdTask.id).catch(() => {});
-            }
-          }
-          if (leafTasks.length) {
-            void this.#draftDispatchCriteriaAsync(leafTasks);
-          }
-        }
-      }
-      const first = dispatched[0];
-      const summary = dispatched.length > 1
-        ? `已拆 ${dispatched.length} 路派出${taskIds.length ? "并建账" : ""}`
-        : first
-          ? `已派出到「${first.topicName || data.topicId || "产线"}」${taskIds.length ? "并建账" : ""}`
-          : "已完成派工";
-      return {
-        ok: true,
-        intent,
-        summary,
-        threadId: first?.threadId || "",
-        topicId: first?.topicId || data.topicId || "",
-        dispatched,
-        taskIds,
-      };
-    }
-
-    throw error(`不支持的助手动作：${intent}`);
-  }
-
   #resolveAnswerLinks({
     answerText = "",
     chatRes = null,
@@ -1607,7 +1008,7 @@ export class AssistantService {
             this.cancelProposal(activePending.id);
             clearedProposal = true;
           }
-          const validated = this.#validateAndBuildAction(chatRes, overview, pendingRequests, availableProfiles);
+          const validated = this.#proposals.validateAndBuildAction(chatRes, overview, pendingRequests, availableProfiles);
           if (validated.clientEffect) clientEffect = validated.clientEffect;
           if (validated.proposal) {
             const shouldAutoExec = autoExecute && validated.proposal.risk === "toggle";
@@ -1622,13 +1023,13 @@ export class AssistantService {
               }
             } else {
               if (validated.proposal.intent === "dispatch") {
-                const enriched = await this.#enrichDispatchProposal(validated.proposal);
+                const enriched = await this.#proposals.enrichDispatchProposal(validated.proposal);
                 if (enriched?.confirmText && mode === "phone") {
                   answerText = enriched.confirmText;
                   spokenReply = cleanForSpeech(enriched.confirmText, 240);
                 }
               }
-              proposal = this.#registerProposal(validated.proposal, { callKey });
+              proposal = this.#proposals.registerProposal(validated.proposal, { callKey });
               if (proposal) clearedProposal = false;
             }
           }

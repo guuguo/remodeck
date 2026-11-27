@@ -608,7 +608,12 @@ test("3D 面板气泡思考态展示实时进度与停止按钮，NDJSON 支持�
 });
 
 test("sprite-controller/app imports all used module exports and shields phone calls from errors/overview spam", () => {
-  for (const fileRel of ["../public/app.js", "../public/sprite-controller.js"]) {
+  for (const fileRel of [
+    "../public/app.js",
+    "../public/sprite-controller.js",
+    "../public/sprite-audio-pipeline.js",
+    "../public/sprite-phone-controller.js",
+  ]) {
     const src = fs.readFileSync(new URL(fileRel, import.meta.url), "utf8");
     for (const modName of ["sprite-assistant.js", "voice-copilot.js", "sprite-controller.js"]) {
       const importRe = new RegExp(`import\\s*\\{([^}]+)\\}\\s*from\\s*"\\./${modName.replace(".", "\\.")}(?:\\?[^"]*)?"`);
@@ -628,9 +633,10 @@ test("sprite-controller/app imports all used module exports and shields phone ca
       }
     }
   }
-  const ctrlJs = fs.readFileSync(new URL("../public/sprite-controller.js", import.meta.url), "utf8");
-  const errCatchIdx = ctrlJs.indexOf("语音通话请求失败：${formatActionError(error)}");
+  const phoneJs = fs.readFileSync(new URL("../public/sprite-phone-controller.js", import.meta.url), "utf8");
+  const errCatchIdx = phoneJs.indexOf("语音通话请求失败：${formatActionError(error)}");
   assert.ok(errCatchIdx !== -1);
-  assert.match(ctrlJs.slice(errCatchIdx, errCatchIdx + 160), /skipAutoSpeak:\s*true/);
+  assert.match(phoneJs.slice(errCatchIdx, errCatchIdx + 160), /skipAutoSpeak:\s*true/);
+  const ctrlJs = fs.readFileSync(new URL("../public/sprite-controller.js", import.meta.url), "utf8");
   assert.match(ctrlJs, /onOverviewScreen\s*&&\s*!state\.sprite\.phoneCallActive\s*&&\s*events\.length\s*>\s*0/);
 });

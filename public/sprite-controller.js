@@ -13,7 +13,6 @@ import {
   askSpriteAssistant,
   appendSpriteTurn,
   buildSpriteContext,
-  parseSpriteNdjson,
   submitSpriteDispatch,
   spriteTomorrowAtEight,
   renderSpriteAssistantHtml,
@@ -21,23 +20,17 @@ import {
   renderSpritePhoneCallHtml,
   saveSpritePrefs,
 } from "./sprite-assistant.js?v=20261126modal2";
-import {
-  base64ToUint8Array,
-  CALL_VOICE_VAD_OPTIONS,
-  computeRmsLevel,
-  createVadTurnDetector,
-  downsampleFloat32ToInt16,
-  encodePcm16SamplesToWav,
-  mergePcm16ChunksWithGap,
-  mergeQueuedVoiceTurns,
-  pickPreferredChineseSpeechVoice,
-  stripMarkdownForSpeech,
-  uint8ArrayToBase64,
-} from "./voice-copilot.js?v=20261124drive";
+import { createSpriteAudioPipeline } from "./sprite-audio-pipeline.js?v=20261127split1";
+import { createSpritePhoneController } from "./sprite-phone-controller.js?v=20261127split1";
 
 const SPRITE_LAST_SEEN_KEY = "agentControl.sprite.lastSeenAt";
-const VALID_PHONE_PHASES = new Set(["idle", "listening", "thinking", "speaking"]);
-const VALID_VIEW_MODES = new Set(["popover", "fullscreen", "phone"]);
+
+function formatSpriteTimerText(sec = 0) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  const m = String(Math.floor(s / 60)).padStart(2, "0");
+  const r = String(s % 60).padStart(2, "0");
+  return `${m}:${r}`;
+}
 
 export function createInitialSpriteState() {
   const prefs = loadSpritePrefs();
@@ -140,8 +133,8 @@ export function createInitialSpriteState() {
 }
 
 /**
- * Encapsulates Sprite assistant chat, fullscreen mode, voice recording,
- * tour/ticket actions, and a single phone-call phase state machine.
+ * Encapsulates Sprite assistant chat, tour/ticket actions, and delegates
+ * audio capture/TTS and phone/fullscreen orchestration to sibling modules.
  */
 export function createSpriteController({
   state,
@@ -153,15 +146,11 @@ export function createSpriteController({
 } = {}) {
   const $ = getEl;
   const getDoc = () => doc || (typeof document !== "undefined" ? document : null);
-  const getFetch = () => fetchImpl || (typeof fetch === "function" ? fetch : null);
   const raf = (fn) => (typeof requestAnimationFrame === "function" ? requestAnimationFrame(fn) : setTimeout(fn, 0));
 
   const {
-    apiPostWithHotFallback = (path, body) => apiPost(path, body),
     isBoardViewActive = () => false,
     isOverviewBoardMode = () => false,
-    setTopbarMenuOpen = () => {},
-    setComposerConfigOpen = () => {},
     setSidebarOpen = () => {},
     showToastBanner = () => {},
     formatActionError = (err, fallback = "操作失败") => String(err?.message || err || fallback),
@@ -175,15 +164,11 @@ export function createSpriteController({
     openProjectBoardView = () => {},
     ensureVoiceAudioUnlocked = () => {},
     playVoiceEarcon = () => {},
-    requestVoiceWakeLock = async () => {},
-    releaseVoiceWakeLock = async () => {},
-    fetchVoiceTtsAudio = async () => null,
-    mediaDevices = null,
-    AudioContextCtor = null,
   } = deps;
 
   let spriteTourPending = false;
   let spriteParkVisible = false;
+  let phone = null;
 
   async function postAssistantJson(path, body) {
     if (fetchImpl && !deps.apiPostWithHotFallback) {
@@ -205,459 +190,40 @@ export function createSpriteController({
     void postAssistantJson("api/assistant/action", { proposalId: id, cancel: true }).catch(() => {});
   }
 
-  function logSpritePhoneEvent(event, { callId = "", turnId = "", fromPhase = "", toPhase = "", detail = null } = {}) {
-    const cid = String(callId || state.sprite.phoneCallId || "").trim();
-    const fetchFn = getFetch();
-    if (!cid || isDemoMode() || !fetchFn) return;
-    void fetchFn(apiUrl("./api/assistant/phone-log"), {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        callId: cid,
-        turnId: String(turnId || state.sprite.phoneTurnId || "").trim(),
-        event,
-        fromPhase,
-        toPhase,
-        ...(detail !== null && detail !== undefined ? { detail } : {}),
-      }),
-    }).catch(() => {});
-  }
+  const audio = createSpriteAudioPipeline({
+    state,
+    getEl,
+    deps,
+    callbacks: {
+      renderSpriteAssistantMount: () => renderSpriteAssistantMount(),
+      pushSpriteMessage: (msg) => pushSpriteMessage(msg),
+      toggleSpriteAssistant: (opts) => toggleSpriteAssistant(opts),
+      handleSpriteCommand: (val) => handleSpriteCommand(val),
+      transitionPhonePhase: (next, opts) => phone?.transitionPhonePhase(next, opts),
+      logSpritePhoneEvent: (ev, opts) => phone?.logSpritePhoneEvent(ev, opts),
+      sendSpritePhoneTurn: (opts) => phone?.sendSpritePhoneTurn(opts),
+      formatTimerText: formatSpriteTimerText,
+    },
+  });
 
-  function transitionPhonePhase(nextPhase, { callId = "", turnId = "", detail = null, force = false } = {}) {
-    const target = VALID_PHONE_PHASES.has(nextPhase) ? nextPhase : "idle";
-    const prevPhase = state.sprite.phonePhase || "idle";
-    state.sprite.phonePhase = target;
-    if (state.sprite.phoneCallActive && (force || prevPhase !== target)) {
-      logSpritePhoneEvent("state_change", { callId, turnId, fromPhase: prevPhase, toPhase: target, detail });
-    }
-    return prevPhase;
-  }
-
-  function setSpriteViewMode(nextMode, { render = true } = {}) {
-    const target = VALID_VIEW_MODES.has(nextMode) ? nextMode : "popover";
-    state.sprite.viewMode = target;
-    if (render) renderSpriteAssistantMount();
-    return target;
-  }
-
-  function formatSpriteTimerText(sec = 0) {
-    const s = Math.max(0, Math.floor(Number(sec) || 0));
-    const m = String(Math.floor(s / 60)).padStart(2, "0");
-    const r = String(s % 60).padStart(2, "0");
-    return `${m}:${r}`;
-  }
-
-  function stopSpriteSpeech({ resetPhase = true } = {}) {
-    const wasSpeaking = Boolean(state.sprite.speaking);
-    state.sprite.speechToken = (state.sprite.speechToken || 0) + 1;
-    state.sprite.ttsQueue = [];
-    state.sprite.ttsStreamEnded = true;
-    state.sprite.ttsDraining = false;
-    state.sprite.speaking = false;
-    state.sprite.speakingStartedAt = 0;
-    if (state.sprite.audioSource) {
-      try {
-        state.sprite.audioSource.onended = null;
-        state.sprite.audioSource.stop();
-        state.sprite.audioSource.disconnect();
-      } catch {}
-      state.sprite.audioSource = null;
-    }
-    if (state.sprite.audioEl) {
-      try {
-        state.sprite.audioEl.pause();
-        state.sprite.audioEl.src = "";
-      } catch {}
-      state.sprite.audioEl = null;
-    }
-    try {
-      if (typeof speechSynthesis !== "undefined") {
-        speechSynthesis.cancel();
-      }
-    } catch {}
-    if (resetPhase && state.sprite.phoneCallActive) {
-      transitionPhonePhase(state.sprite.busy || state.sprite.transcribing ? "thinking" : "listening");
-    }
-    if (wasSpeaking) {
-      renderSpriteAssistantMount();
-    }
-  }
-
-  async function playSpriteBufferViaWebAudio(tts) {
-    const ctx = state.voice?.audioCtx;
-    if (!ctx || ctx.state === "closed" || typeof ctx.decodeAudioData !== "function" || !tts?.audioBase64) {
-      return false;
-    }
-    try {
-      if (ctx.state === "suspended" || ctx.state === "interrupted") {
-        await Promise.race([ctx.resume().catch(() => {}), new Promise((r) => setTimeout(r, 900))]);
-      }
-      if (ctx.state !== "running") return false;
-      const bytes = base64ToUint8Array(tts.audioBase64);
-      const rawCopy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-      const audioBuffer = await ctx.decodeAudioData(rawCopy);
-      if (!audioBuffer || !(audioBuffer.duration > 0) || !state.sprite.speaking) return false;
-      return await new Promise((resolve) => {
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(ctx.destination);
-        state.sprite.audioSource = source;
-        let done = false;
-        const finish = (ok) => {
-          if (done) return;
-          done = true;
-          if (state.sprite.audioSource === source) state.sprite.audioSource = null;
-          try { source.disconnect(); } catch {}
-          resolve(ok);
-        };
-        source.onended = () => finish(true);
-        try {
-          source.start(0);
-        } catch {
-          finish(false);
-        }
-      });
-    } catch {
-      return false;
-    }
-  }
-
-  function clearSpriteSpeakingState() {
-    if (!state.sprite.speaking) return;
-    state.sprite.speaking = false;
-    state.sprite.speakingStartedAt = 0;
-    state.sprite.ttsDraining = false;
-    if (state.sprite.phoneCallActive) {
-      transitionPhonePhase(state.sprite.busy || state.sprite.transcribing ? "thinking" : "listening");
-    }
-    renderSpriteAssistantMount();
-    if (state.sprite.phoneCallActive && state.sprite.phonePendingTurns.length > 0 && !state.sprite.busy && !state.sprite.transcribing) {
-      void sendSpritePhoneTurn();
-    }
-  }
-
-  async function playSingleSpriteTtsPayload(tts, token) {
-    if (!tts?.audioBase64 || token !== state.sprite.speechToken || !state.sprite.speaking) return false;
-    const startedAt = Date.now();
-    logSpritePhoneEvent("playback_start", { detail: { provider: tts.provider || "", bytes: tts.audioBase64.length } });
-    const playedWebAudio = await playSpriteBufferViaWebAudio(tts);
-    if (playedWebAudio) {
-      logSpritePhoneEvent("playback_end", { detail: { mode: "webaudio", ms: Date.now() - startedAt } });
-      return true;
-    }
-    if (token !== state.sprite.speechToken || !state.sprite.speaking) return false;
-    if (typeof Audio !== "undefined") {
-      try {
-        const mime = tts.mimeType || "audio/mp3";
-        const audio = new Audio(`data:${mime};base64,${tts.audioBase64}`);
-        audio.playsInline = true;
-        state.sprite.audioEl = audio;
-        const ok = await new Promise((resolve) => {
-          let settled = false;
-          const done = (val) => {
-            if (settled) return;
-            settled = true;
-            if (state.sprite.audioEl === audio) state.sprite.audioEl = null;
-            resolve(val);
-          };
-          audio.addEventListener("ended", () => done(true), { once: true });
-          audio.addEventListener("error", () => done(false), { once: true });
-          audio.play().catch(() => done(false));
-        });
-        if (ok) {
-          logSpritePhoneEvent("playback_end", { detail: { mode: "html_audio", ms: Date.now() - startedAt } });
-          return true;
-        }
-      } catch {
-        state.sprite.audioEl = null;
-      }
-    }
-    logSpritePhoneEvent("playback_error", { detail: { provider: tts.provider || "", ms: Date.now() - startedAt } });
-    return false;
-  }
-
-  function speakViaBrowserSynthesis(text, onDone) {
-    try {
-      if (typeof speechSynthesis !== "undefined" && typeof SpeechSynthesisUtterance !== "undefined") {
-        const u = new SpeechSynthesisUtterance(text);
-        const v = pickPreferredChineseSpeechVoice(speechSynthesis.getVoices?.() || []);
-        if (v) u.voice = v;
-        u.lang = "zh-CN";
-        u.onend = onDone;
-        u.onerror = onDone;
-        speechSynthesis.speak(u);
-        return true;
-      }
-    } catch {}
-    return false;
-  }
-
-  function beginSpriteSpeechStream(text = "", { turnId = "" } = {}) {
-    if (!state.sprite.ttsEnabled && !state.sprite.phoneCallActive) return 0;
-    const clean = stripMarkdownForSpeech(text, 240);
-    if (!clean) return 0;
-    stopSpriteSpeech({ resetPhase: false });
-    const token = (state.sprite.speechToken || 0) + 1;
-    state.sprite.speechToken = token;
-    state.sprite.speaking = true;
-    state.sprite.speakingStartedAt = Date.now();
-    state.sprite.lastSpokenReply = clean;
-    state.sprite.ttsQueue = [];
-    state.sprite.ttsStreamEnded = false;
-    state.sprite.ttsPlayedAny = false;
-    state.sprite.ttsDraining = false;
-    if (state.sprite.phoneCallActive) {
-      transitionPhonePhase("speaking", { turnId });
-    }
-    renderSpriteAssistantMount();
-    return token;
-  }
-
-  async function drainSpriteTtsQueue(token) {
-    if (state.sprite.ttsDraining || token !== state.sprite.speechToken || !state.sprite.speaking) return;
-    state.sprite.ttsDraining = true;
-    try {
-      while (token === state.sprite.speechToken && state.sprite.speaking) {
-        const nextItem = state.sprite.ttsQueue?.shift();
-        if (!nextItem) break;
-        if (nextItem.tts?.audioBase64) {
-          const ok = await playSingleSpriteTtsPayload(nextItem.tts, token);
-          if (ok) state.sprite.ttsPlayedAny = true;
-        }
-      }
-    } finally {
-      state.sprite.ttsDraining = false;
-    }
-    if (token !== state.sprite.speechToken || !state.sprite.speaking) return;
-    if (state.sprite.ttsQueue?.length) {
-      void drainSpriteTtsQueue(token);
-      return;
-    }
-    if (state.sprite.ttsStreamEnded) {
-      if (!state.sprite.ttsPlayedAny && state.sprite.lastSpokenReply) {
-        if (speakViaBrowserSynthesis(state.sprite.lastSpokenReply, () => {
-          if (token === state.sprite.speechToken) clearSpriteSpeakingState();
-        })) {
-          return;
-        }
-      }
-      clearSpriteSpeakingState();
-    }
-  }
-
-  function enqueueSpriteTtsChunk(token, tts) {
-    if (!token || token !== state.sprite.speechToken || !state.sprite.speaking) return;
-    if (tts?.audioBase64) {
-      state.sprite.lastTtsPayload = tts;
-      state.sprite.ttsQueue ||= [];
-      state.sprite.ttsQueue.push({ tts });
-      void drainSpriteTtsQueue(token);
-    }
-  }
-
-  function finishSpriteSpeechStream(token) {
-    if (!token || token !== state.sprite.speechToken) return;
-    state.sprite.ttsStreamEnded = true;
-    if (!state.sprite.ttsDraining && (!state.sprite.ttsQueue || !state.sprite.ttsQueue.length)) {
-      void drainSpriteTtsQueue(token);
-    }
-  }
-
-  async function speakSpriteText(text = "", { ttsPayload = null } = {}) {
-    const token = beginSpriteSpeechStream(text);
-    if (!token) return;
-    const clean = state.sprite.lastSpokenReply;
-    const tts = ttsPayload?.audioBase64 ? ttsPayload : await fetchVoiceTtsAudio({ text: clean });
-    if (token !== state.sprite.speechToken || !state.sprite.speaking) return;
-    if (tts?.audioBase64) {
-      enqueueSpriteTtsChunk(token, tts);
-    }
-    finishSpriteSpeechStream(token);
-  }
-
-  function syncTycoon3DPauseForSprite() {
-    const t3d = getTycoon3d?.();
-    if (!t3d) return;
-    const isFs = state.sprite.viewMode === "fullscreen" || state.sprite.viewMode === "phone";
-    if (isFs) {
-      t3d.pause?.();
-    } else if (isBoardViewActive() && state.boardViewMode === "tycoon3d" && !state.scopedProjectCwd) {
-      t3d.resume?.();
-    }
-  }
-
-  function syncVoiceTopbarLiveCallBadge() {
-    const btn = $("voiceModeBtn");
-    const badge = $("voiceLiveCallBadge");
-    const inPhone = state.sprite.viewMode === "phone";
-    const active = Boolean(state.sprite.phoneCallActive);
-    if (btn) btn.classList.toggle("is-calling", active);
-    if (badge) {
-      badge.hidden = !(active && !inPhone);
-      if (active && !inPhone) {
-        badge.textContent = formatSpriteTimerText(state.sprite.phoneElapsedSec);
-      }
-    }
-  }
-
-  async function loadSpriteModelOptions({ force = false } = {}) {
-    if (!force && state.sprite.modelOptions.length && Date.now() - state.sprite.modelsLoadedAt < 120_000) {
-      return;
-    }
-    try {
-      const res = await apiGet("/api/assistant/models");
-      if (Array.isArray(res?.options) && res.options.length) {
-        state.sprite.modelOptions = res.options;
-        state.sprite.modelsLoadedAt = Date.now();
-        renderSpriteAssistantMount();
-      }
-    } catch {}
-  }
-
-  function enterSpriteFullscreen() {
-    setTopbarMenuOpen(false);
-    setComposerConfigOpen(false);
-    state.sprite.open = true;
-    state.sprite.unreadCount = 0;
-    state.sprite.toastBubble = null;
-    void loadSpriteModelOptions();
-    if (!state.missionOverview && !state.missionOverviewLoading) {
-      void loadMissionOverview({ trigger: "open" });
-    }
-    setSpriteViewMode("fullscreen");
-    raf(() => $("spriteFullscreenInput")?.focus());
-  }
-
-  function exitSpriteFullscreen() {
-    setSpriteViewMode("popover");
-  }
-
-  function exitSpriteOverlayForNavigation() {
-    if (state.sprite.viewMode === "fullscreen" || state.sprite.viewMode === "phone") {
-      setSpriteViewMode("popover");
-    }
-  }
-
-  function minimizeSpritePhoneCall() {
-    setSpriteViewMode("popover");
-    if (state.sprite.phoneCallActive) {
-      showToastBanner("小精灵通话已在后台保持", { detail: "点击顶部「小精灵」可随时回到通话界面" });
-    }
-  }
-
-  async function enterSpritePhoneCall() {
-    ensureVoiceAudioUnlocked();
-    setTopbarMenuOpen(false);
-    setComposerConfigOpen(false);
-    state.sprite.open = true;
-    state.sprite.unreadCount = 0;
-    state.sprite.toastBubble = null;
-    if (!state.sprite.phoneCallActive) {
-      state.sprite.phoneCallActive = true;
-      state.sprite.phoneMuted = false;
-      state.sprite.phoneStartedAt = Date.now();
-      state.sprite.phoneElapsedSec = 0;
-      state.sprite.phonePhase = "listening";
-      state.sprite.phoneCallId = `spcall-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-      state.sprite.phoneTurnId = "";
-      state.sprite.phonePendingTurns = [];
-      state.sprite.micRecoveryCount = 0;
-      logSpritePhoneEvent("call_start", { callId: state.sprite.phoneCallId, toPhase: "listening" });
-      if (state.sprite.phoneTimerId) clearInterval(state.sprite.phoneTimerId);
-      state.sprite.phoneTimerId = setInterval(() => {
-        if (!state.sprite.phoneCallActive) return;
-        const elapsed = Math.floor((Date.now() - state.sprite.phoneStartedAt) / 1000);
-        state.sprite.phoneElapsedSec = elapsed;
-        const tEl = $("spritePhoneTimer");
-        if (tEl) tEl.textContent = formatSpriteTimerText(elapsed);
-        const badgeEl = $("voiceLiveCallBadge");
-        if (badgeEl && !badgeEl.hidden) badgeEl.textContent = formatSpriteTimerText(elapsed);
-      }, 1000);
-      state.sprite.phoneTimerId.unref?.();
-      void requestVoiceWakeLock();
-      const warmCall = deps.apiPostWithHotFallback
-        ? apiPostWithHotFallback("api/assistant/call/warm", {})
-        : postAssistantJson("api/assistant/call/warm", {});
-      void warmCall.then((warm) => {
-        if (Array.isArray(warm?.options) && warm.options.length) {
-          state.sprite.modelOptions = warm.options;
-          state.sprite.modelsLoadedAt = Date.now();
-          renderSpriteAssistantMount();
-        }
-        if (
-          Array.isArray(warm?.notices)
-          && warm.notices.length > 0
-          && state.sprite.phoneCallActive
-          && state.sprite.phonePhase === "listening"
-          && !state.sprite.speechActive
-          && !state.sprite.busy
-          && !state.sprite.speaking
-          && !state.sprite.transcribing
-          && state.sprite.phonePendingTurns.length === 0
-        ) {
-          const noticeItems = warm.notices.slice(0, 2);
-          const briefSpoken = `接通了，先同步一下：${noticeItems.map((n) => n.text).join("；")}。`;
-          pushSpriteMessage({
-            role: "sprite",
-            tone: noticeItems.some((n) => n.kind === "failed") ? "worry" : "good",
-            text: briefSpoken,
-            spokenText: briefSpoken,
-            notices: noticeItems,
-          });
-        }
-      }).catch(() => {});
-      setSpriteViewMode("phone");
-      await startSpriteMic({ handsFree: true });
-    } else {
-      setSpriteViewMode("phone");
-    }
-  }
-
-  async function hangupSpritePhoneCall() {
-    const oldCallId = state.sprite.phoneCallId;
-    const prevPhase = state.sprite.phonePhase;
-    try { state.sprite.phoneAbortController?.abort(); } catch {}
-    state.sprite.phoneAbortController = null;
-    state.sprite.phoneCallActive = false;
-    state.sprite.phoneMuted = false;
-    state.sprite.phonePhase = "idle";
-    state.sprite.phonePendingTurns = [];
-    state.sprite.phoneCallId = "";
-    state.sprite.phoneTurnId = "";
-    state.sprite.voiceLevel = 0;
-    if (state.sprite.phoneTimerId) {
-      clearInterval(state.sprite.phoneTimerId);
-      state.sprite.phoneTimerId = null;
-    }
-    stopSpriteSpeech();
-    await stopSpriteMic({ submit: false, stopHandsFree: true });
-    state.sprite.micStatus = "idle";
-    state.sprite.micError = "";
-    state.sprite.micRecoveryCount = 0;
-    void releaseVoiceWakeLock();
-    if (oldCallId) {
-      logSpritePhoneEvent("call_end", { callId: oldCallId, fromPhase: prevPhase, toPhase: "idle" });
-    }
-    setSpriteViewMode(state.sprite.viewMode === "phone" ? "popover" : state.sprite.viewMode);
-  }
-
-  function toggleSpritePhoneMute() {
-    if (!state.sprite.phoneCallActive) return;
-    const nextMuted = !state.sprite.phoneMuted;
-    state.sprite.phoneMuted = nextMuted;
-    if (nextMuted) {
-      state.sprite.speechActive = false;
-      state.sprite.voiceLevel = 0;
-      state.sprite.mic.vad?.reset?.();
-    } else {
-      ensureVoiceAudioUnlocked();
-      if (!state.sprite.recording) {
-        void startSpriteMic({ handsFree: true });
-      }
-    }
-    renderSpriteAssistantMount();
-  }
+  phone = createSpritePhoneController({
+    state,
+    getEl,
+    getTycoon3d,
+    deps,
+    audio,
+    fetchImpl,
+    callbacks: {
+      renderSpriteAssistantMount: () => renderSpriteAssistantMount(),
+      pushSpriteMessage: (msg) => pushSpriteMessage(msg),
+      applySpriteClientEffect: (effect) => applySpriteClientEffect(effect),
+      handleSpriteDelegatedClick: (e) => handleSpriteDelegatedClick(e),
+      handleSpriteDelegatedChange: (e) => handleSpriteDelegatedChange(e),
+      handleSpriteCommand: (val) => handleSpriteCommand(val),
+      postAssistantJson,
+      formatTimerText: formatSpriteTimerText,
+    },
+  });
 
   function renderSpriteAssistantMount() {
     const fsMount = $("spriteFullscreenMount");
@@ -708,8 +274,8 @@ export function createSpriteController({
       }
     }
 
-    syncTycoon3DPauseForSprite();
-    syncVoiceTopbarLiveCallBadge();
+    phone.syncTycoon3DPauseForSprite();
+    phone.syncVoiceTopbarLiveCallBadge();
 
     const t3d = getTycoon3d?.();
     const mount = $("spriteAssistantMount");
@@ -862,7 +428,7 @@ export function createSpriteController({
     }
     renderSpriteAssistantMount();
     if (role === "sprite" && !trace && (state.sprite.ttsEnabled || state.sprite.phoneCallActive) && !ttsPayload?.skipAutoSpeak) {
-      void speakSpriteText(spokenText || cleanText, { ttsPayload });
+      void audio.speakSpriteText(spokenText || cleanText, { ttsPayload });
     }
   }
 
@@ -1042,17 +608,17 @@ export function createSpriteController({
     } else if (sAct === "open-sidebar") {
       setSidebarOpen(true);
     } else if (sAct === "enter-fullscreen") {
-      enterSpriteFullscreen();
+      phone.enterSpriteFullscreen();
     } else if (sAct === "exit-fullscreen") {
-      exitSpriteFullscreen();
+      phone.exitSpriteFullscreen();
     } else if (sAct === "enter-phone") {
-      void enterSpritePhoneCall();
+      void phone.enterSpritePhoneCall();
     } else if (sAct === "minimize-phone") {
-      minimizeSpritePhoneCall();
+      phone.minimizeSpritePhoneCall();
     } else if (sAct === "hangup-phone") {
-      void hangupSpritePhoneCall();
+      void phone.hangupSpritePhoneCall();
     } else if (sAct === "toggle-phone-mute") {
-      toggleSpritePhoneMute();
+      audio.toggleSpritePhoneMute();
     } else if (sAct === "toggle-phone-keyboard") {
       state.sprite.phoneKeyboardOpen = !state.sprite.phoneKeyboardOpen;
       renderSpriteAssistantMount();
@@ -1068,34 +634,34 @@ export function createSpriteController({
         void micCtx.resume().catch(() => {});
       }
       if (state.sprite.speaking) {
-        stopSpriteSpeech();
+        audio.stopSpriteSpeech();
       } else if (state.sprite.phoneMuted) {
-        toggleSpritePhoneMute();
+        audio.toggleSpritePhoneMute();
       } else if (
         !state.sprite.recording
         || state.sprite.micStatus === "error"
         || state.sprite.micStatus === "stalled"
       ) {
-        teardownSpriteMic();
+        audio.teardownSpriteMic();
         state.sprite.recording = false;
         state.sprite.micRecoveryCount = 0;
-        void startSpriteMic({ handsFree: true });
+        void audio.startSpriteMic({ handsFree: true });
       } else if (state.sprite.speechActive && state.sprite.mic.vad) {
         const flushed = state.sprite.mic.vad.flush();
         state.sprite.speechActive = false;
         if (flushed?.samples?.length >= 1600) {
           playVoiceEarcon("heard", state.sprite.mic?.audioCtx || state.voice?.audioCtx);
-          void sendSpritePhoneTurn({ samples: flushed.samples });
+          void phone.sendSpritePhoneTurn({ samples: flushed.samples });
         }
       } else if (!state.sprite.busy && !state.sprite.transcribing) {
-        void sendSpritePhoneTurn({ transcriptText: "简单汇报一下现在园子里最需要我注意的事" });
+        void phone.sendSpritePhoneTurn({ transcriptText: "简单汇报一下现在园子里最需要我注意的事" });
       }
     } else if (sAct === "phone-replay-or-brief") {
       ensureVoiceAudioUnlocked();
       if (state.sprite.lastSpokenReply) {
-        void speakSpriteText(state.sprite.lastSpokenReply, { ttsPayload: state.sprite.lastTtsPayload });
+        void audio.speakSpriteText(state.sprite.lastSpokenReply, { ttsPayload: state.sprite.lastTtsPayload });
       } else {
-        void sendSpritePhoneTurn({ transcriptText: "简单汇报一下现在园子里最需要我注意的事" });
+        void phone.sendSpritePhoneTurn({ transcriptText: "简单汇报一下现在园子里最需要我注意的事" });
       }
     } else if (sAct === "abort-ask") {
       state.sprite.askSeq += 1;
@@ -1106,7 +672,7 @@ export function createSpriteController({
       state.sprite.busy = false;
       state.sprite.thinkingLabel = "";
       if (state.sprite.phoneCallActive && !state.sprite.speaking) {
-        transitionPhonePhase("listening", { detail: { reason: "abort" } });
+        phone.transitionPhonePhase("listening", { detail: { reason: "abort" } });
       }
       getTycoon3d?.()?.setSpriteMood?.("idle");
       pushSpriteMessage({ role: "sprite", tone: "idle", text: "已停止本次思考。" });
@@ -1165,7 +731,7 @@ export function createSpriteController({
       const nextTts = !state.sprite.ttsEnabled;
       state.sprite.ttsEnabled = nextTts;
       saveSpritePrefs({ ttsEnabled: nextTts });
-      if (!nextTts) stopSpriteSpeech();
+      if (!nextTts) audio.stopSpriteSpeech();
       renderSpriteAssistantMount();
       showToastBanner(nextTts ? "已开启小精灵语音播报" : "已静音小精灵语音播报");
     } else if (sAct === "briefing") {
@@ -1178,16 +744,16 @@ export function createSpriteController({
         chips: brief.chips,
       });
     } else if (sAct === "open-call") {
-      void toggleSpriteHandsFree();
+      void audio.toggleSpriteHandsFree();
     } else if (sAct === "mic") {
       ensureVoiceAudioUnlocked();
-      void toggleSpriteMic();
+      void audio.toggleSpriteMic();
     } else if (sAct === "finish-mic") {
-      void stopSpriteMic({ submit: true });
+      void audio.stopSpriteMic({ submit: true });
     } else if (sAct === "cancel-mic") {
-      void stopSpriteMic({ submit: false });
+      void audio.stopSpriteMic({ submit: false });
     } else if (sAct === "stop-speech") {
-      stopSpriteSpeech();
+      audio.stopSpriteSpeech();
     } else if (sAct === "clear-scope") {
       state.sprite.scopedTopicId = "";
       state.sprite.scopedTopicName = "";
@@ -1219,7 +785,7 @@ export function createSpriteController({
   function focusSpriteTopic(tid = "") {
     if (!tid) return;
     if (state.sprite.viewMode === "fullscreen" || state.sprite.viewMode === "phone") {
-      setSpriteViewMode("popover");
+      phone.setSpriteViewMode("popover");
     }
     if (!isBoardViewActive() || state.scopedProjectCwd) {
       state.scopedProjectCwd = "";
@@ -1243,7 +809,7 @@ export function createSpriteController({
     const openThreadBtn = e.target.closest("[data-board-open-thread]");
     if (openThreadBtn?.dataset.boardOpenThread) {
       e.stopPropagation();
-      exitSpriteOverlayForNavigation();
+      phone.exitSpriteOverlayForNavigation();
       void selectThread(openThreadBtn.dataset.boardOpenThread, { focusSidebar: true }).catch((error) => {
         showToastBanner("打开会话失败", { detail: formatActionError(error), error: true });
       });
@@ -1260,7 +826,7 @@ export function createSpriteController({
         : message.actions[Number(answerAction.dataset.spriteAnswerAction)];
       if (action) {
         if ((action.type === "focus" || action.type === "open_thread") && state.sprite.viewMode === "fullscreen") {
-          setSpriteViewMode("popover");
+          phone.setSpriteViewMode("popover");
         }
         void runSpriteAnswerAction(action, message).catch((error) => pushSpriteMessage({ text: formatActionError(error), tone: "worry" }));
       }
@@ -1395,7 +961,7 @@ export function createSpriteController({
         });
       }
     } else if (state.sprite.recording && !state.sprite.handsFree) {
-      void stopSpriteMic({ submit: false });
+      void audio.stopSpriteMic({ submit: false });
     }
     renderSpriteAssistantMount();
     if (nextOpen) {
@@ -1634,7 +1200,7 @@ export function createSpriteController({
       return;
     }
     if (effect.type === "open_thread" && effect.threadId) {
-      if (state.sprite.viewMode === "fullscreen") setSpriteViewMode("popover", { render: false });
+      if (state.sprite.viewMode === "fullscreen") phone.setSpriteViewMode("popover", { render: false });
       await selectThread(effect.threadId);
       return;
     }
@@ -1656,7 +1222,7 @@ export function createSpriteController({
     state.sprite.askAbortController = ac;
     state.sprite.busy = true;
     state.sprite.thinkingLabel = "正在翻阅园区与记忆…";
-    if (state.sprite.phoneCallActive) transitionPhonePhase("thinking");
+    if (state.sprite.phoneCallActive) phone.transitionPhonePhase("thinking");
     const t3d = getTycoon3d?.();
     t3d?.setSpriteMood?.("thinking");
     renderSpriteAssistantMount();
@@ -1733,7 +1299,7 @@ export function createSpriteController({
         state.sprite.busy = false;
         state.sprite.thinkingLabel = "";
         if (state.sprite.phoneCallActive && !state.sprite.speaking) {
-          transitionPhonePhase("listening");
+          phone.transitionPhonePhase("listening");
         }
         renderSpriteAssistantMount();
       }
@@ -1873,253 +1439,12 @@ export function createSpriteController({
     }
   }
 
-  async function sendSpritePhoneTurn({
-    samples = null,
-    transcriptText = "",
-    overlapDurationMs = 0,
-    overlapBotText = "",
-  } = {}) {
-    if (!state.sprite.phoneCallActive) return;
-    if (samples?.length || String(transcriptText || "").trim()) {
-      state.sprite.phonePendingTurns.push({
-        samples,
-        transcriptText: String(transcriptText || "").trim(),
-        overlapDurationMs: Number(overlapDurationMs) || 0,
-        overlapBotText: String(overlapBotText || ""),
-      });
-      state.sprite.phonePendingTurns = mergeQueuedVoiceTurns(state.sprite.phonePendingTurns);
-    }
-    if (state.sprite.busy || state.sprite.transcribing || state.sprite.speaking || !state.sprite.phonePendingTurns.length) {
-      return;
-    }
-    const turn = state.sprite.phonePendingTurns.shift();
-    const hasAudio = Boolean(turn.samples?.length);
-    const cleanTranscript = String(turn.transcriptText || "").trim();
-    const turnId = `spturn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    state.sprite.phoneTurnId = turnId;
-    if (cleanTranscript) {
-      pushSpriteMessage({ role: "user", text: cleanTranscript });
-    }
-    state.sprite.transcribing = hasAudio && !cleanTranscript;
-    state.sprite.busy = !state.sprite.transcribing;
-    state.sprite.thinkingLabel = hasAudio ? "正在听清并思考…" : "小精灵正在想…";
-    transitionPhonePhase("thinking", {
-      turnId,
-      detail: { hasAudio, hasTranscript: Boolean(cleanTranscript) },
-    });
-    renderSpriteAssistantMount();
-
-    const abortController = typeof AbortController !== "undefined" ? new AbortController() : null;
-    state.sprite.phoneAbortController = abortController;
-    const fetchFn = getFetch();
-    try {
-      const audioBase64 = hasAudio ? uint8ArrayToBase64(encodePcm16SamplesToWav(turn.samples, 16000)) : "";
-      const reqPayload = {
-        callId: state.sprite.phoneCallId,
-        turnId,
-        audioBase64,
-        audioMimeType: hasAudio ? "audio/wav" : "",
-        transcriptText: cleanTranscript,
-        history: state.sprite.turns.slice(-12),
-        focus: state.sprite.focusStack,
-        contextTopicId: state.sprite.scopedTopicId || state.tycoonSelectedTopicId || undefined,
-        modelKey: state.sprite.modelKey || "auto",
-        sessionId: state.sprite.sessionId,
-        autoExecute: state.sprite.phoneAutoExecute !== false,
-        tts: true,
-        proposalId: state.sprite.pendingProposal?.id || "",
-        ...(turn.overlapDurationMs > 0 ? { overlapDurationMs: turn.overlapDurationMs } : {}),
-        ...(turn.overlapBotText ? { overlapBotText: turn.overlapBotText } : {}),
-      };
-
-      const handlePhoneAnswer = async (heardTextVal, answerObj, { ttsPayload = null, streamTts = false } = {}) => {
-        if (!state.sprite.phoneCallActive) return 0;
-        state.sprite.transcribing = false;
-        state.sprite.busy = false;
-        state.sprite.thinkingLabel = "";
-        const heard = String(heardTextVal || cleanTranscript || "").trim();
-        if (heard && !cleanTranscript && !state.sprite._phoneTurnHeardPushed) {
-          state.sprite._phoneTurnHeardPushed = true;
-          pushSpriteMessage({ role: "user", text: heard });
-        }
-        const answer = answerObj || {};
-        if (answer.proposal) {
-          state.sprite.pendingProposal = answer.proposal;
-        } else if (answer.clearedProposal) {
-          state.sprite.pendingProposal = null;
-        }
-        if (heard && answer.text && answer.kind !== "clarify") {
-          Object.assign(state.sprite, appendSpriteTurn(state.sprite, heard, answer));
-        }
-        if (answer.executedAction?.ok) {
-          void loadMissionOverview({ trigger: "assistant-action" });
-          void refreshThreads().catch(() => {});
-        }
-        if (answer.clientEffect) {
-          await applySpriteClientEffect(answer.clientEffect);
-        }
-        const spokenText = answer.spokenReply || answer.text || "我在听。";
-        let speechToken = 0;
-        if (streamTts) {
-          speechToken = beginSpriteSpeechStream(spokenText, { turnId });
-        } else {
-          transitionPhonePhase("speaking", { turnId });
-        }
-        pushSpriteMessage({
-          role: "sprite",
-          tone: answer.mood || "report",
-          text: answer.text || answer.spokenReply || "我在听。",
-          spokenText,
-          sources: answer.sources || [],
-          links: answer.links || [],
-          actions: answer.actions || [],
-          notices: Array.isArray(answer.notices) ? answer.notices : [],
-          executedTag: answer.executedAction?.ok ? answer.executedAction.summary : "",
-          ttsPayload: streamTts ? { skipAutoSpeak: true } : ttsPayload,
-        });
-        return speechToken;
-      };
-
-      state.sprite._phoneTurnHeardPushed = false;
-      if (isDemoMode() || !fetchFn) {
-        const res = await apiPostWithHotFallback("api/assistant/voice-turn", reqPayload);
-        state.sprite.transcribing = false;
-        state.sprite.busy = false;
-        state.sprite.thinkingLabel = "";
-        if (res?.noSpeech) {
-          transitionPhonePhase("listening", { turnId, detail: { reason: "no_speech" } });
-          renderSpriteAssistantMount();
-          if (state.sprite.phonePendingTurns.length > 0) void sendSpritePhoneTurn();
-          return;
-        }
-        await handlePhoneAnswer(res?.heardText, res?.answer, { ttsPayload: res?.tts || null, streamTts: false });
-        return;
-      }
-
-      const response = await fetchFn(apiUrl("./api/assistant/voice-turn"), {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
-        body: JSON.stringify(reqPayload),
-        ...(abortController ? { signal: abortController.signal } : {}),
-      });
-      if (!response.ok) throw new Error(`语音通话请求失败（${response.status}）`);
-
-      if (!(response.headers.get("content-type") || "").includes("ndjson")) {
-        const res = await response.json();
-        state.sprite.transcribing = false;
-        state.sprite.busy = false;
-        state.sprite.thinkingLabel = "";
-        if (res?.noSpeech) {
-          transitionPhonePhase("listening", { turnId, detail: { reason: "no_speech" } });
-          renderSpriteAssistantMount();
-          if (state.sprite.phonePendingTurns.length > 0) void sendSpritePhoneTurn();
-          return;
-        }
-        await handlePhoneAnswer(res?.heardText, res?.answer, { ttsPayload: res?.tts || null, streamTts: false });
-        return;
-      }
-
-      let remainder = "";
-      let speechToken = 0;
-      let streamNoSpeech = false;
-      const consumeEvt = async (evt) => {
-        if (!evt || evt.type === "ping" || !state.sprite.phoneCallActive) return;
-        if (evt.type === "no_speech") {
-          streamNoSpeech = true;
-          state.sprite.transcribing = false;
-          state.sprite.busy = false;
-          state.sprite.thinkingLabel = "";
-          transitionPhonePhase("listening", { turnId, detail: { reason: "no_speech" } });
-          renderSpriteAssistantMount();
-          return;
-        }
-        if (evt.type === "heard") {
-          state.sprite.transcribing = false;
-          state.sprite.busy = true;
-          transitionPhonePhase("thinking", { turnId });
-          state.sprite.thinkingLabel = "小精灵正在想…";
-          const heard = String(evt.heardText || cleanTranscript || "").trim();
-          if (heard && !cleanTranscript && !state.sprite._phoneTurnHeardPushed) {
-            state.sprite._phoneTurnHeardPushed = true;
-            pushSpriteMessage({ role: "user", text: heard });
-          } else {
-            renderSpriteAssistantMount();
-          }
-          return;
-        }
-        if (evt.type === "answer") {
-          speechToken = await handlePhoneAnswer(evt.heardText, evt.answer, { streamTts: true });
-          return;
-        }
-        if (evt.type === "tts_chunk") {
-          if (speechToken) enqueueSpriteTtsChunk(speechToken, evt.tts);
-          return;
-        }
-        if (evt.type === "done") {
-          if (speechToken) finishSpriteSpeechStream(speechToken);
-          return;
-        }
-        if (evt.type === "error") {
-          throw new Error(evt.message || "语音通话请求失败");
-        }
-      };
-
-      if (response.body?.getReader) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        try {
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            const parsed = parseSpriteNdjson(decoder.decode(value, { stream: true }), remainder, false);
-            remainder = parsed.remainder;
-            for (const evt of parsed.events) await consumeEvt(evt);
-          }
-          const tailParsed = parseSpriteNdjson(decoder.decode(), remainder, true);
-          for (const evt of tailParsed.events) await consumeEvt(evt);
-        } finally {
-          reader.releaseLock();
-        }
-      } else {
-        const parsed = parseSpriteNdjson(await response.text(), "", true);
-        for (const evt of parsed.events) await consumeEvt(evt);
-      }
-
-      if (speechToken) finishSpriteSpeechStream(speechToken);
-      if (streamNoSpeech && state.sprite.phonePendingTurns.length > 0) {
-        void sendSpritePhoneTurn();
-      }
-    } catch (error) {
-      state.sprite.transcribing = false;
-      state.sprite.busy = false;
-      state.sprite.thinkingLabel = "";
-      if (error?.name === "AbortError" || !state.sprite.phoneCallActive) {
-        renderSpriteAssistantMount();
-        return;
-      }
-      const prevPhase = state.sprite.phonePhase;
-      transitionPhonePhase("listening", { turnId });
-      logSpritePhoneEvent("turn_error", { turnId, fromPhase: prevPhase, toPhase: "listening", detail: formatActionError(error) });
-      pushSpriteMessage({
-        role: "sprite",
-        tone: "worry",
-        text: `语音通话请求失败：${formatActionError(error)}`,
-        ttsPayload: { skipAutoSpeak: true },
-      });
-    } finally {
-      if (abortController && state.sprite.phoneAbortController === abortController) {
-        state.sprite.phoneAbortController = null;
-      }
-    }
-  }
-
   async function handleSpriteCommand(rawInput = "") {
     const text = String(rawInput || "").trim();
     if (!text || state.sprite.busy) return;
     if (state.sprite.viewMode === "phone" && state.sprite.phoneCallActive) {
       state.sprite.draft = "";
-      await sendSpritePhoneTurn({ transcriptText: text });
+      await phone.sendSpritePhoneTurn({ transcriptText: text });
       return;
     }
     state.sprite.open = true;
@@ -2224,722 +1549,17 @@ export function createSpriteController({
     await requestSpriteAnswer(text);
   }
 
-  function teardownSpriteMic() {
-    const mic = state.sprite.mic;
-    if (mic.maxTimer) {
-      clearTimeout(mic.maxTimer);
-      mic.maxTimer = null;
-    }
-    if (mic.tickTimer) {
-      clearInterval(mic.tickTimer);
-      mic.tickTimer = null;
-    }
-    if (mic.watchdogTimer) {
-      clearInterval(mic.watchdogTimer);
-      mic.watchdogTimer = null;
-    }
-    if (mic.probeTimer) {
-      clearTimeout(mic.probeTimer);
-      mic.probeTimer = null;
-    }
-    if (mic.processor) {
-      try {
-        mic.processor.onaudioprocess = null;
-        mic.processor.disconnect?.();
-      } catch {}
-    }
-    try { mic.silentGain?.disconnect?.(); } catch {}
-    if (Array.isArray(mic.filterNodes)) {
-      for (const node of mic.filterNodes) {
-        try { node?.disconnect?.(); } catch {}
-      }
-    }
-    try { mic.source?.disconnect?.(); } catch {}
-    if (mic.micStream) {
-      for (const track of mic.micStream.getTracks?.() || []) {
-        try {
-          track.onended = null;
-          track.onmute = null;
-          track.onunmute = null;
-          track.stop?.();
-        } catch {}
-      }
-    }
-    if (mic.audioCtx && mic.ownsAudioCtx === true && mic.audioCtx !== state.voice?.audioCtx) {
-      try { void mic.audioCtx.close?.(); } catch {}
-    }
-    mic.processor = null;
-    mic.silentGain = null;
-    mic.filterNodes = [];
-    mic.source = null;
-    mic.micStream = null;
-    mic.audioCtx = null;
-    mic.ownsAudioCtx = false;
-    mic.vad = null;
-    mic.bargeInFrames = 0;
-    mic.bargeRing = [];
-    mic.queuedSamples = null;
-    mic.lastAudioFrameAt = 0;
-    mic.frameCount = 0;
-    mic.maxRms = 0;
-    mic.vadDiscards = 0;
-    mic.recovering = false;
-    mic.trackLabel = "";
-    state.sprite.speechActive = false;
-    state.sprite.recordElapsedSec = 0;
-  }
-
-  async function transcribeSpritePcmSamples(samples) {
-    if (!samples || samples.length < 1600) return false;
-    state.sprite.transcribing = true;
-    renderSpriteAssistantMount();
-    try {
-      const wavBytes = encodePcm16SamplesToWav(samples, 16000);
-      const res = await apiPostWithHotFallback("api/voice/transcribe", {
-        audioBase64: uint8ArrayToBase64(wavBytes),
-        audioMimeType: "audio/wav",
-      });
-      const recognized = String(res?.text || "").trim();
-      state.sprite.transcribing = false;
-      renderSpriteAssistantMount();
-      if (recognized) {
-        await handleSpriteCommand(recognized);
-        return true;
-      }
-      if (!state.sprite.handsFree) {
-        pushSpriteMessage({ role: "sprite", tone: "idle", text: "没有识别到清晰人声，可以再说一次或直接打字。" });
-      }
-      return false;
-    } catch (error) {
-      state.sprite.transcribing = false;
-      pushSpriteAssistantErrorOrNotice(`语音识别失败：${formatActionError(error)}`);
-      return false;
-    } finally {
-      state.sprite.transcribing = false;
-      renderSpriteAssistantMount();
-    }
-  }
-
-  function pushSpriteAssistantErrorOrNotice(msg) {
-    pushSpriteMessage({ role: "sprite", tone: "urgent", text: msg, ttsPayload: { skipAutoSpeak: true } });
-  }
-
-  async function stopSpriteMic({ submit = true, stopHandsFree = false, explicitSamples = null } = {}) {
-    if (stopHandsFree && state.sprite.handsFree) {
-      state.sprite.handsFree = false;
-      if (typeof state.sprite.prevTtsPref === "boolean") {
-        state.sprite.ttsEnabled = state.sprite.prevTtsPref;
-        state.sprite.prevTtsPref = null;
-      }
-    }
-    const wasRecording = state.sprite.recording;
-    state.sprite.recording = false;
-
-    let merged = explicitSamples;
-    const vadFlushed = state.sprite.mic.vad?.flush?.();
-    const chunks = state.sprite.mic.chunks;
-    state.sprite.mic.chunks = [];
-    teardownSpriteMic();
-    state.sprite.micStatus = "idle";
-    state.sprite.micError = "";
-
-    if (!wasRecording && !merged) {
-      renderSpriteAssistantMount();
-      return;
-    }
-
-    if (!merged && submit) {
-      if (vadFlushed?.samples?.length >= 1600) {
-        merged = vadFlushed.samples;
-      } else {
-        const totalLen = chunks.reduce((s, c) => s + c.length, 0);
-        if (totalLen >= 1600) {
-          merged = new Int16Array(totalLen);
-          let offset = 0;
-          for (const chunk of chunks) {
-            merged.set(chunk, offset);
-            offset += chunk.length;
-          }
-        } else if (totalLen > 0 && !stopHandsFree) {
-          renderSpriteAssistantMount();
-          pushSpriteMessage({ role: "sprite", tone: "idle", text: "录音太短没听清，再按一下麦克风告诉我吧。" });
-          return;
-        }
-      }
-    }
-
-    renderSpriteAssistantMount();
-    if (submit && merged && merged.length >= 1600) {
-      await transcribeSpritePcmSamples(merged);
-    }
-  }
-
-  async function startSpriteMic({ handsFree = false } = {}) {
-    if (state.sprite.recording) {
-      if (handsFree && !state.sprite.handsFree) {
-        if (state.sprite.prevTtsPref === null) {
-          state.sprite.prevTtsPref = state.sprite.ttsEnabled;
-        }
-        state.sprite.ttsEnabled = true;
-        state.sprite.handsFree = true;
-        if (state.sprite.mic.maxTimer) {
-          clearTimeout(state.sprite.mic.maxTimer);
-          state.sprite.mic.maxTimer = null;
-        }
-        renderSpriteAssistantMount();
-      }
-      return;
-    }
-    if (state.sprite.micStarting) return;
-
-    ensureVoiceAudioUnlocked();
-    if (!handsFree) {
-      stopSpriteSpeech();
-    }
-
-    const mediaDevicesObj = mediaDevices || (typeof navigator !== "undefined" ? navigator.mediaDevices : null);
-    if (!mediaDevicesObj?.getUserMedia) {
-      state.sprite.micStatus = "error";
-      state.sprite.micError = "当前环境未开放麦克风权限";
-      logSpritePhoneEvent("mic_error", { detail: { reason: "no_media_devices" } });
-      pushSpriteMessage({ role: "sprite", tone: "urgent", text: "当前环境未开放麦克风权限，可在桌面客户端系统设置中授权麦克风，或直接打字发送。", ttsPayload: { skipAutoSpeak: true } });
-      renderSpriteAssistantMount();
-      return;
-    }
-    const sharedCtx = state.voice?.audioCtx && state.voice.audioCtx.state !== "closed" ? state.voice.audioCtx : null;
-    const AudioCtx = AudioContextCtor || (typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext)) || null;
-    if (!sharedCtx && !AudioCtx) {
-      state.sprite.micStatus = "error";
-      state.sprite.micError = "当前浏览器不支持音频采集";
-      logSpritePhoneEvent("mic_error", { detail: { reason: "no_audio_context" } });
-      pushSpriteMessage({ role: "sprite", tone: "urgent", text: "当前浏览器不支持音频采集，请直接打字提问。", ttsPayload: { skipAutoSpeak: true } });
-      renderSpriteAssistantMount();
-      return;
-    }
-
-    if (handsFree) {
-      if (state.sprite.prevTtsPref === null) {
-        state.sprite.prevTtsPref = state.sprite.ttsEnabled;
-      }
-      state.sprite.ttsEnabled = true;
-      state.sprite.handsFree = true;
-    } else {
-      state.sprite.handsFree = false;
-    }
-
-    const ownsAudioCtx = !sharedCtx;
-    let ctx = null;
-    try {
-      ctx = sharedCtx || new AudioCtx();
-    } catch (ctxErr) {
-      state.sprite.handsFree = false;
-      state.sprite.micStatus = "error";
-      state.sprite.micError = ctxErr?.message || "无法初始化音频上下文";
-      logSpritePhoneEvent("mic_error", { detail: { reason: "audio_context_init", message: String(ctxErr?.message || "") } });
-      pushSpriteMessage({ role: "sprite", tone: "urgent", text: `麦克风启动失败：${state.sprite.micError}`, ttsPayload: { skipAutoSpeak: true } });
-      renderSpriteAssistantMount();
-      return;
-    }
-    if ((ctx.state === "suspended" || ctx.state === "interrupted") && typeof ctx.resume === "function") {
-      void ctx.resume().catch(() => {});
-    }
-
-    state.sprite.micStarting = true;
-    state.sprite.micStatus = "starting";
-    state.sprite.micError = "";
-    renderSpriteAssistantMount();
-
-    try {
-      const preferredConstraints = {
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      };
-      let stream = null;
-      try {
-        stream = await mediaDevicesObj.getUserMedia(preferredConstraints);
-      } catch (gumErr) {
-        const errName = String(gumErr?.name || "");
-        if (
-          errName === "OverconstrainedError"
-          || errName === "ConstraintNotSatisfiedError"
-          || errName === "NotReadableError"
-          || errName === "AbortError"
-        ) {
-          stream = await mediaDevicesObj.getUserMedia({ audio: true });
-        } else {
-          throw gumErr;
-        }
-      }
-
-      if ((state.sprite.viewMode === "phone" && !state.sprite.phoneCallActive) || (handsFree && !state.sprite.handsFree)) {
-        for (const t of stream?.getTracks?.() || []) {
-          try { t.stop?.(); } catch {}
-        }
-        if (ownsAudioCtx) {
-          try { void ctx.close?.(); } catch {}
-        }
-        state.sprite.micStatus = "idle";
-        state.sprite.micError = "";
-        return;
-      }
-
-      if ((ctx.state === "suspended" || ctx.state === "interrupted") && typeof ctx.resume === "function") {
-        let resumeTimer = null;
-        await Promise.race([
-          ctx.resume().catch(() => {}),
-          new Promise((r) => {
-            resumeTimer = setTimeout(r, 900);
-            resumeTimer.unref?.();
-          }),
-        ]);
-        if (resumeTimer) clearTimeout(resumeTimer);
-      }
-
-      if ((state.sprite.viewMode === "phone" && !state.sprite.phoneCallActive) || (handsFree && !state.sprite.handsFree)) {
-        for (const t of stream?.getTracks?.() || []) {
-          try { t.stop?.(); } catch {}
-        }
-        if (ownsAudioCtx) {
-          try { void ctx.close?.(); } catch {}
-        }
-        state.sprite.micStatus = "idle";
-        state.sprite.micError = "";
-        return;
-      }
-
-      const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(2048, 1, 1);
-      const silentGain = ctx.createGain();
-      silentGain.gain.value = 0;
-
-      const filterNodes = [];
-      if (typeof ctx.createBiquadFilter === "function") {
-        const sr = Number(ctx.sampleRate) || 48000;
-        const nyquist = sr * 0.5;
-        const highpass = ctx.createBiquadFilter();
-        highpass.type = "highpass";
-        highpass.frequency.value = Math.min(100, Math.max(40, nyquist * 0.08));
-        highpass.Q.value = 0.707;
-        const lowpass = ctx.createBiquadFilter();
-        lowpass.type = "lowpass";
-        lowpass.frequency.value = Math.min(7200, Math.max(1200, Math.floor(nyquist * 0.9)));
-        lowpass.Q.value = 0.707;
-        source.connect(highpass);
-        highpass.connect(lowpass);
-        lowpass.connect(processor);
-        filterNodes.push(highpass, lowpass);
-      } else {
-        source.connect(processor);
-      }
-      processor.connect(silentGain);
-      silentGain.connect(ctx.destination);
-
-      const vad = createVadTurnDetector(
-        handsFree || state.sprite.phoneCallActive
-          ? { ...CALL_VOICE_VAD_OPTIONS, silenceMs: 1150, minSpeechMs: 220, minPeakRms: 0.0085 }
-          : {
-              sampleRate: 16000,
-              silenceMs: 1100,
-              minSpeechMs: 280,
-              maxSpeechMs: 22000,
-              rmsThreshold: 0.016,
-              adaptive: true,
-              requireSustainedOnset: true,
-            },
-      );
-
-      const mic = state.sprite.mic;
-      const primaryTrack = stream?.getAudioTracks?.()?.[0] || null;
-      const trackLabel = String(primaryTrack?.label || "").trim();
-
-      mic.chunks = [];
-      mic.vad = vad;
-      mic.startedAtMs = Date.now();
-      mic.lastLevelUiAt = 0;
-      mic.lastAudioFrameAt = Date.now();
-      mic.frameCount = 0;
-      mic.maxRms = 0;
-      mic.vadDiscards = 0;
-      mic.recovering = false;
-      mic.trackLabel = trackLabel;
-      mic.bargeInFrames = 0;
-      mic.bargeRing = [];
-      mic.pendingOverlap = null;
-      mic.queuedSamples = null;
-      state.sprite.recordElapsedSec = 0;
-      state.sprite.speechActive = false;
-
-      const triggerMicRecovery = (reason = "stalled") => {
-        if (!state.sprite.recording || state.sprite.mic.processor !== processor || mic.recovering) return;
-        if (!(state.sprite.phoneCallActive || state.sprite.handsFree)) return;
-        if (state.sprite.phoneCallActive && state.sprite.phoneMuted) return;
-        if ((state.sprite.micRecoveryCount || 0) >= 2) {
-          state.sprite.micStatus = "stalled";
-          state.sprite.micError = "未收到麦克风音频流，点中间光球重试或检查系统麦克风权限";
-          renderSpriteAssistantMount();
-          return;
-        }
-        mic.recovering = true;
-        state.sprite.micRecoveryCount = (state.sprite.micRecoveryCount || 0) + 1;
-        logSpritePhoneEvent("mic_recover", { detail: { reason, attempt: state.sprite.micRecoveryCount } });
-        const recoverTimer = setTimeout(() => {
-          if (state.sprite.mic.processor !== processor) return;
-          const shouldRestart = state.sprite.recording
-            && (state.sprite.phoneCallActive || state.sprite.handsFree)
-            && !(state.sprite.phoneCallActive && state.sprite.phoneMuted);
-          teardownSpriteMic();
-          state.sprite.recording = false;
-          if (shouldRestart) {
-            void startSpriteMic({ handsFree: true });
-          }
-        }, 180);
-        recoverTimer.unref?.();
-      };
-
-      processor.onaudioprocess = (ev) => {
-        if (!state.sprite.recording) return;
-        if (state.sprite.phoneCallActive && state.sprite.phoneMuted) return;
-        const now = Date.now();
-        mic.lastAudioFrameAt = now;
-        mic.frameCount += 1;
-
-        const input = ev.inputBuffer?.getChannelData?.(0);
-        if (!input?.length) return;
-        let hasCorruptSample = false;
-        for (let i = 0; i < input.length; i += 64) {
-          if (!Number.isFinite(input[i])) {
-            hasCorruptSample = true;
-            break;
-          }
-        }
-        if (hasCorruptSample) {
-          triggerMicRecovery("corrupt_samples");
-          return;
-        }
-
-        const rms = computeRmsLevel(input);
-        if (rms > mic.maxRms) mic.maxRms = rms;
-        if (rms > 0) {
-          if (mic.frameCount >= 12) {
-            state.sprite.micRecoveryCount = 0;
-          }
-          if (state.sprite.micStatus === "stalled" || state.sprite.micStatus === "silent") {
-            state.sprite.micStatus = "ready";
-            state.sprite.micError = "";
-            renderSpriteAssistantMount();
-          }
-        }
-
-        if (now - mic.lastLevelUiAt >= 65) {
-          mic.lastLevelUiAt = now;
-          const norm = Math.min(1, Math.max(0.06, rms * 11.5));
-          state.sprite.voiceLevel = norm;
-          const barEl = $("spriteVoiceBar");
-          if (barEl) barEl.style.setProperty("--voice-level", norm.toFixed(2));
-          const phoneShell = $("spritePhoneShell");
-          if (phoneShell) phoneShell.style.setProperty("--voice-level", norm.toFixed(2));
-        }
-
-        const pcm16 = downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000);
-        const assistantBusy = state.sprite.transcribing || state.sprite.busy;
-
-        if (state.sprite.speaking) {
-          mic.bargeRing.push({ pcm16, rms });
-          while (mic.bargeRing.length > 24) mic.bargeRing.shift();
-          if (rms >= 0.045) {
-            mic.bargeInFrames += 1;
-            if (mic.bargeInFrames >= 3) {
-              mic.bargeInFrames = 0;
-              const overlapDurationMs = state.sprite.speakingStartedAt ? Math.max(0, Date.now() - state.sprite.speakingStartedAt) : 0;
-              const overlapBotText = state.sprite.lastSpokenReply || "";
-              mic.pendingOverlap = { overlapDurationMs, overlapBotText };
-              logSpritePhoneEvent("barge_in", { fromPhase: "speaking", toPhase: "listening", detail: { overlapDurationMs } });
-              stopSpriteSpeech();
-              vad.reset();
-              for (const frame of mic.bargeRing) vad.pushSamples(frame.pcm16, frame.rms);
-              mic.bargeRing = [];
-            }
-          } else {
-            mic.bargeInFrames = 0;
-          }
-          return;
-        }
-        mic.bargeRing = [];
-
-        if (!assistantBusy && mic.queuedSamples?.length) {
-          const queued = mic.queuedSamples;
-          mic.queuedSamples = null;
-          void transcribeSpritePcmSamples(queued);
-          return;
-        }
-
-        if (!state.sprite.handsFree && mic.chunks.length < 450) {
-          mic.chunks.push(pcm16);
-        }
-
-        const vadEv = vad.pushSamples(pcm16, rms);
-        if (vadEv.type === "speech_start") {
-          if (!state.sprite.speechActive) {
-            state.sprite.speechActive = true;
-            renderSpriteAssistantMount();
-          }
-        } else if (vadEv.type === "utterance" && vadEv.samples?.length >= 1600) {
-          state.sprite.speechActive = false;
-          if (state.sprite.phoneCallActive) {
-            mic.chunks = [];
-            playVoiceEarcon("heard", ctx);
-            const overlap = mic.pendingOverlap || {};
-            mic.pendingOverlap = null;
-            void sendSpritePhoneTurn({ samples: vadEv.samples, ...overlap });
-          } else if (state.sprite.handsFree) {
-            mic.chunks = [];
-            playVoiceEarcon("heard", ctx);
-            if (state.sprite.transcribing || state.sprite.busy) {
-              mic.queuedSamples = mic.queuedSamples?.length
-                ? mergePcm16ChunksWithGap([mic.queuedSamples, vadEv.samples], 2560)
-                : vadEv.samples;
-            } else {
-              void transcribeSpritePcmSamples(vadEv.samples);
-            }
-          } else {
-            void stopSpriteMic({ submit: true, explicitSamples: vadEv.samples });
-          }
-        } else if (vadEv.type === "discarded_short" || vadEv.type === "discarded_noise") {
-          mic.vadDiscards += 1;
-          if (state.sprite.speechActive) {
-            state.sprite.speechActive = false;
-            renderSpriteAssistantMount();
-          }
-        }
-      };
-
-      mic.audioCtx = ctx;
-      mic.ownsAudioCtx = ownsAudioCtx;
-      mic.micStream = stream;
-      mic.source = source;
-      mic.filterNodes = filterNodes;
-      mic.processor = processor;
-      mic.silentGain = silentGain;
-      state.sprite.recording = true;
-      state.sprite.micStatus = "ready";
-      state.sprite.micError = "";
-
-      logSpritePhoneEvent("mic_ready", {
-        detail: {
-          sampleRate: Number(ctx.sampleRate) || 0,
-          ctxState: String(ctx.state || ""),
-          reusedCtx: !ownsAudioCtx,
-          trackLabel,
-          trackMuted: Boolean(primaryTrack?.muted),
-          trackReadyState: String(primaryTrack?.readyState || ""),
-        },
-      });
-
-      if (primaryTrack) {
-        primaryTrack.onended = () => {
-          triggerMicRecovery("track_ended");
-        };
-      }
-
-      mic.tickTimer = setInterval(() => {
-        if (!state.sprite.recording) return;
-        const elapsed = Math.floor((Date.now() - mic.startedAtMs) / 1000);
-        state.sprite.recordElapsedSec = elapsed;
-        const timerEl = $("spriteVoiceTimer");
-        if (timerEl) timerEl.textContent = formatSpriteTimerText(elapsed);
-      }, 1000);
-      mic.tickTimer.unref?.();
-
-      mic.probeTimer = setTimeout(() => {
-        mic.probeTimer = null;
-        if (!state.sprite.recording || state.sprite.mic.processor !== processor) return;
-        if (state.sprite.phoneCallActive && state.sprite.phoneMuted) return;
-        logSpritePhoneEvent("mic_probe", {
-          detail: {
-            frames: mic.frameCount,
-            maxRms: Number(mic.maxRms.toFixed(5)),
-            vadDiscards: mic.vadDiscards,
-            ctxState: String(ctx.state || ""),
-            trackMuted: Boolean(primaryTrack?.muted),
-            trackReadyState: String(primaryTrack?.readyState || ""),
-            trackLabel: mic.trackLabel,
-          },
-        });
-        if (mic.frameCount === 0) {
-          if (typeof ctx.resume === "function") void ctx.resume().catch(() => {});
-          state.sprite.micStatus = "stalled";
-          state.sprite.micError = "未收到麦克风音频流，点中间光球重试或检查系统麦克风权限";
-          renderSpriteAssistantMount();
-        } else if (mic.frameCount >= 12 && mic.maxRms === 0 && !state.sprite.speaking) {
-          state.sprite.micStatus = "silent";
-          state.sprite.micError = "麦克风已连接但持续无声音输入，请检查 Mac 系统设置中的麦克风权限或输入设备";
-          renderSpriteAssistantMount();
-        }
-      }, 2500);
-      mic.probeTimer.unref?.();
-
-      mic.watchdogTimer = setInterval(() => {
-        if (!state.sprite.recording || state.sprite.mic.processor !== processor) return;
-        if (state.sprite.phoneCallActive && state.sprite.phoneMuted) return;
-        if ((ctx.state === "suspended" || ctx.state === "interrupted") && typeof ctx.resume === "function") {
-          void ctx.resume().catch(() => {});
-        }
-        if (state.sprite.speaking || mic.recovering) return;
-        if (!(state.sprite.phoneCallActive || state.sprite.handsFree)) return;
-        const now = Date.now();
-        if (now - mic.startedAtMs < 2400) return;
-        const trackDead = Boolean(stream?.getAudioTracks?.().some((t) => t.readyState === "ended"));
-        const idleMs = mic.lastAudioFrameAt > 0 ? now - mic.lastAudioFrameAt : now - mic.startedAtMs;
-        if (trackDead || idleMs > 2200) {
-          if ((state.sprite.micRecoveryCount || 0) >= 2) {
-            if (state.sprite.micStatus !== "stalled") {
-              state.sprite.micStatus = "stalled";
-              state.sprite.micError = "未收到麦克风音频流，点中间光球重试或检查系统麦克风权限";
-              renderSpriteAssistantMount();
-            }
-            return;
-          }
-          if (typeof ctx.resume === "function" && ctx.state !== "running") {
-            void ctx.resume().catch(() => {});
-          }
-          const preFrameCount = mic.frameCount;
-          const checkTimer = setTimeout(() => {
-            if (!state.sprite.recording || state.sprite.mic.processor !== processor || mic.recovering) return;
-            const newFrameArrived = mic.frameCount > preFrameCount;
-            const stillTrackDead = Boolean(stream?.getAudioTracks?.().some((t) => t.readyState === "ended"));
-            if (!newFrameArrived || stillTrackDead) {
-              triggerMicRecovery(stillTrackDead ? "watchdog_track_ended" : "watchdog_idle");
-            }
-          }, 400);
-          checkTimer.unref?.();
-        }
-      }, 1200);
-      mic.watchdogTimer.unref?.();
-
-      if (!state.sprite.handsFree) {
-        mic.maxTimer = setTimeout(() => {
-          void stopSpriteMic({ submit: true });
-        }, 25000);
-        mic.maxTimer.unref?.();
-      }
-      renderSpriteAssistantMount();
-    } catch (error) {
-      if (ownsAudioCtx && !state.sprite.mic.audioCtx) {
-        try { void ctx?.close?.(); } catch {}
-      }
-      teardownSpriteMic();
-      state.sprite.recording = false;
-      state.sprite.handsFree = false;
-      state.sprite.micStatus = "error";
-      state.sprite.micError = error?.message || "请检查麦克风权限";
-      logSpritePhoneEvent("mic_error", {
-        detail: {
-          name: String(error?.name || ""),
-          message: String(error?.message || ""),
-        },
-      });
-      renderSpriteAssistantMount();
-      pushSpriteMessage({ role: "sprite", tone: "urgent", text: `麦克风启动失败：${error?.message || "请检查权限"}`, ttsPayload: { skipAutoSpeak: true } });
-    } finally {
-      state.sprite.micStarting = false;
-    }
-  }
-
-  async function toggleSpriteHandsFree() {
-    if (state.sprite.handsFree) {
-      stopSpriteSpeech();
-      await stopSpriteMic({ submit: false, stopHandsFree: true });
-      return;
-    }
-    ensureVoiceAudioUnlocked();
-    state.sprite.micRecoveryCount = 0;
-    if (!state.sprite.open) {
-      toggleSpriteAssistant({ open: true });
-    }
-    if (!state.missionOverview && !state.missionOverviewLoading) {
-      void loadMissionOverview({ trigger: "open" });
-    }
-    await startSpriteMic({ handsFree: true });
-  }
-
-  async function toggleSpriteMic() {
-    if (state.sprite.transcribing || state.sprite.busy) return;
-    if (state.sprite.handsFree) {
-      if (state.sprite.speechActive && state.sprite.mic.vad) {
-        const flushed = state.sprite.mic.vad.flush();
-        state.sprite.speechActive = false;
-        if (flushed?.samples?.length >= 1600) {
-          await transcribeSpritePcmSamples(flushed.samples);
-          return;
-        }
-      }
-      await toggleSpriteHandsFree();
-      return;
-    }
-    if (state.sprite.recording) {
-      await stopSpriteMic({ submit: true });
-      return;
-    }
-    await startSpriteMic({ handsFree: false });
-  }
-
-  function bindFullscreenEvents() {
-    const fsMountEl = $("spriteFullscreenMount");
-    if (!fsMountEl || fsMountEl._acSpriteEventsBound) return;
-    fsMountEl._acSpriteEventsBound = true;
-    fsMountEl.addEventListener("click", (e) => {
-      void handleSpriteDelegatedClick(e);
-    });
-    fsMountEl.addEventListener("change", (e) => {
-      handleSpriteDelegatedChange(e);
-    });
-    fsMountEl.addEventListener("input", (e) => {
-      if (e.target.id === "spriteFullscreenInput") {
-        state.sprite.draft = e.target.value;
-        e.target.style.height = "auto";
-        e.target.style.height = `${Math.min(132, Math.max(24, e.target.scrollHeight))}px`;
-      }
-    });
-    fsMountEl.addEventListener("keydown", (e) => {
-      if (e.target.id === "spriteFullscreenInput" && e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-        e.preventDefault();
-        const val = e.target.value.trim();
-        if (val) void handleSpriteCommand(val);
-      }
-    });
-    fsMountEl.addEventListener("submit", (e) => {
-      if (e.target.id === "spriteFullscreenForm") {
-        e.preventDefault();
-        const val = $("spriteFullscreenInput")?.value?.trim() || state.sprite.draft || "";
-        if (val) void handleSpriteCommand(val);
-        return;
-      }
-      if (e.target.id === "spritePhoneTextForm") {
-        e.preventDefault();
-        const input = $("spritePhoneTextInput");
-        const val = input?.value?.trim() || "";
-        if (!val) return;
-        input.value = "";
-        void sendSpritePhoneTurn({ transcriptText: val });
-      }
-    });
-  }
-
   return {
-    transitionPhonePhase,
-    setSpriteViewMode,
-    bindFullscreenEvents,
-    stopSpriteSpeech,
-    enterSpriteFullscreen,
-    exitSpriteFullscreen,
-    exitSpriteOverlayForNavigation,
-    minimizeSpritePhoneCall,
-    enterSpritePhoneCall,
-    hangupSpritePhoneCall,
+    transitionPhonePhase: phone.transitionPhonePhase,
+    setSpriteViewMode: phone.setSpriteViewMode,
+    bindFullscreenEvents: phone.bindFullscreenEvents,
+    stopSpriteSpeech: audio.stopSpriteSpeech,
+    enterSpriteFullscreen: phone.enterSpriteFullscreen,
+    exitSpriteFullscreen: phone.exitSpriteFullscreen,
+    exitSpriteOverlayForNavigation: phone.exitSpriteOverlayForNavigation,
+    minimizeSpritePhoneCall: phone.minimizeSpritePhoneCall,
+    enterSpritePhoneCall: phone.enterSpritePhoneCall,
+    hangupSpritePhoneCall: phone.hangupSpritePhoneCall,
     renderSpriteAssistantMount,
     syncSpriteWithOverview,
     handleSpriteDelegatedClick,
@@ -2949,8 +1569,8 @@ export function createSpriteController({
     pinThreadAsTicket,
     maybeStartSpriteTour,
     noteSpriteParkLeave,
-    sendSpritePhoneTurn,
+    sendSpritePhoneTurn: phone.sendSpritePhoneTurn,
     handleSpriteCommand,
-    stopSpriteMic,
+    stopSpriteMic: audio.stopSpriteMic,
   };
 }

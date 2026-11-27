@@ -13,7 +13,7 @@ import {
   encodePcm16SamplesToWav,
 } from "../public/voice-copilot.js";
 
-const spriteControllerSource = await readFile(new URL("../public/sprite-controller.js", import.meta.url), "utf8");
+const spriteAudioSource = await readFile(new URL("../public/sprite-audio-pipeline.js", import.meta.url), "utf8");
 
 test("resolveVoiceTarget skips unavailable profiles and selects healthy fallback", async (t) => {
   const dir = await mkdtemp(join(os.tmpdir(), "ac-voice-target-"));
@@ -140,11 +140,11 @@ print(json.dumps(out, ensure_ascii=False))
   assert.deepEqual(parsed.split, ["先看下日志然后修掉", "先看下日志", "然后修掉"]);
 });
 
-test("Silero VAD rejects car road-hum + turn-signal clicks and sprite-controller wires 100-7200Hz bandpass filters", () => {
-  assert.match(spriteControllerSource, /highpass\.frequency\.value\s*=.*100/);
-  assert.match(spriteControllerSource, /lowpass\.frequency\.value\s*=.*7200/);
-  assert.match(spriteControllerSource, /mic\.filterNodes\s*=\s*filterNodes/);
-  assert.match(spriteControllerSource, /mic\.silentGain\s*=\s*silentGain/);
+test("Silero VAD rejects car road-hum + turn-signal clicks and sprite-audio-pipeline wires 100-7200Hz bandpass filters", () => {
+  assert.match(spriteAudioSource, /highpass\.frequency\.value\s*=.*100/);
+  assert.match(spriteAudioSource, /lowpass\.frequency\.value\s*=.*7200/);
+  assert.match(spriteAudioSource, /mic\.filterNodes\s*=\s*filterNodes/);
+  assert.match(spriteAudioSource, /mic\.silentGain\s*=\s*silentGain/);
 
   const pyBin = "/opt/homebrew/bin/python3.12";
   const workerPath = fileURLToPath(new URL("../src/voice-asr-worker.py", import.meta.url));
