@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { replaceHtmlPreservingUiState } from "../public/dom-preserve.js";
 import {
   buildSpriteOpeningBriefing,
   buildSpriteContext, parseSpriteNdjson, appendSpriteTurn, askSpriteAssistant, submitSpriteDispatch, renderSpriteWorkCard, spriteTomorrowAtEight,
@@ -8,7 +10,13 @@ import {
   classifySpriteUserInput,
   buildSpriteTicketReply,
   diffSpriteOverviewEvents,
+  loadSpritePrefs,
+  saveSpritePrefs,
+  linkifySpriteAnswerHtml,
+  renderSpriteMessageHtml,
   renderSpriteAssistantHtml,
+  renderSpriteFullscreenHtml,
+  renderSpritePhoneCallHtml,
 } from "../public/sprite-assistant.js";
 
 import { setLocale } from "../public/i18n.js";
@@ -384,10 +392,245 @@ test("context shortcuts and prompts follow selected building signals", () => {
 
 test("「我的工单」列出每张工单停在哪，可打开工位和改验收标准", () => {
   const empty = buildSpriteTicketReply({ assistantTickets: [] });
-  assert.match(empty.text, /还没有工单/);
+  assert.match(empty.text, /还没有任务/);
   const reply = buildSpriteTicketReply({ assistantTickets: [
     { id: "tk_1", title: "账单分类", topicName: "记账小程序", line: "还差：没看到运行结果", criteria: ["能跑通"], state: "missing", threadId: "codex:default:D" },
+    { id: "tk_2", parentId: "tk_1", title: "导出 CSV", topicName: "记账小程序", line: "工位正在做", criteria: [], state: "running", threadId: "codex:default:E" },
   ] });
   assert.match(reply.text, /「记账小程序」账单分类：还差：没看到运行结果（验收标准 1 条）/);
-  assert.deepEqual(reply.actions.map((a) => a.type), ["open_thread", "ticket_edit"]);
+  assert.match(reply.text, /└─ 导出 CSV：工位正在做/);
+  assert.deepEqual(reply.actions.map((a) => a.type), ["open_thread", "ticket_edit", "open_thread", "ticket_edit"]);
+});
+
+test("小精灵全屏助手与豆包电话界面渲染安全且包含核心控制", () => {
+  const mem = new Map();
+  const storage = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v) };
+  assert.deepEqual(loadSpritePrefs(storage), { ttsEnabled: false, modelKey: "auto", phoneAutoExecute: true });
+  saveSpritePrefs({ modelKey: "codex:default:gpt-6.1-terra", phoneAutoExecute: false }, storage);
+  assert.deepEqual(loadSpritePrefs(storage), { ttsEnabled: false, modelKey: "codex:default:gpt-6.1-terra", phoneAutoExecute: false });
+
+  const fsHtml = renderSpriteFullscreenHtml({
+    modelOptions: [{ key: "auto", label: "自动优选模型" }, { key: "codex:default:gpt-6.1-terra", label: "Codex · GPT-6.1 Terra" }],
+    modelKey: "codex:default:gpt-6.1-terra",
+    messages: [{
+      id: "m1",
+      role: "sprite",
+      text: "方案如下 <script>x</script>",
+      executedTag: "已批准 <ok>",
+      notices: [{ id: "n1", title: "导出工位 <img onerror=alert(2)>", text: "「导出工位」已经跑完了，可以验收 <script>z</script>", threadId: "codex:default:t-done" }],
+    }],
+    pendingProposal: {
+      id: "act_1",
+      intent: "dispatch",
+      summary: "批准「npm test」<img onerror=alert(1)>",
+      routes: [
+        { topicName: "示例商城", agentLabel: "Codex", segmentText: "修复导出" },
+        { topicName: "绘本工坊 <script>r</script>", agentLabel: "Claude", segmentText: "补单测" },
+      ],
+    },
+    busy: true,
+    thinkingLabel: "正在翻阅园区…",
+  });
+  assert.doesNotMatch(fsHtml, /<script>|<img onerror/);
+  assert.match(fsHtml, /data-sprite-model-select="1"/);
+  assert.match(fsHtml, /data-sprite-action="enter-phone"/);
+  assert.match(fsHtml, /data-sprite-action="confirm-proposal"/);
+  assert.match(fsHtml, /正在翻阅园区/);
+  assert.match(fsHtml, /class="sprite-msg-notices"/);
+  assert.match(fsHtml, /data-board-open-thread="codex:default:t-done"/);
+  assert.match(fsHtml, /修复导出/);
+
+  const phoneHtml = renderSpritePhoneCallHtml({
+    phoneAutoExecute: false,
+    phoneMuted: true,
+    phoneElapsedSec: 65,
+    phoneKeyboardOpen: true,
+    messages: [{ id: "u1", role: "user", text: "现在怎么样" }, { id: "s1", role: "sprite", text: "一切正常 <script>y</script>", spokenText: "一切正常" }],
+    pendingProposal: {
+      id: "act_1",
+      summary: "准备拆 2 路，确认发吗？",
+      routes: [
+        { topicName: "示例商城", agentLabel: "Codex" },
+        { topicName: "绘本工坊", agentLabel: "Claude <script>x</script>" },
+      ],
+    },
+  });
+  assert.doesNotMatch(phoneHtml, /<script>y|<script>x/);
+  assert.match(phoneHtml, /sprite-phone-route-pill/);
+  assert.match(phoneHtml, /01:05/);
+  assert.match(phoneHtml, /写前先确认/);
+  assert.match(phoneHtml, /data-sprite-action="hangup-phone"/);
+  assert.match(phoneHtml, /data-sprite-action="minimize-phone"/);
+  assert.match(phoneHtml, /data-sprite-action="toggle-phone-mute"/);
+  assert.match(phoneHtml, /id="spritePhoneTextForm"/);
+  assert.match(phoneHtml, /data-sprite-action="open-sidebar"/);
+});
+
+test("全屏小精灵挂载与布局回归防护（防白屏 _acLastHtml 提前赋值 & 不遮挡左侧抽屉）", () => {
+  // 1. replaceHtmlPreservingUiState on empty mount populates innerHTML and tracks _acLastHtml cleanly
+  const fsHtml = renderSpriteFullscreenHtml({
+    messages: [{ id: "m1", role: "sprite", text: "测试全屏内容" }],
+  });
+  const fsMount = { innerHTML: "" };
+  const changed1 = replaceHtmlPreservingUiState(fsMount, fsHtml);
+  assert.equal(changed1, true);
+  assert.match(fsMount.innerHTML, /class="sprite-fs-shell"/);
+  assert.match(fsMount.innerHTML, /id="spriteFullscreenInput"/);
+  assert.match(fsMount.innerHTML, /data-sprite-action="open-sidebar"/);
+  assert.equal(fsMount._acLastHtml, fsHtml);
+  assert.equal(replaceHtmlPreservingUiState(fsMount, fsHtml), false);
+
+  const phoneHtml = renderSpritePhoneCallHtml({ phoneElapsedSec: 12 });
+  const phoneMount = { innerHTML: "" };
+  assert.equal(replaceHtmlPreservingUiState(phoneMount, phoneHtml), true);
+  assert.match(phoneMount.innerHTML, /id="spritePhoneShell"/);
+
+  // 2. index.html mounts #spriteFullscreenMount inside <main id="mainArea">...</main>, not outside </main>
+  const indexHtml = fs.readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+  const mainStart = indexHtml.indexOf('<main id="mainArea"');
+  const mainEnd = indexHtml.indexOf("</main>");
+  const mountIdx = indexHtml.indexOf('id="spriteFullscreenMount"');
+  assert.ok(mainStart !== -1 && mainEnd !== -1 && mountIdx !== -1);
+  assert.ok(mountIdx > mainStart && mountIdx < mainEnd, "#spriteFullscreenMount must live inside #mainArea");
+
+  // 3. sprite-assistant.css scopes fullscreen mount with position: absolute inside #mainArea
+  const cssText = fs.readFileSync(new URL("../public/sprite-assistant.css", import.meta.url), "utf8");
+  assert.match(cssText, /#mainArea\s*\{\s*position:\s*relative;/);
+  assert.match(cssText, /\.sprite-fullscreen-mount\s*\{[^}]*position:\s*absolute;/);
+  assert.doesNotMatch(cssText, /\.sprite-fullscreen-mount\s*\{[^}]*position:\s*fixed;/);
+
+  // 4. neither app.js nor sprite-controller.js may pre-assign fsMount._acLastHtml = fsHtml before replaceHtmlPreservingUiState
+  for (const rel of ["../public/app.js", "../public/sprite-controller.js"]) {
+    const src = fs.readFileSync(new URL(rel, import.meta.url), "utf8");
+    assert.doesNotMatch(src, /fsMount\._acLastHtml\s*=\s*fsHtml;/);
+  }
+});
+
+test("消息正文内联跳转链接、精炼跳转栏与上下文胶囊折叠", () => {
+  const manySources = Array.from({ length: 12 }, (_, i) => ({
+    kind: "thread",
+    threadId: `codex:default:other-${i}`,
+    label: `工位·无关工位${i}`,
+  }));
+  const msgHtml = renderSpriteMessageHtml({
+    id: "m-links",
+    role: "sprite",
+    text: "在「示例商城」产线下的 导出格式排查 <script>bad</script> 会话里已经完成。",
+    links: [
+      { kind: "thread", id: "codex:default:t-export", label: "导出格式排查", matchText: "导出格式排查" },
+      { kind: "topic", id: "shop", label: "示例商城", matchText: "示例商城" },
+    ],
+    actions: [
+      { label: "查看产线", type: "focus", payload: { topicId: "shop" } },
+      { label: "打开工位", type: "open_thread", payload: { threadId: "codex:default:t-export" } },
+      { label: "收菜", type: "card_action", payload: { cardId: "harvest:1", action: "harvest" } },
+    ],
+    traceSteps: [{ step: "compose", label: "整理回复", count: 12 }],
+    sources: manySources,
+  });
+
+  assert.doesNotMatch(msgHtml, /<script>bad/);
+  assert.match(msgHtml, /class="sprite-inline-link is-thread" data-board-open-thread="codex:default:t-export"/);
+  assert.match(msgHtml, /class="sprite-inline-link is-topic" data-sprite-focus-topic="shop"/);
+  assert.match(msgHtml, /<div class="sprite-msg-links">[\s\S]*打开会话：导出格式排查[\s\S]*查看产线：示例商城/);
+  // Duplicate focus/open_thread action buttons are suppressed, while unique action index stays 2.
+  assert.doesNotMatch(msgHtml, /data-sprite-answer-action="0"/);
+  assert.doesNotMatch(msgHtml, /data-sprite-answer-action="1"/);
+  assert.match(msgHtml, /data-sprite-answer-action="2">收菜</);
+  // All 12 raw sources are tucked inside <details class="sprite-trace">, not sprawled outside.
+  const detailsMatch = msgHtml.match(/<details class="sprite-trace">[\s\S]*<\/details>/);
+  assert.ok(detailsMatch, "应渲染折叠trace容器");
+  assert.match(detailsMatch[0], /参考 12 条上下文/);
+  assert.match(detailsMatch[0], /无关工位11/);
+  const outsideDetails = msgHtml.replace(/<details class="sprite-trace">[\s\S]*<\/details>/, "");
+  assert.doesNotMatch(outsideDetails, /无关工位0/);
+
+  // Long match stays intact without nested replacement inside <button>.
+  const nested = linkifySpriteAnswerHtml("<p><code>示例商城导出排查</code></p>", [
+    { kind: "thread", id: "t1", label: "示例商城导出排查" },
+    { kind: "topic", id: "shop", label: "示例商城" },
+  ]);
+  assert.equal((nested.match(/<button\b/g) || []).length, 1);
+  assert.match(nested, /data-board-open-thread="t1"/);
+});
+
+test("3D 面板气泡思考态展示实时进度与停止按钮，NDJSON 支持心跳与报错透传", async () => {
+  const popHtml = renderSpriteAssistantHtml({
+    open: true,
+    busy: true,
+    thinkingLabel: "翻了相关工位 4 条",
+    messages: [{ id: "u1", role: "user", text: "今天哪个会话完工了" }],
+  }, { is3dMode: true });
+  assert.match(popHtml, /class="sprite-fs-thinking is-popover"/);
+  assert.match(popHtml, /翻了相关工位 4 条/);
+  assert.match(popHtml, /data-sprite-action="abort-ask"/);
+
+  const fsHtml = renderSpriteFullscreenHtml({ busy: true, thinkingLabel: "正在思考" });
+  assert.match(fsHtml, /data-sprite-action="abort-ask"/);
+
+  // NDJSON ping & error handling + external abort
+  const pingAndAnswer = [
+    JSON.stringify({ type: "ping", ts: 1 }),
+    JSON.stringify({ type: "trace", step: "resolve", label: "整合全园状态", count: 1 }),
+    JSON.stringify({ type: "answer", text: "搞定", links: [] }),
+  ].join("\n");
+  const traces = [];
+  const res = await askSpriteAssistant({ text: "测试" }, (tr) => traces.push(tr), {
+    demo: false,
+    fetchImpl: async () => new Response(pingAndAnswer, { headers: { "content-type": "application/x-ndjson" } }),
+  });
+  assert.equal(res.text, "搞定");
+  assert.equal(traces.length, 1);
+
+  await assert.rejects(
+    askSpriteAssistant({ text: "测试" }, () => {}, {
+      demo: false,
+      fetchImpl: async () => new Response(`${JSON.stringify({ type: "error", message: "模型响应超时" })}\n`, {
+        headers: { "content-type": "application/x-ndjson" },
+      }),
+    }),
+    /模型响应超时/,
+  );
+
+  const ac = new AbortController();
+  ac.abort();
+  await assert.rejects(
+    askSpriteAssistant({ text: "测试" }, () => {}, {
+      demo: false,
+      signal: ac.signal,
+      fetchImpl: async (_url, opts) => {
+        if (opts.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        return Response.json({});
+      },
+    }),
+    (err) => Boolean(err?.aborted || err?.name === "AbortError"),
+  );
+});
+
+test("sprite-controller/app imports all used module exports and shields phone calls from errors/overview spam", () => {
+  for (const fileRel of ["../public/app.js", "../public/sprite-controller.js"]) {
+    const src = fs.readFileSync(new URL(fileRel, import.meta.url), "utf8");
+    for (const modName of ["sprite-assistant.js", "voice-copilot.js", "sprite-controller.js"]) {
+      const importRe = new RegExp(`import\\s*\\{([^}]+)\\}\\s*from\\s*"\\./${modName.replace(".", "\\.")}(?:\\?[^"]*)?"`);
+      const impMatch = src.match(importRe);
+      if (!impMatch) continue;
+      const modSrc = fs.readFileSync(new URL(`../public/${modName}`, import.meta.url), "utf8");
+      const imported = new Set(
+        impMatch[1].split(",").map((s) => s.trim().split(/\s+as\s+/).pop()).filter(Boolean),
+      );
+      const exported = [...modSrc.matchAll(/export\s+(?:async\s+)?(?:function|const|let|var|class)\s+(\w+)/g)].map((m) => m[1]);
+      for (const sym of exported) {
+        if (imported.has(sym)) continue;
+        const localDecl = new RegExp(`(?:function|const|let|var|class)\\s+${sym}\\b`).test(src);
+        if (localDecl) continue;
+        const refRe = new RegExp(`(?<![.\\w$])${sym}(?!\\s*:)\\b`);
+        assert.equal(refRe.test(src), false, `${fileRel}: ${modName} export "${sym}" is referenced without being imported`);
+      }
+    }
+  }
+  const ctrlJs = fs.readFileSync(new URL("../public/sprite-controller.js", import.meta.url), "utf8");
+  const errCatchIdx = ctrlJs.indexOf("语音通话请求失败：${formatActionError(error)}");
+  assert.ok(errCatchIdx !== -1);
+  assert.match(ctrlJs.slice(errCatchIdx, errCatchIdx + 160), /skipAutoSpeak:\s*true/);
+  assert.match(ctrlJs, /onOverviewScreen\s*&&\s*!state\.sprite\.phoneCallActive\s*&&\s*events\.length\s*>\s*0/);
 });

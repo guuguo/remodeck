@@ -7,7 +7,8 @@ import { escapeHtml, formatMessageTimeMeta, renderMessageCopyButton, renderTurnH
 const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
 const clipboardHelper = source.match(/async function copyTextToClipboard\(text\) \{[\s\S]*?\n\}/)?.[0];
 const clickBinding = source.match(/\$\("messagesViewport"\)\?\.addEventListener\("click", async \(e\) => \{[\s\S]*?\n  \}\);/)?.[0];
-assert.ok(clipboardHelper && clickBinding);
+const copyClickHandler = source.match(/const handleCopyButtonClick = async \(e\) => \{[\s\S]*?\n  \};/)?.[0];
+assert.ok(clipboardHelper && clickBinding && copyClickHandler);
 
 test("user and agent messages expose copyable Markdown without hidden goal markers or HTML injection", () => {
   const text = '**原文**\n\n```js\nconsole.log("<tag> & 文本");\n```';
@@ -35,9 +36,12 @@ test("message click copies only its source and restores feedback after repeated 
     classList: { add: (v) => classes.add(v), remove: (v) => classes.delete(v) },
   };
   let listener;
-  vm.runInNewContext(`${clipboardHelper}\n${clickBinding}`, {
+  vm.runInNewContext(`${clipboardHelper}\n${copyClickHandler}\n${clickBinding}`, {
+    Element: class Element { static [Symbol.hasInstance](v) { return Boolean(v && typeof v.closest === "function"); } },
     navigator: { clipboard: { writeText: async (value) => writes.push(value) } },
     $: () => ({ addEventListener: (_, handler) => { listener = handler; } }),
+    handleMermaidInteraction: () => false,
+    showToastBanner: () => {},
     setTimeout: (handler) => { const id = Symbol(); timers.set(id, handler); return id; },
     clearTimeout: (id) => timers.delete(id),
   });

@@ -3,8 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="ac-ui-version" content="20261125sa4" />
-  <title>Agent Control · 多智能体远程控制台</title>
+  <meta name="ac-ui-version" content="20261126remotedeck4" />
+  <title>RemoteDeck · 多智能体远程控制台</title>
+  <link rel="icon" href="./favicon.ico" sizes="any" />
+  <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+  <link rel="apple-touch-icon" href="./icon-192.png" />
+  <link rel="manifest" href="./manifest.webmanifest" />
   <script>
     (function () {
       try {
@@ -18,10 +22,10 @@
       } catch {}
     })();
   </script>
-  <link rel="stylesheet" href="./app.css?v=20261125sa4" />
-  <link rel="stylesheet" href="./project-workspace.css?v=20261125sa4" />
-  <link rel="stylesheet" href="./tycoon-assistant.css?v=20261125sa4" />
-  <link rel="stylesheet" href="./sprite-assistant.css?v=20261125sa4" />
+  <link rel="stylesheet" href="./app.css?v=20261126remotedeck4" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261126remotedeck4" />
+  <link rel="stylesheet" href="./tycoon-assistant.css?v=20261126remotedeck4" />
+  <link rel="stylesheet" href="./sprite-assistant.css?v=20261126remotedeck4" />
 </head>
 <body>
   <div id="appShell" class="app-shell">
@@ -38,7 +42,7 @@
             aria-label="切换日间与深色模式"
           >
             <span class="brand-dot" id="sseStatusDot" title="实时连接状态"></span>
-            <strong>Agent Control</strong>
+            <strong>RemoteDeck</strong>
             <span id="themeToggleIcon" class="brand-theme-icon" data-icon="monitor" data-icon-size="12" aria-hidden="true"></span>
           </button>
           <div class="brand-row-meta">
@@ -56,6 +60,11 @@
         </div>
         <div class="sidebar-actions">
           <button type="button" id="newThreadBtn" class="btn-primary btn-sm sidebar-new-btn">+ 新建会话</button>
+          <button type="button" id="sidebarTasksBtn" class="btn-secondary btn-xs sidebar-view-btn" title="树状任务：查看父子任务、规划锚点与多会话联动">
+            <span class="btn-icon-glyph" data-icon="layers" data-icon-size="11" aria-hidden="true"></span>
+            <span>任务</span>
+            <span id="tasksCountBadge" class="menu-update-badge" hidden>0</span>
+          </button>
           <button type="button" id="boardToggleBtn" class="btn-secondary btn-xs sidebar-view-btn" title="项目面板：查看所有项目会话" aria-pressed="true">
             <span id="boardToggleIcon" class="btn-icon-glyph" data-icon="board" data-icon-size="11" aria-hidden="true"></span>
             <span id="boardToggleLabel">面板</span>
@@ -160,9 +169,10 @@
             <span id="chatTtsToggleIcon" class="btn-icon-glyph" data-icon="speaker-off" data-icon-size="14" aria-hidden="true"></span>
             <span id="chatTtsToggleLabel" class="chat-tts-label">朗读</span>
           </button>
-          <button type="button" id="voiceModeBtn" class="btn-secondary btn-sm voice-launch-btn topbar-icon-action" title="打开梦工厂小精灵助手（支持派单、汇报、归档与语音）">
+          <button type="button" id="voiceModeBtn" class="btn-secondary btn-sm voice-launch-btn topbar-icon-action" title="打开小精灵 AI 助手（全屏对话 / 语音电话）">
             <span class="btn-icon-glyph" data-icon="mic" data-icon-size="14" aria-hidden="true"></span>
-            <span class="btn-label-desktop">助手</span>
+            <span class="btn-label-desktop">小精灵</span>
+            <span id="voiceLiveCallBadge" class="voice-live-call-badge" hidden></span>
             <span id="voiceAttentionDot" class="btn-attention-dot" hidden aria-hidden="true"></span>
           </button>
           <button type="button" id="interruptBtn" class="btn-danger btn-sm topbar-icon-action" hidden title="中断当前执行">
@@ -184,7 +194,14 @@
               </div>
               <button type="button" id="goalToggleBtn" class="btn-secondary btn-sm" hidden>开启 Goal</button>
               <button type="button" id="renameThreadBtn" class="btn-secondary btn-sm" hidden>重命名</button>
-              <button type="button" id="pinTicketBtn" class="btn-secondary btn-sm" hidden title="把这个会话钉成工单：写下目标和验收标准，小精灵会盯到验收为止">钉成工单</button>
+              <button type="button" id="pinTicketBtn" class="btn-secondary btn-sm" hidden title="把这个会话钉成任务：记录目标和验收标准，支持父子任务与多会话协作">钉成任务</button>
+              <button type="button" id="newSiblingThreadBtn" class="btn-secondary btn-sm" hidden title="保持当前会话继续运行，新开一个共享同任务的并行会话">+ 关联新会话</button>
+              <button type="button" id="newChildTaskThreadBtn" class="btn-secondary btn-sm" hidden title="在当前任务下拆分一个子任务并打开新会话">+ 拆分并开子任务</button>
+              <button type="button" id="linkExistingTaskBtn" class="btn-secondary btn-sm" hidden title="将当前会话挂入已有任务节点">加入已有任务</button>
+              <button type="button" id="openTasksModalBtn" class="btn-secondary btn-sm topbar-update-menu-btn" title="查看所有树状任务、规划锚点与过程时间线">
+                <span>任务管理</span>
+                <span id="topbarMenuTasksBadge" class="menu-update-badge" hidden>0</span>
+              </button>
               <button type="button" id="toggleThreadImagesBtn" class="btn-secondary btn-sm" hidden>加载本会话预览图</button>
               <button type="button" id="archiveThreadBtn" class="btn-secondary btn-sm" hidden>归档</button>
               <button type="button" id="refreshThreadBtn" class="btn-secondary btn-sm" title="刷新当前视图">刷新</button>
@@ -341,6 +358,7 @@
           </div>
         </div>
       </footer>
+      <div id="spriteFullscreenMount" class="sprite-fullscreen-mount" hidden></div>
     </main>
   </div>
 
@@ -817,6 +835,37 @@
                   <small>每小时 OAuth 令牌刷新间隙触发 401 中断时，延迟 2.5 秒自动补发一次「继续」（单轮最多 1 次）</small>
                 </span>
               </label>
+              <label class="update-toggle-row">
+                <input id="sharedMemoryToggle" type="checkbox" checked />
+                <span class="update-toggle-copy">
+                  <strong>启用内置共享记忆与任务投影</strong>
+                  <small>自动注入项目记忆指针，并将树状任务单向投影到记忆库（默认使用数据目录下的 memory 文件夹）</small>
+                </span>
+              </label>
+            </section>
+            <section class="tunnel-card update-settings-card memory-skill-settings-card">
+              <div class="tunnel-card-head">
+                <strong class="tunnel-card-title">共享记忆库目录与三端技能同步</strong>
+              </div>
+              <label class="field">
+                <span>自定义记忆库目录（支持 Obsidian Vault，留空则使用内置默认）</span>
+                <div class="memory-vault-row">
+                  <input id="memoryVaultPathInput" type="text" placeholder="留空使用内置默认记忆目录" />
+                  <button type="button" id="saveMemoryConfigBtn" class="btn-secondary btn-xs">保存路径</button>
+                  <button type="button" id="resetMemoryVaultBtn" class="btn-secondary btn-xs">恢复默认</button>
+                </div>
+                <small id="memoryVaultEffectiveHint" class="task-muted"></small>
+              </label>
+              <div class="skill-sync-box">
+                <div class="skill-sync-head">
+                  <span>内置 <code>remodeck-memory</code> 技能（Claude / Codex / Antigravity）</span>
+                  <div class="skill-sync-actions">
+                    <button type="button" id="installSkillSyncBtn" class="btn-primary btn-xs">一键同步技能</button>
+                    <button type="button" id="uninstallSkillSyncBtn" class="btn-secondary btn-xs">卸载托管技能</button>
+                  </div>
+                </div>
+                <div id="skillSyncTargets" class="skill-sync-targets"></div>
+              </div>
             </section>
           </div>
 
@@ -834,9 +883,48 @@
       <div class="modal-foot update-modal-foot">
         <button type="button" id="restartServiceBtn" class="btn-secondary btn-sm">重启服务</button>
         <div class="update-foot-spacer"></div>
-        <button type="button" id="applyDesktopUpdateBtn" class="btn-secondary btn-sm" hidden>更新桌面 App</button>
+        <div id="desktopUpdateMenuWrap" class="desktop-update-menu-wrap" hidden>
+          <button type="button" id="applyDesktopUpdateBtn" class="btn-secondary btn-sm" aria-haspopup="menu" aria-expanded="false" hidden>更新桌面 App</button>
+          <div id="desktopUpdateMenu" class="desktop-update-menu" role="menu" hidden>
+            <button type="button" id="desktopUpdateOpenBtn" class="desktop-update-menu-item" role="menuitem" data-desktop-open="1">
+              <strong id="desktopUpdateOpenLabel">重编并打开桌面 App</strong>
+              <small>完成后自动打开窗口（适合本机操作）</small>
+            </button>
+            <button type="button" id="desktopUpdateSilentBtn" class="desktop-update-menu-item" role="menuitem" data-desktop-open="0">
+              <strong id="desktopUpdateSilentLabel">仅重编，不自动打开</strong>
+              <small>只更新安装与快捷方式（适合远程操作）</small>
+            </button>
+          </div>
+        </div>
         <button type="button" id="checkUpdateBtn" class="btn-secondary btn-sm">立即检查</button>
         <button type="button" id="applyUpdateBtn" class="btn-primary btn-sm" disabled>一键更新并重启</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="tasksModal" class="modal-dialog tasks-modal" aria-label="树状任务管理">
+    <div class="modal-card tasks-modal-card">
+      <div class="modal-head">
+        <h3>树状任务与跨会话协同</h3>
+        <button type="button" class="icon-btn" data-close-modal="tasksModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+      </div>
+      <div class="tasks-modal-toolbar">
+        <div class="tasks-status-tabs" role="tablist">
+          <button type="button" class="tasks-status-tab is-active" data-tasks-status="open">进行中</button>
+          <button type="button" class="tasks-status-tab" data-tasks-status="done">已完成</button>
+          <button type="button" class="tasks-status-tab" data-tasks-status="all">全部</button>
+        </div>
+        <input id="tasksSearchInput" type="search" class="tasks-search-input" placeholder="筛选任务标题、目标或 ID…" autocomplete="off" />
+        <button type="button" id="newRootTaskBtn" class="btn-primary btn-xs">+ 新建根任务</button>
+      </div>
+      <form id="newRootTaskForm" class="new-root-task-form" hidden>
+        <input id="newRootTaskTitleInput" type="text" maxlength="60" placeholder="输入新任务标题…" required />
+        <input id="newRootTaskGoalInput" type="text" maxlength="200" placeholder="一句话目标（可选）" />
+        <button type="submit" class="btn-primary btn-xs">创建</button>
+        <button type="button" id="cancelNewRootTaskBtn" class="btn-secondary btn-xs">取消</button>
+      </form>
+      <div id="tasksModalBody" class="modal-body tasks-modal-body">
+        <div class="empty-state">正在加载任务…</div>
       </div>
     </div>
   </dialog>
@@ -856,7 +944,7 @@
           <label class="update-toggle-row">
             <input id="automationsGlobalToggle" type="checkbox" checked />
             <span class="update-toggle-copy">
-              <strong>原 App 未开启时，由 Agent Control 到点自动唤起执行</strong>
+              <strong>原 App 未开启时，由 RemoteDeck 到点自动唤起执行</strong>
               <small>每 30 秒检查一次 Codex / Claude / 自定义计划任务；若原客户端已运行过则自动跳过，绝不重复触发或篡改原库。</small>
             </span>
           </label>
@@ -864,8 +952,9 @@
         </section>
 
         <details id="automationCreateDetails" class="tunnel-card">
-          <summary class="automation-create-summary">+ 新建通用定时任务（支持 Codex / Claude / Antigravity / Grok）</summary>
+          <summary id="automationCreateSummary" class="automation-create-summary">+ 新建通用定时任务（支持 Codex / Claude / Antigravity / Grok）</summary>
           <form id="automationCreateForm" class="automation-create-form">
+            <input id="autoTaskIdInput" type="hidden" value="" />
             <label class="field">
               <span>任务名称</span>
               <input id="autoNameInput" type="text" placeholder="例如：每天早报 / 自动巡检日志" />
@@ -881,6 +970,26 @@
                 </select>
               </label>
               <label class="field">
+                <span>实例配置</span>
+                <select id="autoProfileSelect"></select>
+              </label>
+            </div>
+            <div class="automation-form-row">
+              <label class="field">
+                <span>模型</span>
+                <select id="autoModelSelect">
+                  <option value="">跟随默认模型</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>推理强度</span>
+                <select id="autoEffortSelect">
+                  <option value="">默认强度</option>
+                </select>
+              </label>
+            </div>
+            <div class="automation-form-row">
+              <label class="field">
                 <span>执行周期</span>
                 <select id="autoScheduleSelect">
                   <option value="FREQ=HOURLY;INTERVAL=1;BYMINUTE=0">每小时整点</option>
@@ -888,19 +997,25 @@
                   <option value="FREQ=DAILY;BYHOUR=9;BYMINUTE=0" selected>每天 09:00</option>
                   <option value="FREQ=DAILY;BYHOUR=21;BYMINUTE=0">每天 21:00</option>
                   <option value="FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=10;BYMINUTE=0">每周一/三/五 10:00</option>
+                  <option value="__custom__">自定义 RRULE</option>
                 </select>
               </label>
+              <label class="field">
+                <span>工作目录</span>
+                <input id="autoCwdInput" type="text" placeholder="留空使用用户主目录" />
+              </label>
             </div>
-            <label class="field">
-              <span>工作目录</span>
-              <input id="autoCwdInput" type="text" placeholder="留空使用用户主目录" />
+            <label id="autoScheduleCustomField" class="field" hidden>
+              <span>自定义 RRULE 规则</span>
+              <input id="autoScheduleCustomInput" type="text" placeholder="例如：FREQ=DAILY;BYHOUR=21;BYMINUTE=15" />
             </label>
             <label class="field">
               <span>执行指令</span>
               <textarea id="autoPromptInput" rows="3" placeholder="到点时自动发送给智能体的指令…" required></textarea>
             </label>
             <div class="automation-form-actions">
-              <button type="submit" class="btn-primary btn-sm">保存并启用托管</button>
+              <button type="button" id="autoCancelEditBtn" class="btn-secondary btn-sm" hidden>取消编辑</button>
+              <button type="submit" id="autoSubmitBtn" class="btn-primary btn-sm">保存并启用托管</button>
             </div>
           </form>
         </details>
@@ -922,7 +1037,7 @@
         <button type="button" id="closeInstanceManagerBtn" class="icon-btn" data-close-modal="instanceManagerModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
       </div>
       <div class="modal-body instance-manager-modal-body">
-        <p class="instance-mgr-intro">每个实例使用独立隔离目录保存登录态；首次登录授权后即可关闭外部窗口，平时由 Agent Control 在后台直接接管控制。</p>
+        <p class="instance-mgr-intro">每个实例使用独立隔离目录保存登录态；首次登录授权后即可关闭外部窗口，平时由 RemoteDeck 在后台直接接管控制。</p>
         <div id="instProviderTabs" class="inst-provider-tabs" role="tablist" aria-label="选择智能体">
           <button type="button" class="inst-provider-tab is-active" data-inst-provider="codex">Codex</button>
           <button type="button" class="inst-provider-tab" data-inst-provider="claude">Claude Code</button>
@@ -977,7 +1092,7 @@
     <div id="newThreadCwdList" class="cwd-picker-list" role="listbox" aria-label="工作目录列表"></div>
   </div>
 
-  <script type="module" src="./i18n.js?v=20261125sa4"></script>
-  <script type="module" src="./app.js?v=20261125sa4"></script>
+  <script type="module" src="./i18n.js?v=20261126remotedeck4"></script>
+  <script type="module" src="./app.js?v=20261126remotedeck4"></script>
 </body>
 </html>

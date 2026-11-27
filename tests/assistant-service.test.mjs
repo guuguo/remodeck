@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
-import { AssistantLLM, TICKET_DRAFT_PROMPT } from "../src/assistant-llm.mjs";
-import { computeTopicSignals } from "../src/assistant-service.mjs";
+import { AssistantLLM, extractCompleteJsonStringField, TICKET_DRAFT_PROMPT } from "../src/assistant-llm.mjs";
+import { computeTopicSignals, resolveActionRisk, shouldSearchParkSources } from "../src/assistant-service.mjs";
 import { cardSubject, harvestEvidenceForThread, isCardHandled } from "../src/assistant-signals.mjs";
 import { inferPipelineStage } from "../src/mission-overview-service.mjs";
 import { assistantFixture, assistantThread, ASSISTANT_NOW } from "./helpers/assistant-fixtures.mjs";
@@ -400,7 +400,7 @@ test("钉成工单：模型起草目标与验收标准，幂等；验收标准�
   await f.assistant.cardAction(card.id, { type: "continue", message: "接着做" });
   assert.equal(f.sent.at(-1).threadId, thread.id);
   assert.equal(f.sent.at(-1).goalMode, true);
-  assert.match(f.sent.at(-1).text, /^接着做\n工单目标：把账单按分类整理出来\n验收标准：\n1\. 能导出 CSV/);
+  assert.match(f.sent.at(-1).text, /^接着做\n任务目标：把账单按分类整理出来\n验收标准：\n1\. 能导出 CSV/);
   await f.assistant.cardAction(card.id, { type: "done" });
   assert.equal((await f.assistant.listTickets({ status: "done" })).tickets[0].id, ticket.id);
   assert.equal((await f.assistant.listTickets()).tickets.length, 0);
@@ -452,4 +452,449 @@ test("连续对话：之前几轮对话随证据包交给模型，用来理解�
   assert.equal(answer.usedModel, true);
   assert.deepEqual(seen.conversation.map((h) => h.role), ["user", "assistant"]);
   assert.equal(seen.conversation[0].text, "示例商城做到哪了");
+});
+
+test("全能对话：无产线命中也能自由聊天，不强制 [S1] 与 clarify 拦截", async (t) => {
+  const f = await fixture(t);
+  let seenPrompt = null;
+  f.assistant.llm = new AssistantLLM({ dataDir: f.dataDir, config: { enabled: true }, now: () => ASSISTANT_NOW, completeImpl: async (input) => {
+    seenPrompt = JSON.parse(input.prompt);
+    return JSON.stringify({
+      reply: "可以叫「极简清单」，先从每日三件事切入最轻巧。",
+      spokenReply: "我觉得可以叫极简清单，先做每日三件事最轻巧。",
+      mood: "good",
+      intent: "chat",
+      action: {},
+    });
+  } });
+  const answer = await f.assistant.ask({ text: "帮我想个新产品的名字和切入点", mode: "phone", sessionId: "s-chat" });
+  assert.equal(answer.kind, "answer");
+  assert.equal(answer.usedModel, true);
+  assert.match(answer.text, /极简清单/);
+  assert.doesNotMatch(answer.text, /\[S\d+\]|未经模型整理/);
+  assert.equal(answer.spokenReply, "我觉得可以叫极简清单，先做每日三件事最轻巧。");
+  assert.ok(seenPrompt.park?.topics?.length >= 4, "全园上下文应传给模型");
+  // Plain text replies from the model are never discarded either.
+  f.assistant.llm = new AssistantLLM({ dataDir: f.dataDir, config: { enabled: true }, now: () => ASSISTANT_NOW, completeImpl: async () => "今天先盯导出格式选择，很快就能收尾。" });
+  const plain = await f.assistant.ask({ text: "今天先干嘛好", sessionId: "s-plain" });
+  assert.equal(plain.usedModel, true);
+  assert.equal(plain.text, "今天先盯导出格式选择，很快就能收尾。");
+});
+
+test("分级动作执行：风险分级、服务端一次性提案/过期、续做自动排队、amend/cancel 流转", async (t) => {
+  const f = await fixture(t);
+  const responded = [];
+  const queued = [];
+  f.hub.allPendingRequests = () => [{ id: "req_1", threadId: f.threads[1].id, title: "允许运行测试", command: "npm test" }];
+  f.hub.respondToRequest = async (id, payload) => { responded.push({ id, ...payload }); };
+  f.hub.queueTurn = async (payload) => { queued.push(payload); return { ok: true }; };
+  f.hub.interrupt = async () => ({ ok: true });
+
+  assert.equal(resolveActionRisk("focus_topic"), "direct");
+  assert.equal(resolveActionRisk("continue_thread"), "toggle");
+  assert.equal(resolveActionRisk("approve_request", { decision: "decline" }), "toggle");
+  assert.equal(resolveActionRisk("approve_request", { decision: "accept" }), "confirm");
+  assert.equal(resolveActionRisk("dispatch"), "confirm");
+  assert.equal(resolveActionRisk("interrupt_thread"), "confirm");
+
+  let nextModelReply = null;
+  f.assistant.llm = new AssistantLLM({
+    dataDir: f.dataDir,
+    config: { enabled: true },
+    now: () => ASSISTANT_NOW,
+    completeImpl: async (input) => {
+      if (nextModelReply) return nextModelReply(JSON.parse(input.prompt));
+      const p = JSON.parse(input.prompt);
+      if (/不存在/.test(p.question)) {
+        return JSON.stringify({ spokenReply: "好的", reply: "好的", intent: "approve_request", action: { requestId: "fake_req", decision: "accept" } });
+      }
+      if (/继续/.test(p.question)) {
+        return JSON.stringify({ spokenReply: "让甲继续做。", reply: "让甲继续做。", intent: "continue_thread", action: { threadId: f.threads[0].id, message: "选择格式 A" } });
+      }
+      if (/队列/.test(p.question)) {
+        return JSON.stringify({ spokenReply: "已排进下一轮。", reply: "已排进下一轮。", intent: "continue_thread", action: { threadId: f.threads[1].id, message: "顺便跑个单测" } });
+      }
+      if (/拒绝/.test(p.question)) {
+        return JSON.stringify({ spokenReply: "拒绝该请求。", reply: "拒绝该请求。", intent: "approve_request", action: { requestId: "req_1", decision: "decline" } });
+      }
+      if (/中断/.test(p.question)) {
+        return JSON.stringify({ spokenReply: "准备中断。", reply: "准备中断。", intent: "interrupt_thread", action: { threadId: f.threads[1].id } });
+      }
+      return JSON.stringify({ spokenReply: "请确认批准这个请求。", reply: "请确认批准这个请求。", intent: "approve_request", action: { requestId: "req_1", decision: "accept" } });
+    },
+  });
+
+  // 1. Chat mode (autoExecute: false) returns a slim server-stored proposal without leaking payload.
+  const proposed = await f.assistant.ask({ text: "帮我批准允许运行测试", mode: "chat", autoExecute: false, sessionId: "s1" });
+  assert.equal(responded.length, 0);
+  assert.equal(proposed.proposal?.intent, "approve_request");
+  assert.equal(proposed.proposal?.risk, "confirm");
+  assert.equal(proposed.proposal?.payload, undefined);
+
+  // 2. High-risk actions (approve_request:accept, interrupt_thread) force confirmation even when autoExecute: true.
+  const forcedAccept = await f.assistant.ask({ text: "帮我批准允许运行测试", mode: "phone", autoExecute: true, sessionId: "s-phone-confirm" });
+  assert.equal(forcedAccept.executedAction, undefined);
+  assert.equal(forcedAccept.proposal?.risk, "confirm");
+  assert.equal(responded.length, 0);
+
+  const forcedInterrupt = await f.assistant.ask({ text: "帮我中断运行中工位", mode: "phone", autoExecute: true, sessionId: "s-phone-int" });
+  assert.equal(forcedInterrupt.executedAction, undefined);
+  assert.equal(forcedInterrupt.proposal?.intent, "interrupt_thread");
+  assert.equal(forcedInterrupt.proposal?.risk, "confirm");
+
+  // 3. One-time consumption & replay protection.
+  const confirmed = await f.assistant.executeProposedAction({ proposalId: forcedAccept.proposal.id });
+  assert.equal(confirmed.ok, true);
+  assert.deepEqual(responded, [{ id: "req_1", decision: "accept" }]);
+  await assert.rejects(
+    f.assistant.executeProposedAction({ proposalId: forcedAccept.proposal.id }),
+    /已过期或已执行/,
+  );
+
+  // 4. Proposal expiration (60s TTL) & cancelProposal.
+  const toExpire = await f.assistant.ask({ text: "帮我批准允许运行测试", mode: "chat", autoExecute: false, sessionId: "s-exp" });
+  f.setNow(ASSISTANT_NOW + 61_000);
+  assert.equal(f.assistant.getPendingProposal(toExpire.proposal.id), null);
+  await assert.rejects(f.assistant.executeProposedAction({ proposalId: toExpire.proposal.id }), /已过期或已执行/);
+  f.setNow(ASSISTANT_NOW);
+
+  // 5. Toggle-risk actions obey autoExecute: true (continue idle -> sendTurn; continue live -> queueTurn; decline -> immediate).
+  const direct = await f.assistant.ask({ text: "让示例商城继续选格式 A", mode: "phone", autoExecute: true, sessionId: "s2" });
+  assert.equal(direct.proposal, undefined);
+  assert.equal(direct.executedAction?.ok, true);
+  assert.equal(f.sent.at(-1)?.threadId, f.threads[0].id);
+  assert.match(f.sent.at(-1)?.text || "", /选择格式 A/);
+
+  const sentBeforeQueue = f.sent.length;
+  const queuedRes = await f.assistant.ask({ text: "给运行中工位队列加一句", mode: "phone", autoExecute: true, sessionId: "s2-queue" });
+  assert.equal(queuedRes.executedAction?.ok, true);
+  assert.equal(queuedRes.executedAction?.queued, true);
+  assert.equal(f.sent.length, sentBeforeQueue, "live 工位续做不得直接 sendTurn");
+  assert.equal(queued.at(-1)?.threadId, f.threads[1].id);
+  assert.match(queued.at(-1)?.text || "", /顺便跑个单测/);
+
+  const declineDirect = await f.assistant.ask({ text: "帮我拒绝请求", mode: "phone", autoExecute: true, sessionId: "s-dec" });
+  assert.equal(declineDirect.executedAction?.ok, true);
+  assert.deepEqual(responded.at(-1), { id: "req_1", decision: "decline" });
+
+  // 6. Model-driven proposalAction confirm / amend / cancel.
+  const baseProp = await f.assistant.ask({ text: "帮我批准允许运行测试", mode: "chat", autoExecute: false, sessionId: "s-act" });
+  nextModelReply = (p) => {
+    assert.equal(p.pendingProposal?.id, baseProp.proposal.id);
+    return JSON.stringify({
+      spokenReply: "好的，改一下，改为中断这个工位，确认吗？",
+      reply: "改为中断工位，请确认。",
+      intent: "interrupt_thread",
+      action: { threadId: f.threads[1].id },
+      proposalAction: "amend",
+    });
+  };
+  const amended = await f.assistant.ask({ text: "别批准了，直接中断它", mode: "phone", sessionId: "s-act", proposalId: baseProp.proposal.id });
+  assert.equal(f.assistant.getPendingProposal(baseProp.proposal.id), null);
+  assert.equal(amended.proposal?.intent, "interrupt_thread");
+  assert.notEqual(amended.proposal?.id, baseProp.proposal.id);
+
+  nextModelReply = () => JSON.stringify({ spokenReply: "好，我确认执行。", reply: "已批准。", intent: "chat", action: {}, proposalAction: "confirm" });
+  const modelConfirmed = await f.assistant.ask({ text: "就按刚改的执行吧", mode: "phone", sessionId: "s-act", proposalId: amended.proposal.id });
+  assert.equal(modelConfirmed.clearedProposal, true);
+  assert.equal(modelConfirmed.executedAction?.intent, "interrupt_thread");
+  assert.equal(modelConfirmed.executedAction?.ok, true);
+
+  nextModelReply = null;
+  // 7. Forged requestId never produces a proposal or runs.
+  const forged = await f.assistant.ask({ text: "批准一个不存在的请求", mode: "phone", autoExecute: true, sessionId: "s3" });
+  assert.equal(forged.proposal, undefined);
+  assert.equal(forged.executedAction, undefined);
+  await assert.rejects(f.assistant.executeProposedAction({ intent: "approve_request", requestId: "fake_req", decision: "accept" }), /不存在/);
+});
+
+test("精准跳转链接提取：回复点名具体会话（含无 refs 兜底与 refs 校验）不误取无关 sources[0]", async (t) => {
+  const f = await fixture(t);
+  f.threads.push(assistantThread("E", f.topics[3], 0.2, "已完成对账单导出格式排查与修复。", { title: "对账单导出格式排查" }));
+  f.assistant.llm = new AssistantLLM({
+    dataDir: f.dataDir,
+    config: { enabled: true },
+    now: () => ASSISTANT_NOW,
+    completeImpl: async (input) => {
+      const p = JSON.parse(input.prompt);
+      if (/验收员/.test(input.system)) return '{"delivered":false,"verified":false,"evidence":"","missing":""}';
+      if (/不填refs/.test(p.question)) {
+        return JSON.stringify({
+          reply: "在「记账小程序」产线下的 对账单导出格式排查 会话里已完成处理。",
+          spokenReply: "记账小程序里的对账单导出格式排查已经做完了。",
+          focusTopicId: "line-3",
+          mood: "good",
+          intent: "chat",
+          action: {},
+        });
+      }
+      return JSON.stringify({
+        reply: "请查看对账单导出格式排查会话。",
+        spokenReply: "请看对账单导出格式排查。",
+        focusTopicId: "line-3",
+        refs: ["codex:default:E", "codex:default:nonexistent", "line-3"],
+        mood: "report",
+        intent: "chat",
+        action: {},
+      });
+    },
+  });
+
+  const noRefs = await f.assistant.ask({ text: "今天干活的是哪个会话？不填refs" });
+  assert.equal(noRefs.links?.[0]?.kind, "thread");
+  assert.equal(noRefs.links?.[0]?.id, "codex:default:E");
+  assert.equal(noRefs.links?.[0]?.matchText, "对账单导出格式排查");
+  assert.ok(noRefs.links?.some((l) => l.kind === "topic" && l.id === "line-3"));
+  assert.equal(noRefs.actions.find((a) => a.type === "open_thread")?.payload?.threadId, "codex:default:E");
+
+  const withRefs = await f.assistant.ask({ text: "帮我看看今天哪个会话完工了", sessionId: "s-refs" });
+  assert.equal(withRefs.links.some((l) => l.id === "codex:default:nonexistent"), false, "伪造 ID 必须被过滤");
+  assert.equal(withRefs.links?.[0]?.id, "codex:default:E");
+});
+
+test("后台验收判定携带 background=true 隔离交互队列，外部 signal 可中止 ask()", async (t) => {
+  const f = await fixture(t);
+  const bgFlags = [];
+  f.assistant.llm = new AssistantLLM({
+    dataDir: f.dataDir,
+    config: { enabled: true },
+    now: () => ASSISTANT_NOW,
+    completeImpl: async (input) => {
+      bgFlags.push({ isJudge: /验收员/.test(input.system), background: input.background });
+      if (/验收员/.test(input.system)) return '{"delivered":true,"verified":true,"evidence":"测试全过","missing":""}';
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return JSON.stringify({ reply: "延迟回答", spokenReply: "延迟回答", intent: "chat", action: {} });
+    },
+  });
+  await f.overview.getOverview();
+  await waitFor(async () => bgFlags.some((x) => x.isJudge));
+  assert.equal(bgFlags.find((x) => x.isJudge)?.background, true);
+
+  const ac = new AbortController();
+  const askPromise = f.assistant.ask({ text: "现在园区什么情况", sessionId: "s-abort" }, { signal: ac.signal });
+  setTimeout(() => ac.abort(), 30);
+  await assert.rejects(askPromise, (err) => Boolean(err?.aborted || err?.name === "AbortError"));
+  assert.equal(bgFlags.find((x) => !x.isJudge)?.background, false);
+});
+
+test("语音派活：preview拆单(confirmOnly) -> 确认走approvedRoutes(不二次规划) -> 自动建Task树并异步补验收标准", async (t) => {
+  const f = await fixture(t);
+  const started = [];
+  const boundTasks = [];
+  const profiles = [
+    { provider: "codex", id: "personal", label: "Codex 自用", installed: true, health: { status: "healthy", alias: "AliasA" }, account: { signedIn: true, email: "alice@example.com" } },
+    { provider: "claude", id: "default", label: "Claude 默认", installed: true, health: { status: "healthy", alias: "AliasB" }, account: { signedIn: true, email: "bob@example.com" } },
+    { provider: "antigravity", id: "cli", label: "Antigravity CLI", installed: true, health: { status: "unavailable" }, account: { signedIn: true } },
+    { provider: "antigravity", id: "desktop", label: "Antigravity", installed: true, health: { status: "healthy" }, account: { signedIn: true } },
+    { provider: "grok", id: "default", label: "Grok 默认", installed: true, health: {}, account: { signedIn: false } },
+  ];
+  f.hub.listProvidersAndProfiles = async () => ({
+    profiles,
+    defaultProvider: "antigravity",
+    defaultProfileId: "desktop",
+  });
+  f.hub.startThread = async (payload) => {
+    started.push(payload);
+    return { thread: { id: `${payload.provider}:${payload.profileId}:new-${started.length}`, title: payload.text } };
+  };
+  f.hub.setThreadTask = async (threadId, taskId) => {
+    boundTasks.push({ threadId, taskId });
+  };
+
+  let seenParkAgents = null;
+  let nextModelAgentKey = "";
+  const draftCalls = [];
+  f.assistant.llm = new AssistantLLM({
+    dataDir: f.dataDir,
+    config: { enabled: true },
+    now: () => ASSISTANT_NOW,
+    completeImpl: async (input) => {
+      if (input.system === TICKET_DRAFT_PROMPT) {
+        draftCalls.push({ background: input.background, prompt: JSON.parse(input.prompt) });
+        return JSON.stringify({ title: "派工子单", goal: "完成验证", criteria: ["测试通过", "日志可查"] });
+      }
+      const p = JSON.parse(input.prompt);
+      if (/验收员/.test(input.system)) return '{"delivered":false,"verified":false,"evidence":"","missing":""}';
+      seenParkAgents = p.park?.agents || [];
+      return JSON.stringify({
+        spokenReply: "好，已经帮你派单了。",
+        reply: "好，我来帮你派单处理。",
+        focusTopicId: "line-0",
+        mood: "good",
+        intent: "dispatch",
+        action: {
+          instruction: "排查语音播放链路",
+          topicId: "line-0",
+          agentKey: nextModelAgentKey,
+          mode: "new",
+        },
+      });
+    },
+  });
+
+  // Phone mode (even with autoExecute: true) enriches dispatch preview, speaks confirm question, and builds Task on confirm.
+  for (const [idx, caseSpec] of [
+    { inputAgentKey: "codex", expectedProvider: "codex", expectedProfile: "personal" },
+    { inputAgentKey: "claude", expectedProvider: "claude", expectedProfile: "default" },
+    { inputAgentKey: "antigravity", expectedProvider: "antigravity", expectedProfile: "desktop" },
+    { inputAgentKey: "antigravity:default", expectedProvider: "antigravity", expectedProfile: "desktop" },
+    { inputAgentKey: "AliasA", expectedProvider: "codex", expectedProfile: "personal" },
+    { inputAgentKey: "默认", expectedProvider: null, expectedProfile: null },
+  ].entries()) {
+    nextModelAgentKey = caseSpec.inputAgentKey;
+    const beforeStarted = started.length;
+    const res = await f.assistant.ask({
+      text: `帮我派单测试-${idx}`,
+      mode: "phone",
+      autoExecute: true,
+      sessionId: `sp-${idx}`,
+    });
+    if (idx === 0) {
+      assert.equal(seenParkAgents.some((a) => a.agentKey === "codex:personal"), true);
+      assert.equal(seenParkAgents.some((a) => a.agentKey === "antigravity:desktop"), true);
+      assert.equal(seenParkAgents.some((a) => a.agentKey === "antigravity:cli"), false, "unavailable 账号不进候选提示");
+      assert.equal(seenParkAgents.some((a) => a.agentKey === "grok:default"), false, "未登录账号不进候选提示");
+    }
+    assert.equal(started.length, beforeStarted, "ask() 仅预览拆单，确认前绝不启动工位");
+    assert.equal(res.proposal?.intent, "dispatch");
+    assert.equal(res.proposal?.risk, "confirm");
+    assert.equal(res.proposal?.payload, undefined);
+    assert.match(res.spokenReply, /确认发吗/);
+    assert.doesNotMatch(res.text, /不可用|未登录/);
+
+    const execRes = await f.assistant.executeProposedAction({ proposalId: res.proposal.id });
+    assert.equal(execRes.ok, true, `case ${caseSpec.inputAgentKey} 应成功: ${execRes.error}`);
+    assert.equal(execRes.taskIds?.length, 1);
+    const created = started.at(-1);
+    if (caseSpec.expectedProvider) {
+      assert.equal(created.provider, caseSpec.expectedProvider);
+      assert.equal(created.profileId, caseSpec.expectedProfile);
+    }
+  }
+
+  // Multi-route split dispatch: confirmOnly:true preview -> confirm executes approvedRoutes without re-planning & creates parent+child tasks.
+  const dispatchCalls = [];
+  const origDispatch = f.assistant.dispatchImpl;
+  f.assistant.dispatchImpl = async (opts) => {
+    dispatchCalls.push(opts);
+    if (opts.confirmOnly) {
+      return {
+        ok: true,
+        confirmOnly: true,
+        aiPlanned: true,
+        routes: [
+          { topicId: "line-0", topicName: "示例商城", agentKey: "codex:personal", agentLabel: "Codex 自用", segmentText: "修复后端接口", action: "spawn_parallel" },
+          { topicId: "line-1", topicName: "绘本工坊", agentKey: "claude:default", agentLabel: "Claude 默认", segmentText: "补全前端展示", action: "spawn_parallel" },
+        ],
+      };
+    }
+    return {
+      ok: true,
+      confirmOnly: false,
+      dispatched: opts.approvedRoutes.map((r, i) => ({
+        ...r,
+        cwd: `/Users/alice/projects/demo-${i}`,
+        threadId: `mock:default:split-${i + 1}`,
+      })),
+    };
+  };
+
+  nextModelAgentKey = "auto";
+  const splitAsk = await f.assistant.ask({ text: "把商城接口和绘本前端一起拆单派下去", mode: "phone", sessionId: "sp-split" });
+  assert.equal(dispatchCalls[0].confirmOnly, true);
+  assert.equal(dispatchCalls[0].useAiPlanner, true);
+  assert.equal(splitAsk.proposal?.routes?.length, 2);
+  assert.match(splitAsk.spokenReply, /准备拆 2 路.*确认发吗/);
+
+  const splitExec = await f.assistant.executeProposedAction({ proposalId: splitAsk.proposal.id });
+  assert.equal(dispatchCalls[1].confirmOnly, false);
+  assert.equal(dispatchCalls[1].useAiPlanner, false, "执行阶段不得重复 AI 规划");
+  assert.equal(dispatchCalls[1].approvedRoutes?.length, 2);
+  assert.equal(splitExec.taskIds?.length, 3, "多路派工应建 1 个父任务 + 2 个子任务");
+
+  await waitFor(async () => {
+    const tasks = await f.assistant.taskStore.list({ status: "all" });
+    const children = tasks.filter((tk) => tk.parentId === splitExec.taskIds[0]);
+    return children.length === 2 && children.every((tk) => tk.criteria.length > 0);
+  });
+  assert.equal(draftCalls.every((c) => c.background === true), true);
+  const allTasks = await f.assistant.taskStore.list({ status: "all" });
+  const splitChildren = allTasks.filter((tk) => tk.parentId === splitExec.taskIds[0]);
+  assert.equal(splitChildren.length, 2);
+  assert.deepEqual(splitChildren[0].criteria, ["测试通过", "日志可查"]);
+  assert.ok(boundTasks.some((b) => b.threadId === "mock:default:split-1"));
+  f.assistant.dispatchImpl = origDispatch;
+});
+
+test("结果回流队列：handleHubEvent 仅收录受追踪工位并去重，pop/list/ack 顺序消费", async (t) => {
+  const f = await fixture(t);
+  const tk = await f.assistant.taskStore.create({
+    title: "支付联调",
+    goal: "修复回调",
+    topicId: "line-0",
+    threadIds: [f.threads[0].id],
+  });
+
+  // Unrelated / interrupted / internal threads are ignored.
+  assert.equal(await f.assistant.handleHubEvent("turn_completed", { threadId: "codex:default:unrelated", status: "completed" }), null);
+  assert.equal(await f.assistant.handleHubEvent("turn_completed", { threadId: f.threads[0].id, status: "interrupted" }), null);
+  assert.equal(await f.assistant.handleHubEvent("turn_completed", { threadId: f.threads[0].id, internal: true, status: "completed" }), null);
+
+  // Tracked open ticket thread enqueues once per dedupeKey.
+  const n1 = await f.assistant.handleHubEvent("turn_completed", { threadId: f.threads[0].id, turnId: "turn-1", status: "completed" });
+  assert.equal(n1?.kind, "completed");
+  assert.match(n1?.text || "", /支付联调.*已经跑完了/);
+  assert.equal(await f.assistant.handleHubEvent("turn_completed", { threadId: f.threads[0].id, turnId: "turn-1", status: "completed" }), null);
+
+  const n2 = await f.assistant.handleHubEvent("provider_event", { method: "turn/completed", threadId: f.threads[0].id, params: { turn: { id: "turn-2", status: "failed" } } });
+  assert.equal(n2?.kind, "failed");
+  assert.match(n2?.text || "", /执行出错/);
+
+  const pop1 = await f.assistant.popPendingVoiceNotices({ limit: 1 });
+  assert.equal(pop1.notices.length, 1);
+  assert.equal(pop1.notices[0].id, n1.id);
+  assert.equal(pop1.remainingCount, 1);
+
+  const pop2 = await f.assistant.popPendingVoiceNotices({ limit: 2 });
+  assert.equal(pop2.notices.length, 1);
+  assert.equal(pop2.notices[0].id, n2.id);
+  assert.equal(pop2.remainingCount, 0);
+
+  const unread = await f.assistant.listUnreadNotices();
+  assert.equal(unread.unreadCount, 2);
+  await f.assistant.ackNotices([n1.id]);
+  assert.equal((await f.assistant.listUnreadNotices()).unreadCount, 1);
+  assert.equal(tk.id.startsWith("tk_"), true);
+});
+
+test("流式 JSON 首字段解析 extractCompleteJsonStringField 与短句跳过检索 shouldSearchParkSources", async (t) => {
+  assert.equal(extractCompleteJsonStringField('{"spokenReply":"未闭合'), null);
+  assert.equal(extractCompleteJsonStringField('{"spokenReply":"先说\\"你好\\"\\n第二句'), null);
+  assert.equal(extractCompleteJsonStringField('{"spokenReply":"abc\\'), null);
+  assert.equal(
+    extractCompleteJsonStringField('{"spokenReply":"先说\\"你好\\"\\n第二句","reply":"屏幕"}', "spokenReply"),
+    '先说"你好"\n第二句',
+  );
+  assert.equal(extractCompleteJsonStringField('{"reply":"先写这个"}', "spokenReply"), null);
+
+  assert.equal(shouldSearchParkSources("你好"), false);
+  assert.equal(shouldSearchParkSources("好的！"), false);
+  assert.equal(shouldSearchParkSources("嗯对"), false);
+  assert.equal(shouldSearchParkSources("ok"), false);
+  assert.equal(shouldSearchParkSources("帮我看看进度"), true);
+  assert.equal(shouldSearchParkSources("你好", { topic: { id: "line-0", name: "示例商城" } }), true);
+
+  const f = await fixture(t);
+  let searchCalls = 0;
+  f.hub.searchThreads = async () => { searchCalls += 1; return { threads: [] }; };
+  f.assistant.llm = new AssistantLLM({
+    dataDir: f.dataDir,
+    config: { enabled: true },
+    now: () => ASSISTANT_NOW,
+    completeImpl: async () => JSON.stringify({ spokenReply: "我在呢，随时吩咐。", reply: "我在。", intent: "chat", action: {} }),
+  });
+  await f.assistant.ask({ text: "你好", mode: "phone", sessionId: "s-skip" });
+  assert.equal(searchCalls, 0, "纯寒暄必须跳过工位全文检索");
+  await f.assistant.ask({ text: "帮我看下昨天报错原因", mode: "phone", sessionId: "s-search" });
+  assert.equal(searchCalls, 1);
 });

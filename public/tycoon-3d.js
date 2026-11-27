@@ -29,6 +29,7 @@ export const ROOM_BLUEPRINTS = Object.freeze({
     z: -8.6,
     w: 21.5,
     d: 13.6,
+    maxSlots: 6,
     colorHex: 0x38bdf8,
     accentCss: "#38bdf8",
     camZoom: 1.25,
@@ -42,6 +43,7 @@ export const ROOM_BLUEPRINTS = Object.freeze({
     z: -8.6,
     w: 17.5,
     d: 13.6,
+    maxSlots: 6,
     colorHex: 0xa855f7,
     accentCss: "#a855f7",
     camZoom: 1.35,
@@ -55,6 +57,7 @@ export const ROOM_BLUEPRINTS = Object.freeze({
     z: 8.8,
     w: 16.5,
     d: 12.6,
+    maxSlots: 4,
     colorHex: 0xf59e0b,
     accentCss: "#f59e0b",
     camZoom: 1.32,
@@ -68,6 +71,7 @@ export const ROOM_BLUEPRINTS = Object.freeze({
     z: 8.8,
     w: 15.6,
     d: 12.6,
+    maxSlots: 4,
     colorHex: 0x10b981,
     accentCss: "#10b981",
     camZoom: 1.28,
@@ -182,10 +186,48 @@ export function computeStudioProgression(overview) {
   return { level, xpPercent, totalPoints };
 }
 
+export function partitionRoomTopicsForSlots(topics = [], maxSlots = 6) {
+  const list = Array.isArray(topics) ? topics : [];
+  const cap = Math.max(2, Number(maxSlots) || 6);
+  if (list.length <= cap) {
+    return { standalone: list, overflow: [] };
+  }
+  const keepCount = Math.max(1, cap - 1);
+  const scored = list.map((tp, idx) => {
+    const pending = Number(tp?.pendingCount) || 0;
+    const live = Number(tp?.liveCount) || 0;
+    const activeCnt = Number(tp?.primaryActiveCount ?? tp?.activeThreads?.length ?? 0);
+    const score = (pending > 0 ? 10000 : 0)
+      + (live > 0 ? 5000 : 0)
+      + (tp?.isBossPinned ? 2500 : 0)
+      + (tp?.pinned ? 1200 : 0)
+      + (activeCnt > 0 ? 400 : 0);
+    return {
+      idx,
+      score,
+      latestUpdatedAt: Number(tp?.latestUpdatedAt) || 0,
+    };
+  });
+  scored.sort((a, b) => (
+    (b.score - a.score)
+    || (b.latestUpdatedAt - a.latestUpdatedAt)
+    || (a.idx - b.idx)
+  ));
+  const keepIdxSet = new Set(scored.slice(0, keepCount).map((item) => item.idx));
+  const standalone = [];
+  const overflow = [];
+  list.forEach((tp, idx) => {
+    if (keepIdxSet.has(idx)) standalone.push(tp);
+    else overflow.push(tp);
+  });
+  return { standalone, overflow };
+}
+
 export function buildTycoonWorldLayout(overview, {
   searchText = "",
   selectedTopicId = "",
   selectedRoomId = "all",
+  selectedClusterRoomId = "",
 } = {}) {
   const domains = Array.isArray(overview?.domains) ? overview.domains : [];
   const incubator = overview?.incubator || { eggs: [] };
@@ -198,22 +240,102 @@ export function buildTycoonWorldLayout(overview, {
     const bp = ROOM_BLUEPRINTS[roomId];
     const domainData = domains.find((d) => d.id === roomId) || domains[dIdx] || { id: roomId, name: bp.title, topics: [] };
     const topics = Array.isArray(domainData.topics) ? domainData.topics : [];
+    const { standalone, overflow } = partitionRoomTopicsForSlots(topics, bp.maxSlots || 6);
 
     rooms.push({
       ...bp,
+      shortTitle: domainData.shortName || bp.shortTitle,
       name: domainData.name || bp.title,
       liveCount: Number(domainData.liveCount) || 0,
       pendingCount: Number(domainData.pendingCount) || 0,
       harvestCount: Number(domainData.harvestCount) || 0,
+      topicCount: topics.length,
+      overflowCount: overflow.length,
       isSelected: selectedRoomId === roomId,
     });
 
-    const cols = topics.length <= 1 ? 1 : (topics.length <= 2 ? 2 : (topics.length <= 4 ? 2 : 3));
-    const rows = Math.max(1, Math.ceil(topics.length / cols));
+    const renderTopics = [...standalone];
+    if (overflow.length > 0) {
+      const sigCounts = { alert: 0, harvest: 0, ruin: 0 };
+      let maxRuinDays = null;
+      let anyInferredHarvest = false;
+      let anyReadyToHarvest = false;
+      for (const member of overflow) {
+        const counts = member?.assistantSignals?.counts || {};
+        sigCounts.alert += Number(counts.alert) || 0;
+        sigCounts.harvest += Number(counts.harvest) || 0;
+        sigCounts.ruin += Number(counts.ruin) || 0;
+        if (Number.isFinite(Number(member?.assistantSignals?.ruinDays))) {
+          maxRuinDays = maxRuinDays === null
+            ? Number(member.assistantSignals.ruinDays)
+            : Math.max(maxRuinDays, Number(member.assistantSignals.ruinDays));
+        }
+        if (member?.pipeline?.readyToHarvest || member?.readyToHarvest) anyReadyToHarvest = true;
+        if (member?.harvestInferred) anyInferredHarvest = true;
+      }
+      const topSig = sigCounts.alert > 0 ? "alert" : (sigCounts.harvest > 0 ? "harvest" : (sigCounts.ruin > 0 ? "ruin" : null));
+      const mergedSignals = (topSig || anyInferredHarvest)
+        ? {
+            top: topSig,
+            counts: sigCounts,
+            ruinDays: maxRuinDays,
+            cards: [],
+          }
+        : undefined;
+      const signalTopicId = topSig
+        ? (overflow.find((m) => (m?.assistantSignals?.counts?.[topSig] || 0) > 0)?.id || overflow[0].id)
+        : overflow[0].id;
+      const hubProviders = [...new Set(overflow.flatMap((m) => (Array.isArray(m.activeProviders) ? m.activeProviders : [])))];
+      const hubLiveCount = overflow.reduce((s, m) => s + (Number(m.liveCount) || 0), 0);
+      const hubPendingCount = overflow.reduce((s, m) => s + (Number(m.pendingCount) || 0), 0);
+      const hubActiveCount = overflow.reduce((s, m) => s + Number(m.primaryActiveCount ?? m.activeThreads?.length ?? 0), 0);
+      const hubStageIndex = Math.max(1, ...overflow.map((m) => Number(m.pipeline?.stageIndex) || 1));
+      renderTopics.push({
+        id: `hub:${roomId}`,
+        domainId: roomId,
+        name: domainData.shortName || bp.shortTitle,
+        landmark: overflow[0]?.landmark || "tower",
+        yieldType: "growth",
+        yieldLabel: "同厂多项目集群",
+        pipeline: {
+          stageIndex: hubStageIndex,
+          stageLabel: PIPELINE_STAGE_LABELS[hubStageIndex] || "研发",
+          readyToHarvest: anyReadyToHarvest,
+        },
+        assistantSignals: mergedSignals,
+        signalTopicId,
+        harvestInferred: anyInferredHarvest,
+        liveCount: hubLiveCount,
+        pendingCount: hubPendingCount,
+        primaryActiveCount: hubActiveCount,
+        sliceCount: overflow.reduce((s, m) => s + (Number(m.sliceCount) || 0), 0),
+        gitSnapshot: { dirtyCount: overflow.reduce((s, m) => s + (Number(m.gitSnapshot?.dirtyCount) || 0), 0) },
+        metrics: { kpis: [] },
+        activeProviders: hubProviders.length ? hubProviders : ["codex"],
+        isClusterHub: true,
+        clusterRoomId: roomId,
+        memberTopicIds: overflow.map((m) => m.id),
+        memberTopics: overflow.map((m) => ({
+          id: m.id,
+          name: m.name,
+          liveCount: Number(m.liveCount) || 0,
+          pendingCount: Number(m.pendingCount) || 0,
+          activeCount: Number(m.primaryActiveCount ?? m.activeThreads?.length ?? 0),
+          stageIndex: Math.max(1, Math.min(5, Number(m.pipeline?.stageIndex) || 1)),
+          readyToHarvest: Boolean(m.pipeline?.readyToHarvest || m.readyToHarvest),
+        })),
+        memberCount: overflow.length,
+        hubSelected: selectedClusterRoomId === roomId || overflow.some((m) => m.id === selectedTopicId),
+        hubSearchHit: overflow.some((m) => topicMatchesSearch(m, searchText)),
+      });
+    }
+
+    const cols = renderTopics.length <= 1 ? 1 : (renderTopics.length <= 2 ? 2 : (renderTopics.length <= 4 ? 2 : 3));
+    const rows = Math.max(1, Math.ceil(renderTopics.length / cols));
     const usableW = bp.w - 5.6;
     const usableD = bp.d - 5.2;
 
-    topics.forEach((tp, idx) => {
+    renderTopics.forEach((tp, idx) => {
       const col = idx % cols;
       const row = Math.floor(idx / cols);
       // Stagger alternate rows slightly so isometric overhead titles never stack vertically
@@ -232,6 +354,7 @@ export function buildTycoonWorldLayout(overview, {
         : ["codex"];
 
       const kpis = Array.isArray(tp.metrics?.kpis) ? tp.metrics.kpis.slice(0, 2) : [];
+      const isClusterHub = Boolean(tp.isClusterHub);
 
       workstations.push({
         topicId: tp.id,
@@ -247,6 +370,7 @@ export function buildTycoonWorldLayout(overview, {
         stageLabel: tp.pipeline?.stageLabel || "研发",
         readyToHarvest: Boolean(tp.pipeline?.readyToHarvest),
         assistantSignals: tp.assistantSignals,
+        signalTopicId: tp.signalTopicId || tp.id,
         harvestInferred: Boolean(tp.harvestInferred),
         liveCount,
         pendingCount,
@@ -256,8 +380,14 @@ export function buildTycoonWorldLayout(overview, {
         kpis,
         primaryProvider: providers[0] || "codex",
         cloneProviders: Array.from({ length: cloneCount }, (_, i) => providers[(i + 1) % providers.length] || "claude"),
-        isSelected: selectedTopicId === tp.id,
-        isSearchHit: topicMatchesSearch(tp, searchText),
+        isClusterHub,
+        clusterRoomId: isClusterHub ? roomId : "",
+        memberTopicIds: isClusterHub ? (tp.memberTopicIds || []) : [],
+        memberTopics: isClusterHub ? (tp.memberTopics || []) : [],
+        memberCount: isClusterHub ? (Number(tp.memberCount) || 0) : 0,
+        subProjectCount: isClusterHub ? 0 : (Array.isArray(tp.subProjects) ? tp.subProjects.length : 0),
+        isSelected: isClusterHub ? Boolean(tp.hubSelected) : (selectedTopicId === tp.id),
+        isSearchHit: isClusterHub ? Boolean(tp.hubSearchHit) : topicMatchesSearch(tp, searchText),
       });
     });
   }
@@ -493,14 +623,87 @@ export function resolveWorkstationLodMode({
   isSearchHit = false,
   isHovered = false,
   isResting = false,
+  compactViewport = false,
 } = {}) {
-  if (isPending || isSelected || isSearchHit || isHovered || zoom >= 1.3) {
+  if (isPending || isSelected || isSearchHit || isHovered) {
+    return "full";
+  }
+  if (compactViewport && isResting) {
+    return "micro";
+  }
+  if (zoom >= 1.3) {
     return "full";
   }
   if (zoom < 0.85) {
     return isResting ? "micro" : "mid";
   }
   return "mid";
+}
+
+export function formatRoomBannerHtml(rm = {}) {
+  const topicCount = Math.max(0, Number(rm.topicCount) || 0);
+  return `${escapeHtml(rm.shortTitle || rm.title || "")}${topicCount > 0 ? ` · ${topicCount}` : ""}`;
+}
+
+export function shouldShowRoomBanner({ viewportWidth = 1024, zoom = 1, selectedRoomId = "all" } = {}) {
+  if (Number(viewportWidth) < 780) return false;
+  if (selectedRoomId && selectedRoomId !== "all") return false;
+  if (Number(zoom) >= 1.18) return false;
+  return true;
+}
+
+export function renderWorkstationTagHtml(ws = {}, act = {}, { signalBadge, signalTitle } = {}) {
+  const isPending = Boolean(act.isPending);
+  const isWorking = Boolean(act.isWorking);
+  const isResting = act.isResting !== undefined ? Boolean(act.isResting) : (!isPending && !isWorking);
+  const stateIconPath = isPending
+    ? `<path d="M8 2.6v6.2M8 11.9v.6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`
+    : `<path d="M9.1 1.75 3.6 9h4.1l-1 5.25 5.7-7.25H8.3l.8-5.25Z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>`;
+  const state = act.state || (isPending ? "pending" : (isWorking ? "working" : "resting"));
+  const intensityTier = Number(act.intensityTier) || 0;
+  const statePillHtml = !isResting
+    ? `<span class="tycoon3d-state-pill is-${escapeHtml(state)} is-tier-${intensityTier}"><svg class="tycoon3d-state-ico" viewBox="0 0 16 16" width="11" height="11" fill="none" aria-hidden="true">${stateIconPath}</svg><span class="tycoon3d-state-txt">${escapeHtml(act.statusText || "")}</span></span>`
+    : "";
+  const resolvedBadge = signalBadge === undefined ? selectAssistantSignalBadge(ws, assistantLocale()) : signalBadge;
+  const resolvedTitle = signalTitle || (resolvedBadge ? (assistantText(
+    { alert: "等你拍板", harvest: resolvedBadge.inferred ? "准收菜（推测）" : "收菜", ruin: "烂尾" }[resolvedBadge.type] || "",
+    { alert: "Needs your decision", harvest: resolvedBadge.inferred ? "Almost ready (inferred)" : "Ready to review", ruin: "Unfinished" }[resolvedBadge.type] || "",
+  ) || "") : "");
+  const badgeType = resolvedBadge ? escapeHtml(String(resolvedBadge.type || "")) : "";
+  const signalHtml = resolvedBadge
+    ? `<span class="tycoon-signal-badge is-${badgeType}${resolvedBadge.inferred ? " is-inferred" : ""}" data-signal-type="${badgeType}" role="button" tabindex="0" aria-label="${escapeHtml(resolvedTitle)}" title="${escapeHtml(resolvedTitle)}">${escapeHtml(resolvedBadge.text || "")}</span>`
+    : "";
+  const harvestBadgeHtml = !ws.assistantSignals && act.showHarvest ? `<span class="tycoon3d-mini-badge is-coin">$收菜</span>` : "";
+  const memberCount = Math.max(0, Number(ws.memberCount) || 0);
+  const subCount = Math.max(0, Number(ws.subProjectCount) || 0);
+  const clusterPillHtml = ws.isClusterHub && memberCount > 0
+    ? `<span class="tycoon3d-cluster-pill" title="展开 ${memberCount} 个同厂项目">+${memberCount}</span>`
+    : (subCount >= 2 ? `<span class="tycoon3d-cluster-pill is-sub" title="${subCount} 个子项目">+${subCount}</span>` : "");
+  return `<div class="tycoon3d-tag-top">${statePillHtml}<strong class="tycoon3d-name">${escapeHtml(ws.name || "")}</strong>${clusterPillHtml}${harvestBadgeHtml}${signalHtml}</div>`;
+}
+
+export function measureTagNamePx(name = "") {
+  return Array.from(String(name || "")).reduce((sum, ch) => sum + (ch.charCodeAt(0) > 255 ? 11 : 6.5), 0);
+}
+
+export function estimateWorkstationLabelSize(ws = {}, act = {}, { lodMode = "mid", badge = null, namePx } = {}) {
+  const resolvedNamePx = Number.isFinite(namePx) ? namePx : measureTagNamePx(ws.name);
+  let w = Math.max(54, Math.ceil(resolvedNamePx) + (lodMode === "micro" ? 16 : 20));
+  if (!act.isResting) {
+    w += Math.ceil(String(act.statusText || "").length * 10 + 24);
+  }
+  if (badge) {
+    w += String(badge.text || "").length * 7 + 16;
+  } else if (!ws.assistantSignals && act.showHarvest) {
+    w += 38;
+  }
+  const memberCount = Math.max(0, Number(ws.memberCount) || 0);
+  const subCount = Math.max(0, Number(ws.subProjectCount) || 0);
+  if ((ws.isClusterHub && memberCount > 0) || subCount >= 2) {
+    w += 26;
+  }
+  const h = (lodMode === "micro" || act.isResting) ? 24 : 28;
+  return { w, h };
 }
 
 function boxOverlapArea(a, b, pad = 6) {
@@ -679,8 +882,11 @@ void main(){
   gl_FragColor = vec4(col, 1.0);
 }`;
 
+const PIPELINE_STAGE_LABELS = Object.freeze({ 1: "立项", 2: "研发", 3: "打磨", 4: "宣发", 5: "收菜" });
+
 export function createTycoon3DWorld(containerEl, {
   onSelectTopic = null,
+  onSelectCluster = null,
   onSelectRoom = null,
   onSelectIncubator = null,
   onSelectSprite = null,
@@ -697,6 +903,7 @@ export function createTycoon3DWorld(containerEl, {
   let spriteBubble = null;
   let spriteUserBusy = false;
   let spriteMotion = null;
+  let spriteMotionTimer = null;
   let spriteProactive = [];
   const SPRITE_MOODS = new Set(["patrol", "inspect", "guide", "thinking", "report", "good", "worry", "waiting", "listening", "idle"]);
   let renderer = null;
@@ -2484,6 +2691,18 @@ export function createTycoon3DWorld(containerEl, {
     updateSpriteBubble();
   }
 
+  function findWorkstationRecord(topicId = "") {
+    if (!topicId) return null;
+    const direct = wsRecords.get(topicId);
+    if (direct) return direct;
+    for (const rec of wsRecords.values()) {
+      if (rec?.ws?.isClusterHub && Array.isArray(rec.ws.memberTopicIds) && rec.ws.memberTopicIds.includes(topicId)) {
+        return rec;
+      }
+    }
+    return null;
+  }
+
   function spriteSay(text, { topicId = "", ttlMs = 6000, proactive = true } = {}) {
     if (!text || disposed) return;
     if (!proactive) {
@@ -2491,18 +2710,22 @@ export function createTycoon3DWorld(containerEl, {
       showSpriteBubble(text, { topicId, ttlMs });
       return;
     }
-    const mark = wsRecords.get(topicId)?.ws.assistantSignals?.top || "alert";
+    const mark = findWorkstationRecord(topicId)?.ws.assistantSignals?.top || "alert";
     spriteProactive.push({ topicId: topicId || "__nexus__", mark, bubble: String(text), ttlMs, queuedOnly: true });
   }
 
   function finishSpriteVisit() {
+    if (spriteMotionTimer) {
+      clearTimeout(spriteMotionTimer);
+      spriteMotionTimer = null;
+    }
     const motion = spriteMotion;
     spriteMotion = null;
     motion?.resolve();
   }
 
   function spriteDestination(topicId) {
-    const ws = wsRecords.get(topicId)?.ws;
+    const ws = findWorkstationRecord(topicId)?.ws;
     // Stand in front of, and to the side of, the building's label/roof.
     return ws ? { x: ws.x + 2.1, y: 0.95, z: ws.z + 2.2 } : null;
   }
@@ -2513,14 +2736,19 @@ export function createTycoon3DWorld(containerEl, {
     changeSpriteMood(mood);
     spriteOverrideUntil = Date.now() + 6000;
     if (bubble) spriteSay(bubble, { topicId, proactive: false });
+    const dest = spriteDestination(topicId);
+    if (!running || !spriteRecord || !dest) {
+      return Promise.resolve();
+    }
     return new Promise((resolve) => {
       spriteMotion = { topicId, camera: followCamera, resolve };
-      const dest = spriteDestination(topicId);
-      if (dest && spriteRecord && spriteReducedMotion()) {
+      if (spriteReducedMotion()) {
         spriteRecord.group.position.set(dest.x, dest.y, dest.z);
         if (followCamera) panToPosition(dest.x, dest.z, 1.42);
         finishSpriteVisit();
+        return;
       }
+      spriteMotionTimer = setTimeout(() => finishSpriteVisit(), 4000);
     });
   }
 
@@ -2548,7 +2776,7 @@ export function createTycoon3DWorld(containerEl, {
         : mark === "harvest" ? assistantText("有菜可收", "Ready to review") : assistantText("停在半途", "Left unfinished");
       const dest = spriteDestination(ws.topicId);
       const position = spriteRecord.group.position;
-      stops.push({ topicId: ws.topicId, topicTitle: ws.name, mark,
+      stops.push({ topicId: ws.signalTopicId || ws.topicId, topicTitle: ws.name, mark,
         bubble: `${ws.name}：${message}${age}`,
         arrived: spriteReducedMotion() || Math.hypot(position.x - dest.x, position.z - dest.z) < 0.12 });
     }
@@ -2947,7 +3175,7 @@ export function createTycoon3DWorld(containerEl, {
     banner.type = "button";
     banner.className = "tycoon3d-room-chip";
     banner.style.setProperty("--room-accent", rm.accentCss);
-    banner.innerHTML = `<span class="tycoon3d-room-key">[${escapeHtml(rm.hotkey)}]</span> ${escapeHtml(rm.title)}`;
+    banner.innerHTML = formatRoomBannerHtml(rm);
     banner.addEventListener("click", (ev) => {
       ev.stopPropagation();
       panToPosition(rm.x, rm.z, rm.camZoom);
@@ -3392,7 +3620,9 @@ export function createTycoon3DWorld(containerEl, {
 
     const hit = new THREE.Mesh(boxGeo(3.8, 3.4, 3.8), invisibleMat());
     hit.position.set(0, 1.5, -0.35);
-    hit.userData = { kind: "topic", topicId: ws.topicId, roomId: ws.roomId };
+    hit.userData = ws.isClusterHub
+      ? { kind: "cluster", topicId: ws.topicId, roomId: ws.roomId, memberTopicIds: ws.memberTopicIds || [] }
+      : { kind: "topic", topicId: ws.topicId, roomId: ws.roomId };
     group.add(hit);
     interactiveMeshes.push(hit);
 
@@ -3801,6 +4031,7 @@ export function createTycoon3DWorld(containerEl, {
     labelEl.type = "button";
     labelEl.className = [
       "tycoon3d-tag",
+      ws.isClusterHub ? "is-cluster-hub" : "",
       act.isWorking ? "is-live" : "",
       act.intensityTier === 2 ? "is-tier-2" : "",
       act.intensityTier >= 3 ? "is-tier-3" : "",
@@ -3814,40 +4045,20 @@ export function createTycoon3DWorld(containerEl, {
       const rnd = (a, b) => (a + Math.random() * (b - a)).toFixed(2);
       labelEl.style.setProperty("--ty-delay", `-${rnd(0, 9)}s`);
       labelEl.style.setProperty("--ty-float-dur", `${rnd(7, 11)}s`);
-      labelEl.style.setProperty("--ty-zzz-dur", `${rnd(3, 4.6)}s`);
       labelEl.style.setProperty("--ty-amp", `${rnd(1.1, 2)}px`);
       const baseGlow = act.isPending ? 2.2 : (act.intensityTier >= 3 ? 2.3 : (act.intensityTier === 2 ? 2.6 : 3));
       labelEl.style.setProperty("--ty-glow-dur", `${(baseGlow + Math.random() * 0.6).toFixed(2)}s`);
     }
-    const pipsHtml = [1, 2, 3, 4, 5].map((i) => `<i class="tycoon3d-pip ${i <= ws.stageIndex ? "is-on" : ""}"></i>`).join("");
-    const stateIconPath = act.isPending
-      ? `<path d="M8 2.6v6.2M8 11.9v.6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`
-      : (act.isWorking
-          ? `<path d="M9.1 1.75 3.6 9h4.1l-1 5.25 5.7-7.25H8.3l.8-5.25Z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>`
-          : `<path d="M12.85 9.95A5.25 5.25 0 0 1 6.05 3.15a5.25 5.25 0 1 0 6.8 6.8Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>`);
-    const statePillHtml = `<span class="tycoon3d-state-pill is-${act.state} is-tier-${act.intensityTier}"><svg class="tycoon3d-state-ico" viewBox="0 0 16 16" width="11" height="11" fill="none" aria-hidden="true">${stateIconPath}</svg><span class="tycoon3d-state-txt">${escapeHtml(act.statusText)}</span></span>`;
     const signalBadge = selectAssistantSignalBadge(ws, assistantLocale());
-    const signalTitle = signalBadge ? assistantText({ alert: "等你拍板", harvest: signalBadge.inferred ? "准收菜（推测）" : "收菜", ruin: "烂尾" }[signalBadge.type], { alert: "Needs your decision", harvest: signalBadge.inferred ? "Almost ready (inferred)" : "Ready to review", ruin: "Unfinished" }[signalBadge.type]) : "";
-    const signalHtml = signalBadge ? `<span class="tycoon-signal-badge is-${signalBadge.type}${signalBadge.inferred ? " is-inferred" : ""}" data-signal-type="${signalBadge.type}" role="button" tabindex="0" aria-label="${escapeHtml(signalTitle)}" title="${escapeHtml(signalTitle)}">${escapeHtml(signalBadge.text)}</span>` : "";
-    const harvestBadgeHtml = !ws.assistantSignals && act.showHarvest ? `<span class="tycoon3d-mini-badge is-coin">$收菜</span>` : "";
-    const kpiLineHtml = ws.kpis.length
-      ? `<div class="tycoon3d-kpi-row">${ws.kpis.map((k) => `<span>${escapeHtml(k.label)} <strong>${escapeHtml(k.value)}</strong></span>`).join(" · ")}</div>`
-      : "";
-    labelEl.innerHTML = `
-      <div class="tycoon3d-tag-top">
-        ${statePillHtml}
-        <span class="tycoon3d-lv">Lv.${ws.stageIndex}</span>
-        <strong class="tycoon3d-name">${escapeHtml(ws.name)}</strong>
-        ${harvestBadgeHtml}
-        ${signalHtml}
-      </div>
-      ${kpiLineHtml}
-      <div class="tycoon3d-pips">${pipsHtml}</div>
-    `;
+    labelEl.innerHTML = renderWorkstationTagHtml(ws, act, { signalBadge });
     const signalEl = labelEl.querySelector(".tycoon-signal-badge");
     const selectSignal = (ev) => {
       ev.preventDefault(); ev.stopPropagation();
-      onSignalBadgeClick?.(ws.topicId, signalBadge.type);
+      if (ws.isClusterHub && typeof onSelectCluster === "function") {
+        onSelectCluster(ws.roomId, ws.memberTopicIds || []);
+      } else {
+        onSignalBadgeClick?.(ws.signalTopicId || ws.topicId, signalBadge.type);
+      }
     };
     signalEl?.addEventListener("click", selectSignal);
     signalEl?.addEventListener("keydown", (ev) => {
@@ -3857,7 +4068,12 @@ export function createTycoon3DWorld(containerEl, {
       ev.stopPropagation();
       panToPosition(ws.x, ws.z, 1.42);
       spawnRipple(ws.x, ws.z - 0.3, 0x38bdf8);
-      onSelectTopic?.(ws.topicId, ws.roomId);
+      if (ws.isClusterHub) {
+        if (typeof onSelectCluster === "function") onSelectCluster(ws.roomId, ws.memberTopicIds || []);
+        else onSelectRoom?.(ws.roomId);
+      } else {
+        onSelectTopic?.(ws.topicId, ws.roomId);
+      }
     });
     labelEl.addEventListener("mouseenter", () => { labelHoverKey = ws.topicId; });
     labelEl.addEventListener("mouseleave", () => { if (labelHoverKey === ws.topicId) labelHoverKey = ""; });
@@ -3890,6 +4106,7 @@ export function createTycoon3DWorld(containerEl, {
     const anchorLift = (ws.readyToHarvest || ws.pendingCount > 0) ? 2.88 : 2.62;
     const rec = {
       ws,
+      namePx: measureTagNamePx(ws.name),
       act,
       idx,
       group,
@@ -4094,7 +4311,10 @@ export function createTycoon3DWorld(containerEl, {
     return JSON.stringify([
       w.topicId, w.name, w.x, w.z, w.stageIndex, w.readyToHarvest, w.liveCount, w.pendingCount,
       w.activeCount > 0, w.landmark, w.primaryProvider, w.cloneProviders,
-      w.kpis.map((k) => `${k.label}=${k.value}`), selectAssistantSignalBadge(w, assistantLocale()),
+      w.isClusterHub, w.memberCount, w.subProjectCount,
+      Boolean(w.assistantSignals), w.signalTopicId || "",
+      w.isClusterHub ? (w.memberTopicIds || []) : null,
+      selectAssistantSignalBadge(w, assistantLocale()),
     ]);
   }
 
@@ -4160,12 +4380,16 @@ export function createTycoon3DWorld(containerEl, {
       return;
     }
 
-    // Update room conduit flow intensity in-place without rebuilding workstations
+    // Update room conduit flow intensity & topic count badges in-place without rebuilding workstations
     for (const rm of layout.rooms) {
       const rr = roomRecords.get(rm.id);
-      if (rr && rr.flowMat) {
+      if (rr) {
         rr.rm = rm;
-        rr.flowMat.opacity = rm.liveCount > 0 ? 1 : 0.45;
+        if (rr.flowMat) rr.flowMat.opacity = rm.liveCount > 0 ? 1 : 0.45;
+        const nextBannerHtml = formatRoomBannerHtml(rm);
+        if (rr.banner && rr.banner.innerHTML !== nextBannerHtml) {
+          rr.banner.innerHTML = nextBannerHtml;
+        }
       }
     }
 
@@ -4225,6 +4449,7 @@ export function createTycoon3DWorld(containerEl, {
       searchText: lastUiState.searchText || "",
       selectedTopicId: lastUiState.selectedTopicId || "",
       selectedRoomId: lastUiState.domainFilter || "all",
+      selectedClusterRoomId: lastUiState.selectedClusterRoomId || "",
     });
     for (const ws of layout.workstations) {
       const rec = wsRecords.get(ws.topicId);
@@ -4345,6 +4570,13 @@ export function createTycoon3DWorld(containerEl, {
     const items = [];
     const metaById = new Map();
 
+    const compactViewport = width < 780;
+    const showRoomBanners = shouldShowRoomBanner({
+      viewportWidth: width,
+      zoom,
+      selectedRoomId: lastUiState.domainFilter || "all",
+    });
+
     for (const rec of wsRecords.values()) {
       const isHovered = hoveredKey === rec.ws.topicId || labelHoverKey === rec.ws.topicId;
       const lodMode = resolveWorkstationLodMode({
@@ -4354,6 +4586,7 @@ export function createTycoon3DWorld(containerEl, {
         isSearchHit: rec.isSearchHit,
         isHovered,
         isResting: rec.act.isResting,
+        compactViewport,
       });
       if (rec._lodMode !== lodMode) {
         rec._lodMode = lodMode;
@@ -4362,22 +4595,12 @@ export function createTycoon3DWorld(containerEl, {
       }
 
       const { ax, ay, visible } = projectPoint(rec.anchor, rec.hover * 0.14);
-      const nameChars = Math.min(12, (rec.ws.name || "").length);
-      let estW = 128;
-      let estH = 38;
-      if (lodMode === "micro") {
-        estW = Math.max(66, nameChars * 10 + 24);
-        estH = 22;
-      } else if (lodMode === "mid") {
-        estW = Math.max(106, nameChars * 10.5 + 78);
-        estH = 28;
-      } else {
-        estW = Math.max(134, nameChars * 11 + 92 + (rec.ws.kpis.length ? 22 : 0));
-        estH = rec.ws.kpis.length ? 54 : 38;
-      }
-
       const badge = selectAssistantSignalBadge(rec.ws, assistantLocale());
-      if (badge) estW += badge.text.length * 8 + 18;
+      const { w: estW, h: estH } = estimateWorkstationLabelSize(rec.ws, rec.act, {
+        lodMode,
+        badge,
+        namePx: rec.namePx,
+      });
       let priority = 10;
       if (rec.isSelected || rec.isSearchHit) priority = 100;
       else if (rec.act.isPending) priority = 82;
@@ -4393,16 +4616,17 @@ export function createTycoon3DWorld(containerEl, {
     for (const rr of roomRecords.values()) {
       const { ax, ay, visible } = projectPoint(rr.anchor, rr.group.position.y);
       const id = `rm:${rr.rm.id}`;
+      const roomVisible = showRoomBanners && visible && rr.introAlpha > 0.02;
       items.push({
         id,
         ax,
         ay,
-        w: 132,
+        w: 88,
         h: 22,
         priority: rr.isSelected ? 70 : 25,
-        visible: visible && rr.introAlpha > 0.02,
+        visible: roomVisible,
       });
-      metaById.set(id, { kind: "rm", rr, ax, ay, visible, alpha: rr.introAlpha });
+      metaById.set(id, { kind: "rm", rr, ax, ay, visible: roomVisible, alpha: rr.introAlpha });
     }
 
     if (spriteRecord?.labelEl) {
@@ -4427,7 +4651,8 @@ export function createTycoon3DWorld(containerEl, {
         const a = visible ? Math.round(alpha * 100) / 100 : 0;
         if (rec.labelEl._tyLastA !== a) {
           rec.labelEl._tyLastA = a;
-          rec.labelEl.style.opacity = String(a);
+          rec.labelEl.style.opacity = a >= 1 ? "" : String(a);
+          rec.labelEl.style.visibility = a > 0.02 ? "" : "hidden";
           rec.labelEl.style.pointerEvents = a > 0.5 ? "auto" : "none";
         }
         if (a > 0 && solved) {
@@ -4463,7 +4688,8 @@ export function createTycoon3DWorld(containerEl, {
         const a = visible ? Math.round(alpha * 100) / 100 : 0;
         if (rr.banner._tyLastA !== a) {
           rr.banner._tyLastA = a;
-          rr.banner.style.opacity = String(a);
+          rr.banner.style.opacity = a >= 1 ? "" : String(a);
+          rr.banner.style.visibility = a > 0.02 ? "" : "hidden";
           rr.banner.style.pointerEvents = a > 0.5 ? "auto" : "none";
         }
         if (a > 0 && solved) {
@@ -4480,7 +4706,8 @@ export function createTycoon3DWorld(containerEl, {
         const a = visible ? Math.round(alpha * 100) / 100 : 0;
         if (spRec.labelEl._tyLastA !== a) {
           spRec.labelEl._tyLastA = a;
-          spRec.labelEl.style.opacity = String(a);
+          spRec.labelEl.style.opacity = a >= 1 ? "" : String(a);
+          spRec.labelEl.style.visibility = a > 0.02 ? "" : "hidden";
           spRec.labelEl.style.pointerEvents = a > 0.5 ? "auto" : "none";
         }
         if (a > 0 && solved) {
@@ -4988,7 +5215,7 @@ export function createTycoon3DWorld(containerEl, {
             gridMat.uniforms.uImp.value = t;
             gridMat.uniforms.uImpC.value.set(pk.tx, pk.tz - 0.3);
           }
-          const targetRec = pk.targetTopicId ? wsRecords.get(pk.targetTopicId) : null;
+          const targetRec = pk.targetTopicId ? findWorkstationRecord(pk.targetTopicId) : null;
           if (targetRec) targetRec.bounceStart = t;
           impactShakeAt = t;
         } else {
@@ -5049,7 +5276,14 @@ export function createTycoon3DWorld(containerEl, {
     lastPendingJumpId = next.ws.topicId;
     panToPosition(next.ws.x, next.ws.z, 1.48);
     spawnRipple(next.ws.x, next.ws.z - 0.3, 0xef4444, { size: 3.6, dur: 1.0, peak: 0.9 });
-    onSelectTopic?.(next.ws.topicId, next.ws.roomId);
+    if (next.ws.isClusterHub) {
+      const pendingMember = (next.ws.memberTopics || []).find((m) => m.pendingCount > 0)?.id || next.ws.signalTopicId;
+      if (pendingMember && pendingMember !== next.ws.topicId) onSelectTopic?.(pendingMember, next.ws.roomId);
+      else if (typeof onSelectCluster === "function") onSelectCluster(next.ws.roomId, next.ws.memberTopicIds || []);
+      else onSelectRoom?.(next.ws.roomId);
+    } else {
+      onSelectTopic?.(next.ws.topicId, next.ws.roomId);
+    }
     return true;
   }
 
@@ -5150,7 +5384,7 @@ export function createTycoon3DWorld(containerEl, {
         if (e.pointerType === "touch") return;
         const hit = getHitObject(e.clientX, e.clientY);
         hoveredKey = hit?.userData?.topicId || "";
-        domEl.style.cursor = hit && (hit.userData.kind === "topic" || hit.userData.kind === "incubator" || hit.userData.kind === "sprite") ? "pointer" : "grab";
+        domEl.style.cursor = hit && (hit.userData.kind === "topic" || hit.userData.kind === "cluster" || hit.userData.kind === "incubator" || hit.userData.kind === "sprite") ? "pointer" : "grab";
         return;
       }
       const dx = e.clientX - lastX;
@@ -5209,11 +5443,16 @@ export function createTycoon3DWorld(containerEl, {
       if (Math.hypot(e.clientX - downX, e.clientY - downY) >= 6) return;
       const hit = getHitObject(e.clientX, e.clientY);
       if (raycaster.ray.intersectPlane(groundPlane, groundHit)) {
-        spawnRipple(groundHit.x, groundHit.z, hit?.userData?.kind === "topic" ? 0x38bdf8 : 0x94a3b8);
+        spawnRipple(groundHit.x, groundHit.z, (hit?.userData?.kind === "topic" || hit?.userData?.kind === "cluster") ? 0x38bdf8 : 0x94a3b8);
       }
       if (hit?.userData) {
         const ud = hit.userData;
-        if (ud.kind === "topic" && ud.topicId) {
+        if (ud.kind === "cluster" && ud.roomId) {
+          const rec = wsRecords.get(ud.topicId);
+          if (rec) panToPosition(rec.ws.x, rec.ws.z, 1.42);
+          if (typeof onSelectCluster === "function") onSelectCluster(ud.roomId, ud.memberTopicIds || []);
+          else onSelectRoom?.(ud.roomId);
+        } else if (ud.kind === "topic" && ud.topicId) {
           const rec = wsRecords.get(ud.topicId);
           if (rec) panToPosition(rec.ws.x, rec.ws.z, 1.42);
           onSelectTopic?.(ud.topicId, ud.roomId);
@@ -5489,11 +5728,11 @@ export function createTycoon3DWorld(containerEl, {
       if (bp) panToPosition(bp.x, bp.z, bp.camZoom);
     },
     flyToTopic(topicId = "") {
-      const rec = wsRecords.get(topicId);
+      const rec = findWorkstationRecord(topicId);
       if (rec) panToPosition(rec.ws.x, rec.ws.z, 1.42);
     },
     triggerDispatchBurst(topicId = "") {
-      const rec = wsRecords.get(topicId);
+      const rec = findWorkstationRecord(topicId);
       const tx = rec ? rec.ws.x : 0;
       const tz = rec ? rec.ws.z : -6;
       const sides = [0, -1.1, 1.1, -2.0, 2.0];
@@ -5538,6 +5777,7 @@ export function createTycoon3DWorld(containerEl, {
         cancelAnimationFrame(rafId);
         rafId = 0;
       }
+      finishSpriteVisit();
     },
     dispose() {
       disposed = true;

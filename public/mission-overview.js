@@ -2,7 +2,7 @@ import { t } from "./i18n.js";
 import { iconSvg, providerIconSvg } from "./icons.js";
 import { escapeHtml } from "./markdown.js";
 import { formatCompactRelativeTime, projectBaseName } from "./project-board.js";
-import { LANDMARK_BADGE_LABELS, ROOM_BLUEPRINTS, computeStudioProgression, readTycoonVisualPrefs } from "./tycoon-3d.js";
+import { LANDMARK_BADGE_LABELS, ROOM_BLUEPRINTS, computeStudioProgression, partitionRoomTopicsForSlots, readTycoonVisualPrefs } from "./tycoon-3d.js";
 
 const DEFAULT_STAGES = [
   { index: 1, label: "立项" },
@@ -147,7 +147,7 @@ function renderStudioFloorplanHtml(domains = [], incubator = {}, { domainFilter 
         />
         <text x="${r.x + 10}" y="${r.y + 19}" class="mo-svg-room-code" fill="${r.stroke}">${escapeHtml(r.code)}</text>
         <text x="${r.x + 10}" y="${r.y + 36}" class="mo-svg-room-title">${escapeHtml(r.title)}</text>
-        <text x="${r.x + 10}" y="${r.y + 51}" class="mo-svg-room-meta">${topicCount} 工单${liveCount > 0 ? ` · ${liveCount} 运转` : ""}</text>
+        <text x="${r.x + 10}" y="${r.y + 51}" class="mo-svg-room-meta">${(r.data?.topics || []).length} 项目 · ${topicCount} 工位${liveCount > 0 ? ` · ${liveCount} 运转` : ""}</text>
 
         ${shownSprites.map((prov, idx) => renderWorkerSpriteGroupSvg(prov, startX + idx * stepX, workerY, {
           working: liveCount > 0 && idx < liveCount,
@@ -670,6 +670,7 @@ function renderOverviewThreadRowHtml(thread, {
   allTopics = [],
   assignOpenThreadId = "",
   recentCompletedByThread = null,
+  allowInduct = false,
 } = {}) {
   const isSelected = thread.id === activeThreadId;
   const stage = thread.stage || "研发";
@@ -737,6 +738,14 @@ function renderOverviewThreadRowHtml(thread, {
           ${statusChips.join("")}
           <span class="mo-thread-time">${escapeHtml(timeText)}</span>
         </button>
+        ${allowInduct && thread.cwd && !thread.isSlice ? `
+          <button
+            type="button"
+            class="mo-induct-btn"
+            data-mo-induct-cwd="${escapeHtml(thread.cwd)}"
+            title="将该目录正式收录为独立产线：${escapeHtml(thread.cwd)}"
+          >${iconSvg("plus", { size: 11 })}<span>收录</span></button>
+        ` : ""}
         <button
           type="button"
           class="mo-thread-assign-btn"
@@ -916,6 +925,10 @@ function renderTopicArchiveDigestHtml(topic, {
   `;
 }
 
+function normClientPrefix(p = "") {
+  return String(p || "").trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
 function renderTopicCardHtml(topic, {
   activeThreadId = "",
   allTopics = [],
@@ -927,10 +940,26 @@ function renderTopicCardHtml(topic, {
   editingMetricsTopicId = "",
   editingContextTopicId = "",
   expandedMetricsTopics = new Set(),
+  selectedSubProjectByTopic = {},
   searchText = "",
   inInspector = false,
   recentCompletedByThread = null,
 } = {}) {
+  const subProjects = Array.isArray(topic.subProjects) ? topic.subProjects : [];
+  const selectedSubCwd = subProjects.length >= 2
+    ? (selectedSubProjectByTopic?.[topic.id] || "")
+    : "";
+  const activeSubProject = selectedSubCwd
+    ? subProjects.find((sp) => sp.cwd === selectedSubCwd) || null
+    : null;
+  const activeSubNorm = activeSubProject ? normClientPrefix(activeSubProject.cwd) : "";
+  const matchesSubProject = (t) => {
+    if (!activeSubNorm) return true;
+    const tc = normClientPrefix(t?.cwd);
+    if (!tc) return false;
+    return tc === activeSubNorm || tc.startsWith(`${activeSubNorm}/`);
+  };
+
   const q = String(searchText || "").trim().toLowerCase();
   const matchesQuery = (t) => {
     if (!q) return true;
@@ -947,12 +976,50 @@ function renderTopicCardHtml(topic, {
     return hay.includes(q);
   };
   const topicMatches = !q || `${topic.name} ${topic.description || ""} ${topic.yieldLabel || ""} ${topic.summary?.progress || ""} ${topic.summary?.nextStep || ""}`.toLowerCase().includes(q);
-  const visibleActive = topicMatches ? (topic.activeThreads || []) : (topic.activeThreads || []).filter(matchesQuery);
-  const visibleArchived = topicMatches ? (topic.archivedThreads || []) : (topic.archivedThreads || []).filter(matchesQuery);
+  const baseActive = (topic.activeThreads || []).filter(matchesSubProject);
+  const baseArchived = (topic.archivedThreads || []).filter(matchesSubProject);
+  const visibleActive = topicMatches ? baseActive : baseActive.filter(matchesQuery);
+  const visibleArchived = topicMatches ? baseArchived : baseArchived.filter(matchesQuery);
 
   if (q && !topicMatches && !visibleActive.length && !visibleArchived.length) {
     return "";
   }
+
+  const subProjectsHtml = subProjects.length >= 2 ? `
+    <div class="mo-subprojects-bar" role="tablist" aria-label="同厂子项目工位">
+      <button
+        type="button"
+        class="mo-subproject-chip ${!activeSubProject ? "is-active" : ""}"
+        data-mo-select-subproject="${escapeHtml(topic.id)}"
+        data-mo-subproject-cwd=""
+      >
+        <span>全部</span>
+        <span class="mo-subproject-count">${topic.primaryActiveCount ?? (topic.activeThreads || []).filter((t) => !t.isSlice).length}</span>
+      </button>
+      ${subProjects.map((sp) => `
+        <div class="mo-subproject-group ${activeSubProject?.cwd === sp.cwd ? "is-active" : ""}">
+          <button
+            type="button"
+            class="mo-subproject-chip ${activeSubProject?.cwd === sp.cwd ? "is-active" : ""} ${sp.liveCount > 0 ? "is-live" : ""} ${sp.pendingCount > 0 ? "is-pending" : ""}"
+            data-mo-select-subproject="${escapeHtml(topic.id)}"
+            data-mo-subproject-cwd="${escapeHtml(sp.cwd)}"
+            title="${escapeHtml(sp.cwd)}"
+          >
+            ${sp.liveCount > 0 ? `<i class="mo-sub-live-dot"></i>` : ""}
+            <span>${escapeHtml(sp.name)}</span>
+            <span class="mo-subproject-count">${sp.activeCount}</span>
+          </button>
+          <button
+            type="button"
+            class="mo-subproject-add-btn"
+            data-new-in-cwd="${escapeHtml(sp.cwd)}"
+            title="在子项目「${escapeHtml(sp.name)}」目录新建会话"
+            aria-label="在 ${escapeHtml(sp.name)} 新建会话"
+          >${iconSvg("plus", { size: 10 })}</button>
+        </div>
+      `).join("")}
+    </div>
+  ` : "";
 
   const isExpanded = Boolean(q) || expandedTopics?.has?.(topic.id);
   const isArchiveOpen = Boolean(q && visibleArchived.length) || expandedArchives?.has?.(topic.id);
@@ -1040,19 +1107,21 @@ function renderTopicCardHtml(topic, {
               type="button"
               class="mo-launch-new-btn"
               data-mo-select-dispatch-topic="${escapeHtml(topic.id)}"
+              data-mo-subproject-cwd="${escapeHtml(activeSubProject?.cwd || "")}"
               title="定向派工到此产线（自动匹配干净工位或新开并发分身）"
             >${iconSvg("split", { size: 11 })}<span>派工</span></button>
             <button
               type="button"
               class="mo-launch-new-btn is-plain"
-              data-new-in-cwd="${escapeHtml(topic.primaryCwd || "")}"
-              title="手动在该产线主目录新建会话"
+              data-new-in-cwd="${escapeHtml(activeSubProject?.cwd || topic.primaryCwd || "")}"
+              title="${activeSubProject ? `在子项目「${escapeHtml(activeSubProject.name)}」目录新建会话` : "手动在该产线主目录新建会话"}"
             >${iconSvg("plus", { size: 11 })}</button>
           </div>
         `}
       </header>
 
       ${renderPipelineMeterHtml(pipeline, stages, { compact: inInspector })}
+      ${subProjectsHtml}
       ${renderTopicMetricsPanelHtml(topic, { editingMetricsTopicId, expandedMetricsTopics })}
       ${renderTopicArchiveDigestHtml(topic, { expandedContexts, editingContextTopicId })}
       ${podsHtml}
@@ -1075,6 +1144,7 @@ function renderTopicCardHtml(topic, {
               type="button"
               class="mo-next-prefill-btn"
               data-mo-quick-dispatch-topic="${escapeHtml(topic.id)}"
+              data-mo-subproject-cwd="${escapeHtml(activeSubProject?.cwd || "")}"
               data-mo-quick-dispatch-text="${escapeHtml(topic.summary.nextStep)}"
               title="填入智能派单台，自动挑选干净工位或开并发分身执行"
             >
@@ -1130,6 +1200,8 @@ export function renderMissionOverviewHtml(overview, {
   editingMetricsTopicId = "",
   editingContextTopicId = "",
   expandedMetricsTopics = new Set(),
+  selectedSubProjectByTopic = {},
+  syncingProjects = false,
   allowResume = false,
   domainFilter = "all",
   immersive = false,
@@ -1212,6 +1284,7 @@ export function renderMissionOverviewHtml(overview, {
         editingMetricsTopicId,
         editingContextTopicId,
         expandedMetricsTopics,
+        selectedSubProjectByTopic,
         searchText,
         recentCompletedByThread,
       }))
@@ -1260,6 +1333,9 @@ export function renderMissionOverviewHtml(overview, {
 
           <div class="mo-cockpit-controls">
             ${renderRefreshControlHtml({ modelOptions, preferredModel, summarizing, meta })}
+            <button type="button" class="mo-ctrl-btn" data-mo-action="sync-projects" ${syncingProjects ? "disabled" : ""} title="扫描近期工作区与记忆库项目卡，自动补充未收录产线">
+              ${iconSvg("layers", { size: 13 })}<span>${syncingProjects ? "同步中" : "同步项目"}</span>
+            </button>
             <button type="button" class="mo-ctrl-btn ${immersive ? "is-active" : ""}" data-mo-action="toggle-immersive" title="${immersive ? "退出全屏沉浸沙盘 (Esc)" : "展开全屏沉浸沙盘"}">
               ${iconSvg(immersive ? "minimize" : "maximize", { size: 13 })}<span>${immersive ? "退出沉浸" : "沉浸沙盘"}</span>
             </button>
@@ -1389,11 +1465,57 @@ export function renderMissionOverviewHtml(overview, {
           </div>
           <div class="mo-unassigned-card">
             <div class="mo-thread-list">
-              ${visibleUnassigned.slice(0, 12).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId, recentCompletedByThread })).join("")}
+              ${visibleUnassigned.slice(0, 12).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId, recentCompletedByThread, allowInduct: true })).join("")}
             </div>
           </div>
         </section>
       ` : ""}
+    </div>
+  `;
+}
+
+function renderInspectorRoomTopicItemHtml(tp, { isOverflow = false } = {}) {
+  const stageIdx = Math.max(1, Math.min(5, Number(tp?.pipeline?.stageIndex) || 1));
+  const activeCount = Number(tp?.primaryActiveCount ?? tp?.activeThreads?.length ?? 0);
+  const subCount = Array.isArray(tp?.subProjects) ? tp.subProjects.length : 0;
+  const subTitle = tp?.summary?.progress || tp?.description || tp?.primaryCwd || "";
+  return `
+    <div class="tycoon-room-item ${tp.liveCount > 0 ? "is-live" : ""} ${tp.pendingCount > 0 ? "is-pending" : ""}">
+      <button type="button" class="tycoon-room-item-main" data-tycoon-select-topic="${escapeHtml(tp.id)}">
+        <div class="tycoon-room-item-top">
+          <strong class="tycoon-room-item-name">${escapeHtml(tp.name)}</strong>
+          <span class="tycoon-q-lv">Lv.${stageIdx}</span>
+          ${isOverflow ? `<span class="tycoon-room-item-tag is-cluster">折叠</span>` : ""}
+          ${subCount >= 2 ? `<span class="tycoon-room-item-tag is-sub">${subCount} 子项目</span>` : ""}
+          ${tp.pendingCount > 0 ? `<span class="mo-status-pill is-pending">待拍板 ${tp.pendingCount}</span>` : ""}
+          ${tp.liveCount > 0 ? `<span class="mo-status-pill is-live"><i class="mo-live-pulse"></i>${tp.liveCount} 运转</span>` : ""}
+          ${tp.pipeline?.readyToHarvest ? `<span class="mo-harvest-pill">准收菜</span>` : ""}
+        </div>
+        <div class="tycoon-room-item-meta">
+          <span>${activeCount} 工位</span>
+          ${subTitle ? `<span class="tycoon-room-item-desc" title="${escapeHtml(subTitle)}">${escapeHtml(subTitle)}</span>` : ""}
+        </div>
+      </button>
+      <div class="tycoon-room-item-actions">
+        <button
+          type="button"
+          class="mo-launch-new-btn"
+          data-tycoon-select-topic="${escapeHtml(tp.id)}"
+          title="展开该项目的工位会话与子项目"
+        ><span>工位</span></button>
+        <button
+          type="button"
+          class="mo-launch-new-btn"
+          data-mo-select-dispatch-topic="${escapeHtml(tp.id)}"
+          title="定向派工到此项目"
+        >${iconSvg("split", { size: 11 })}</button>
+        <button
+          type="button"
+          class="mo-launch-new-btn is-plain"
+          data-new-in-cwd="${escapeHtml(tp.primaryCwd || "")}"
+          title="在该项目目录新建会话"
+        >${iconSvg("plus", { size: 11 })}</button>
+      </div>
     </div>
   `;
 }
@@ -1414,6 +1536,11 @@ export function renderTycoonHudHtml(overview, {
   immersive = false,
   selectedTopicId = "",
   inspectorMode = "",
+  inspectorRoomId = "",
+  inspectorClusterOnly = false,
+  inspectorBack = null,
+  selectedSubProjectByTopic = {},
+  syncingProjects = false,
   questCollapsed = false,
   dispatchConfigOpen = false,
   mobileDockOpen = false,
@@ -1519,15 +1646,86 @@ export function renderTycoonHudHtml(overview, {
       <aside class="tycoon-hud-inspector" aria-label="待归类会话">
         <div class="tycoon-drawer-bar">
           <span>${iconSvg("folder", { size: 13 })} 待归类会话 · ${unassignedActive.length} 条</span>
-          <button type="button" class="tycoon-drawer-close" data-tycoon-close-inspector="1" title="关闭面板">${iconSvg("close", { size: 13 })}</button>
+          <div class="tycoon-drawer-actions">
+            <button type="button" class="mo-launch-new-btn is-plain" data-mo-action="sync-projects" ${syncingProjects ? "disabled" : ""} title="自动扫描并收录新项目">${iconSvg("layers", { size: 11 })}<span>${syncingProjects ? "同步中" : "同步项目"}</span></button>
+            <button type="button" class="tycoon-drawer-close" data-tycoon-close-inspector="1" title="关闭面板">${iconSvg("close", { size: 13 })}</button>
+          </div>
         </div>
         <div class="tycoon-inspector-scroll">
-          <p class="tycoon-drawer-hint">点右侧文件夹图标归入产线，或点标题直接进入对话。</p>
+          <p class="tycoon-drawer-hint">点「+ 收录」把目录直接升级为独立产线，或点文件夹归入已有产线。</p>
           ${unassignedActive.length ? `
             <div class="mo-thread-list">
-              ${unassignedActive.slice(0, 40).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId, recentCompletedByThread })).join("")}
+              ${unassignedActive.slice(0, 40).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId, recentCompletedByThread, allowInduct: true })).join("")}
             </div>
           ` : `<div class="mo-panel-empty">全部会话都已归类</div>`}
+        </div>
+      </aside>
+    `;
+  } else if (inspectorMode === "room" || inspectorMode === "cluster") {
+    const resolvedRoomId = inspectorRoomId || (domainFilter !== "all" ? domainFilter : "");
+    const targetDomain = domains.find((d) => d.id === resolvedRoomId) || domains[0] || null;
+    const domainTopics = Array.isArray(targetDomain?.topics) ? targetDomain.topics : [];
+    const bp = ROOM_BLUEPRINTS[targetDomain?.id] || {};
+    const { overflow } = partitionRoomTopicsForSlots(domainTopics, bp.maxSlots || 6);
+    const overflowIds = new Set(overflow.map((t) => t.id));
+    const showingClusterOnly = Boolean(inspectorClusterOnly && overflow.length > 0);
+    const listTopics = showingClusterOnly ? overflow : domainTopics;
+    inspectorDrawerHtml = `
+      <aside class="tycoon-hud-inspector" aria-label="同厂项目列表">
+        <div class="tycoon-drawer-bar">
+          <span class="tycoon-drawer-title">${iconSvg("layers", { size: 13 })} <strong>${escapeHtml(targetDomain?.name || "同厂项目")}</strong> <span class="tycoon-drawer-count">${listTopics.length}${domainTopics.length > listTopics.length ? `/${domainTopics.length}` : ""}</span></span>
+          <div class="tycoon-drawer-actions">
+            ${overflow.length > 0 ? `
+              <button
+                type="button"
+                class="mo-launch-new-btn is-plain"
+                data-tycoon-toggle-cluster-scope="1"
+                title="${showingClusterOnly ? "显示该厂全部项目" : "仅看折叠在复合厂房内的项目"}"
+              ><span>${showingClusterOnly ? `全厂 (${domainTopics.length})` : `折叠 (+${overflow.length})`}</span></button>
+            ` : ""}
+            <button type="button" class="mo-launch-new-btn is-plain" data-mo-action="sync-projects" ${syncingProjects ? "disabled" : ""} title="同步扫描本机未收录项目">${iconSvg("refresh", { size: 11 })}<span>${syncingProjects ? "同步中" : "同步"}</span></button>
+            <button type="button" class="tycoon-drawer-close" data-tycoon-close-inspector="1" title="关闭面板">${iconSvg("close", { size: 13 })}</button>
+          </div>
+        </div>
+        <div class="tycoon-inspector-scroll">
+          <p class="tycoon-drawer-hint">${showingClusterOnly ? `此处展开受 3D 场地容量折叠的 ${overflow.length} 个项目，点击任意项目查看工位与子项目。` : `同厂共 ${domainTopics.length} 个项目，点击任一项即可展开其工位会话与多目录子项目。`}</p>
+          ${listTopics.length ? `
+            <div class="tycoon-room-list">
+              ${listTopics.map((tp) => renderInspectorRoomTopicItemHtml(tp, { isOverflow: overflowIds.has(tp.id) })).join("")}
+            </div>
+          ` : `<div class="mo-panel-empty">该厂区暂无项目，可点右上角「同步」自动发现本地仓库</div>`}
+        </div>
+      </aside>
+    `;
+  } else if (inspectorMode === "directory") {
+    const nonEmptyDomains = domains.filter((d) => (d.topics || []).length > 0);
+    inspectorDrawerHtml = `
+      <aside class="tycoon-hud-inspector" aria-label="全园区项目目录">
+        <div class="tycoon-drawer-bar">
+          <span class="tycoon-drawer-title">${iconSvg("board", { size: 13 })} <strong>全园区项目目录 · ${allFlatTopics.length}</strong></span>
+          <div class="tycoon-drawer-actions">
+            <button type="button" class="mo-launch-new-btn is-plain" data-mo-action="sync-projects" ${syncingProjects ? "disabled" : ""} title="扫描近期工作区与记忆库项目卡，自动补充未收录产线">${iconSvg("refresh", { size: 11 })}<span>${syncingProjects ? "同步中" : "同步项目"}</span></button>
+            <button type="button" class="tycoon-drawer-close" data-tycoon-close-inspector="1" title="关闭面板">${iconSvg("close", { size: 13 })}</button>
+          </div>
+        </div>
+        <div class="tycoon-inspector-scroll">
+          <p class="tycoon-drawer-hint">全厂区已收录的所有项目与集群；点击任意项目在 3D 沙盘定位并展开工位。</p>
+          ${nonEmptyDomains.length ? nonEmptyDomains.map((dom) => {
+            const bp = ROOM_BLUEPRINTS[dom.id] || {};
+            const { overflow } = partitionRoomTopicsForSlots(dom.topics || [], bp.maxSlots || 6);
+            const overflowIds = new Set(overflow.map((t) => t.id));
+            return `
+              <div class="tycoon-dir-section">
+                <div class="tycoon-dir-head">
+                  <strong>${escapeHtml(dom.name)}</strong>
+                  <span>${(dom.topics || []).length} 项</span>
+                </div>
+                <div class="tycoon-room-list">
+                  ${(dom.topics || []).map((tp) => renderInspectorRoomTopicItemHtml(tp, { isOverflow: overflowIds.has(tp.id) })).join("")}
+                </div>
+              </div>
+            `;
+          }).join("") : `<div class="mo-panel-empty">暂未收录项目，点击右上角「同步项目」立即扫描本机工作区</div>`}
         </div>
       </aside>
     `;
@@ -1542,10 +1740,17 @@ export function renderTycoonHudHtml(overview, {
       </aside>
     `;
   } else if (selectedTopic) {
+    const selectedSubCwd = Array.isArray(selectedTopic.subProjects) && selectedTopic.subProjects.length >= 2
+      ? (selectedSubProjectByTopic?.[selectedTopic.id] || "")
+      : "";
+    const hasBack = Boolean(inspectorBack && ["room", "cluster", "directory"].includes(inspectorBack.mode));
     inspectorDrawerHtml = `
       <aside class="tycoon-hud-inspector" aria-label="3D 产线工位详情">
         <div class="tycoon-drawer-bar">
-          <span class="tycoon-drawer-title" title="${escapeHtml(selectedTopic.name)}">${iconSvg("layers", { size: 13 })} <strong>${escapeHtml(selectedTopic.name)}</strong></span>
+          <span class="tycoon-drawer-title" title="${escapeHtml(selectedTopic.name)}">
+            ${hasBack ? `<button type="button" class="tycoon-drawer-back-btn" data-tycoon-inspector-back="1" title="返回上级项目列表">←</button>` : ""}
+            ${iconSvg("layers", { size: 13 })} <strong>${escapeHtml(selectedTopic.name)}</strong>
+          </span>
           <div class="tycoon-drawer-actions">
             <button
               type="button"
@@ -1564,12 +1769,13 @@ export function renderTycoonHudHtml(overview, {
               type="button"
               class="mo-launch-new-btn"
               data-mo-select-dispatch-topic="${escapeHtml(selectedTopic.id)}"
+              data-mo-subproject-cwd="${escapeHtml(selectedSubCwd)}"
               title="定向派工到此产线"
             >${iconSvg("split", { size: 11 })}<span>派工</span></button>
             <button
               type="button"
               class="mo-launch-new-btn is-plain"
-              data-new-in-cwd="${escapeHtml(selectedTopic.primaryCwd || "")}"
+              data-new-in-cwd="${escapeHtml(selectedSubCwd || selectedTopic.primaryCwd || "")}"
               title="手动在该产线目录新建会话"
             >${iconSvg("plus", { size: 11 })}</button>
             <button type="button" class="tycoon-drawer-close" data-tycoon-close-inspector="1" title="关闭详情 (点击空白地板也可收起)">${iconSvg("close", { size: 13 })}</button>
@@ -1587,6 +1793,7 @@ export function renderTycoonHudHtml(overview, {
             editingMetricsTopicId,
             editingContextTopicId,
             expandedMetricsTopics,
+            selectedSubProjectByTopic,
             searchText: "",
             inInspector: true,
             recentCompletedByThread,
@@ -1637,6 +1844,11 @@ export function renderTycoonHudHtml(overview, {
             ${iconSvg("egg", { size: 13 })}
             <span>灵光蛋</span>
             <strong>${eggCount}</strong>
+          </button>
+          <button type="button" class="tycoon-res-pill is-directory ${inspectorMode === "directory" ? "is-active" : ""}" data-tycoon-open-directory="1" title="查看全园区全部已收录项目与同厂分组">
+            ${iconSvg("board", { size: 13 })}
+            <span>项目</span>
+            <strong>${allFlatTopics.length}</strong>
           </button>
           ${recentDoneThreads.length ? `
             <button type="button" class="tycoon-res-pill is-recent-done ${inspectorMode === "recent_done" ? "is-active" : ""}" data-tycoon-open-recent-done="1" title="最近完成但尚未查看的会话，点开逐条查看">

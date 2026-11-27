@@ -1,5 +1,12 @@
 import { t } from "./i18n.js";
 import { apiGet, apiPost, apiRequest, apiUrl, isDemoMode } from "./api-client.js?v=20261118demo";
+import {
+  findTaskForThread,
+  getTaskAncestors,
+  renderTaskStripHtml,
+  renderTaskTreeModalHtml,
+  shouldShowTaskStrip,
+} from "./task-tree.js?v=20261126task1";
 import { initHumanVerifyOverlay } from "./human-verify.js?v=20261125hv1";
 import {
   autoPreviewThreadImages,
@@ -77,7 +84,7 @@ import {
   resolveVisibleTelemetryKeys,
   sortProfilesByAvailability,
   summarizeTelemetryMobileBadge,
-} from "./instance-switcher.js?v=20261122quota";
+} from "./instance-switcher.js?v=20261126agymodel";
 import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity, summarizeToolUseActivity } from "./live-state.js?v=20261120claude";
 import {
   cleanStreamingAgentText,
@@ -94,7 +101,7 @@ import {
   renderMessageCopyButton,
   renderTurnHtml,
   turnEndsWithProcessGroup,
-} from "./markdown.js?v=20261125err1";
+} from "./markdown.js?v=20261126agymodel";
 import {
   SIDEBAR_MANUAL_HOLD_MS,
   THREAD_EXPAND_STEP,
@@ -119,25 +126,12 @@ import {
   normalizeDraftCwdInput,
   renderNewThreadCwdListHtml,
 } from "./new-thread-cwd.js?v=20261125cwd1";
-import { renderMissionOverviewHtml, renderTycoonHudHtml } from "./mission-overview.js?v=20261125sa1";
-import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261125sa1";
+import { renderMissionOverviewHtml, renderTycoonHudHtml } from "./mission-overview.js?v=20261126remotedeck1";
+import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261126remotedeck1";
 import {
-  buildSpriteOpeningBriefing,
-  buildSpriteQueryReply,
-  buildSpriteTicketReply,
-  buildSpriteTopicBriefing,
-  captureSpriteOverviewSnapshot,
-  classifySpriteUserInput,
-  diffSpriteOverviewEvents,
-  loadSpritePrefs,
-  askSpriteAssistant,
-  appendSpriteTurn,
-  buildSpriteContext,
-  submitSpriteDispatch,
-  spriteTomorrowAtEight,
-  renderSpriteAssistantHtml,
-  saveSpritePrefs,
-} from "./sprite-assistant.js?v=20261125sa4";
+  createInitialSpriteState,
+  createSpriteController,
+} from "./sprite-controller.js?v=20261126ctrl2";
 import {
   captureSubtreeUiState,
   replaceHtmlPreservingUiState,
@@ -600,6 +594,11 @@ const state = {
   immersiveOverview: false,
   tycoonSelectedTopicId: "",
   tycoonInspectorMode: "",
+  tycoonInspectorRoomId: "",
+  tycoonInspectorClusterOnly: false,
+  tycoonInspectorBack: null,
+  selectedSubProjectByTopic: {},
+  overviewSyncingProjects: false,
   tycoonQuestCollapsed: (() => {
     try {
       return localStorage.getItem("ac-tycoon-quest-collapsed") !== "0";
@@ -620,53 +619,7 @@ const state = {
   dispatchBusy: false,
   dispatchPreview: null,
   lastDispatchReceipt: null,
-  sprite: {
-    open: false,
-    prefsOpen: false,
-    ttsEnabled: loadSpritePrefs().ttsEnabled,
-    mood: "idle",
-    unreadCount: 0,
-    toastBubble: null,
-    toastTimer: null,
-    audioEl: null,
-    messages: [],
-    pendingPreview: null,
-    pendingArchive: null,
-    pendingReorg: null,
-    scopedTopicId: "",
-    scopedTopicName: "",
-    busy: false,
-    recording: false,
-    handsFree: false,
-    speechActive: false,
-    speaking: false,
-    recordElapsedSec: 0,
-    prevTtsPref: null,
-    transcribing: false,
-    draft: "",
-    turns: [],
-    focusStack: [],
-    cards: [],
-    tour: null,
-    continueDrafts: {},
-    greetedSession: false,
-    prevSnapshot: null,
-    mic: {
-      audioCtx: null,
-      micStream: null,
-      source: null,
-      processor: null,
-      vad: null,
-      tickTimer: null,
-      startedAtMs: 0,
-      lastLevelUiAt: 0,
-      bargeInFrames: 0,
-      bargeRing: [],
-      queuedSamples: null,
-      chunks: [],
-      maxTimer: null,
-    },
-  },
+  sprite: createInitialSpriteState(),
   initialThreadLoading: false,
   activeThreadId: "",
   activeThread: null,
@@ -676,6 +629,18 @@ const state = {
   newThreadCwdPickerIndex: 0,
   newThreadCwdPickerOptions: [],
   newThreadCwdPickingLocal: false,
+  newThreadTaskDraft: null,
+  pendingScrollToTurn: null,
+  tasks: [],
+  tasksLoaded: false,
+  tasksModalStatus: "open",
+  tasksModalQuery: "",
+  tasksSelectedId: "",
+  tasksCollapsedIds: new Set(),
+  tasksDetailLogs: [],
+  tasksBindPickerId: "",
+  memoryConfig: null,
+  skillSyncStatus: null,
   nextCursor: null,
   liveActivity: null,
   activityCursor: "",
@@ -950,8 +915,8 @@ function openProjectWindow(cwd) {
 }
 
 const DEFAULT_DOCUMENT_TITLE = typeof document !== "undefined"
-  ? (document.title || "Agent Control · 多智能体远程控制台")
-  : "Agent Control · 多智能体远程控制台";
+  ? (document.title || "RemoteDeck · 多智能体远程控制台")
+  : "RemoteDeck · 多智能体远程控制台";
 
 function syncScopedDocumentTitle() {
   if (typeof document === "undefined") return;
@@ -961,7 +926,7 @@ function syncScopedDocumentTitle() {
     const meta = state.projectsMeta?.[state.scopedProjectCwd]
       || Object.entries(state.projectsMeta || {}).find(([k]) => isSameProjectCwd(k, state.scopedProjectCwd))?.[1];
     const projName = meta?.alias || projectBaseName(state.scopedProjectCwd) || "项目";
-    document.title = `${prefix}${projName} · Agent Control`;
+    document.title = `${prefix}${projName} · RemoteDeck`;
     return;
   }
   document.title = `${prefix}${DEFAULT_DOCUMENT_TITLE}`;
@@ -2638,6 +2603,81 @@ function closeThreadContextMenu() {
   }
 }
 
+function localFileManagerName() {
+  const plat = `${navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || ""}`.toLowerCase();
+  if (plat.includes("win")) return "资源管理器";
+  if (plat.includes("linux") && !plat.includes("android")) return "文件管理器";
+  return "访达";
+}
+
+function openLocalFileContextMenu(threadId, filePath, clientX = 0, clientY = 0, anchorEl = null) {
+  closeThreadContextMenu();
+  const cleanPath = String(filePath || "").trim();
+  if (!cleanPath) return;
+  const cleanThreadId = String(threadId || "").trim();
+  const managerName = localFileManagerName();
+
+  const menu = document.createElement("div");
+  menu.className = "thread-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.innerHTML = `
+    ${cleanThreadId ? `<button type="button" class="thread-context-menu-item" data-file-menu-action="reveal">${iconSvg("folder", { size: 14 })}<span>在${escapeHtml(managerName)}中显示</span></button>` : ""}
+    <button type="button" class="thread-context-menu-item" data-file-menu-action="copy">${iconSvg("clipboard", { size: 14 })}<span>拷贝文件路径</span></button>
+  `;
+  const mountParent = anchorEl?.closest?.("dialog[open]") || document.body;
+  mountParent.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  const maxX = Math.max(8, window.innerWidth - rect.width - 8);
+  const maxY = Math.max(8, window.innerHeight - rect.height - 8);
+  menu.style.left = `${Math.min(Math.max(8, clientX), maxX)}px`;
+  menu.style.top = `${Math.min(Math.max(8, clientY), maxY)}px`;
+  activeThreadContextMenu = menu;
+
+  const cleanup = () => {
+    document.removeEventListener("pointerdown", onDismiss, true);
+    document.removeEventListener("keydown", onDismiss, true);
+    window.removeEventListener("scroll", onDismiss, true);
+  };
+  const onDismiss = (ev) => {
+    if (activeThreadContextMenu !== menu) {
+      cleanup();
+      return;
+    }
+    if (ev.type === "keydown" && ev.key !== "Escape") return;
+    if (ev.type === "pointerdown" && menu.contains(ev.target)) return;
+    if (ev.type === "keydown" && ev.key === "Escape") {
+      ev.preventDefault();
+      ev.stopPropagation();
+    }
+    closeThreadContextMenu();
+    cleanup();
+  };
+  document.addEventListener("pointerdown", onDismiss, true);
+  document.addEventListener("keydown", onDismiss, true);
+  window.addEventListener("scroll", onDismiss, true);
+
+  menu.addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("[data-file-menu-action]");
+    if (!btn) return;
+    const action = btn.dataset.fileMenuAction;
+    closeThreadContextMenu();
+    cleanup();
+    if (action === "reveal" && cleanThreadId) {
+      try {
+        await apiPost("api/thread/reveal", { threadId: cleanThreadId, path: cleanPath });
+      } catch (error) {
+        showToastBanner(`打开${managerName}失败`, { detail: formatActionError(error, `无法在${managerName}中定位该文件`), error: true });
+      }
+    } else if (action === "copy") {
+      const copied = await copyTextToClipboard(cleanPath);
+      showToastBanner(copied ? "已复制文件路径" : "复制文件路径失败", {
+        detail: cleanPath,
+        error: !copied,
+      });
+    }
+  });
+}
+
 async function forkThreadAction(threadId, { upToTurnIndex = null, upToTurnId = "" } = {}) {
   if (!threadId) return;
   try {
@@ -2868,7 +2908,7 @@ function renderCliMaintenanceBanner() {
           state.cliStatus = res.cliStatus;
           renderCliMaintenanceBanner();
           const stillBusy = Object.values(state.cliStatus).some((i) => !i?.cliInstalled && (i?.status === "installing" || i?.status === "missing_auto"));
-          if (!stillBusy) void loadProviders();
+          if (!stillBusy) void refreshProviders();
         }
       } catch {}
     }, 2500);
@@ -3028,16 +3068,41 @@ function ensureTycoon3DMounted(boardEl) {
         state.sprite.scopedTopicName = findOverviewTopicById(topicId)?.name || topicId;
         state.tycoonSelectedTopicId = topicId;
         state.tycoonInspectorMode = "topic";
+        state.tycoonInspectorRoomId = "";
+        state.tycoonInspectorClusterOnly = false;
+        state.tycoonInspectorBack = null;
+        renderProjectBoard();
+      },
+      onSelectCluster: (roomId) => {
+        const nextRoom = roomId || "all";
+        state.overviewDomainFilter = nextRoom;
+        state.tycoonInspectorMode = "cluster";
+        state.tycoonInspectorRoomId = nextRoom;
+        state.tycoonInspectorClusterOnly = true;
+        state.tycoonSelectedTopicId = "";
+        state.tycoonInspectorBack = null;
         renderProjectBoard();
       },
       onSelectRoom: (roomId) => {
-        state.overviewDomainFilter = roomId || "all";
-        state.tycoonInspectorMode = "";
+        const nextRoom = roomId || "all";
+        state.overviewDomainFilter = nextRoom;
         state.tycoonSelectedTopicId = "";
+        state.tycoonInspectorClusterOnly = false;
+        state.tycoonInspectorBack = null;
+        if (nextRoom === "all") {
+          state.tycoonInspectorMode = "";
+          state.tycoonInspectorRoomId = "";
+        } else {
+          state.tycoonInspectorMode = "room";
+          state.tycoonInspectorRoomId = nextRoom;
+        }
         renderProjectBoard();
       },
       onSelectIncubator: () => {
         state.tycoonInspectorMode = "incubator";
+        state.tycoonInspectorRoomId = "";
+        state.tycoonInspectorClusterOnly = false;
+        state.tycoonInspectorBack = null;
         state.tycoonSelectedTopicId = "";
         renderProjectBoard();
       },
@@ -3049,6 +3114,9 @@ function ensureTycoon3DMounted(boardEl) {
       onClearSelection: () => {
         if (state.tycoonInspectorMode || state.tycoonSelectedTopicId) {
           state.tycoonInspectorMode = "";
+          state.tycoonInspectorRoomId = "";
+          state.tycoonInspectorClusterOnly = false;
+          state.tycoonInspectorBack = null;
           state.tycoonSelectedTopicId = "";
           renderProjectBoard();
         }
@@ -3110,11 +3178,15 @@ function renderProjectBoard() {
       void loadMissionOverview({ trigger: "open" });
     }
     const { hudEl } = ensureTycoon3DMounted(boardEl);
-    tycoon3dInstance?.resume?.();
+    const spriteFsActive = state.sprite.viewMode === "fullscreen" || state.sprite.viewMode === "phone";
+    if (!spriteFsActive) tycoon3dInstance?.resume?.();
     tycoon3dInstance?.sync?.(state.missionOverview, {
       searchText: state.searchText,
       selectedTopicId: state.tycoonSelectedTopicId,
       domainFilter: state.overviewDomainFilter,
+      selectedClusterRoomId: (state.tycoonInspectorMode === "cluster" || state.tycoonInspectorMode === "room")
+        ? state.tycoonInspectorRoomId
+        : "",
     });
     if (hudEl) {
       const nextHudHtml = renderTycoonHudHtml(state.missionOverview, {
@@ -3133,6 +3205,11 @@ function renderProjectBoard() {
         immersive: state.immersiveOverview,
         selectedTopicId: state.tycoonSelectedTopicId,
         inspectorMode: state.tycoonInspectorMode,
+        inspectorRoomId: state.tycoonInspectorRoomId,
+        inspectorClusterOnly: state.tycoonInspectorClusterOnly,
+        inspectorBack: state.tycoonInspectorBack,
+        selectedSubProjectByTopic: state.selectedSubProjectByTopic,
+        syncingProjects: state.overviewSyncingProjects,
         questCollapsed: state.tycoonQuestCollapsed,
         dispatchConfigOpen: state.tycoonDispatchConfigOpen,
         mobileDockOpen: state.tycoonMobileDockOpen,
@@ -3180,6 +3257,8 @@ function renderProjectBoard() {
       editingMetricsTopicId: state.editingMetricsTopicId,
       editingContextTopicId: state.editingContextTopicId,
       expandedMetricsTopics: state.expandedOverviewMetrics,
+      selectedSubProjectByTopic: state.selectedSubProjectByTopic,
+      syncingProjects: state.overviewSyncingProjects,
       allowResume: Boolean(state.activeThread),
       domainFilter: state.overviewDomainFilter,
       immersive: state.immersiveOverview,
@@ -3241,12 +3320,216 @@ function renderProjectBoard() {
   renderBatchActionBars();
 }
 
+function activeThreadTask() {
+  if (!state.activeThreadId) return null;
+  const metaTaskId = state.activeThread?.taskId || state.threads.find((t) => t.id === state.activeThreadId)?.taskId || "";
+  if (metaTaskId) {
+    const byId = state.tasks.find((tk) => tk.id === metaTaskId);
+    if (byId) return byId;
+  }
+  return findTaskForThread(state.tasks, state.activeThreadId, { includeClosed: false })
+    || findTaskForThread(state.tasks, state.activeThreadId, { includeClosed: true });
+}
+
+function updateTasksBadges() {
+  const openCount = (state.tasks || []).filter((tk) => tk.status === "open").length;
+  for (const el of [$("tasksCountBadge"), $("topbarMenuTasksBadge")]) {
+    if (!el) continue;
+    el.hidden = openCount <= 0;
+    el.textContent = openCount > 99 ? "99+" : String(openCount);
+  }
+}
+
+async function refreshTasks() {
+  try {
+    const res = await apiGet("api/tasks?status=all", { useEtagCache: false });
+    if (Array.isArray(res?.tasks)) {
+      state.tasks = res.tasks;
+      state.tasksLoaded = true;
+      updateTasksBadges();
+      renderProjectTaskStrip();
+      renderTopbarAndControls();
+      if ($("tasksModal")?.open) renderTasksModal();
+    }
+  } catch {
+    // Keep existing cached task list on transient network errors.
+  }
+}
+
+async function loadTaskDetailLogs(taskId) {
+  if (!taskId) {
+    state.tasksDetailLogs = [];
+    return;
+  }
+  try {
+    const res = await apiGet(`api/tasks/${encodeURIComponent(taskId)}?limit=40`, { useEtagCache: false });
+    state.tasksDetailLogs = Array.isArray(res?.logs) ? res.logs : [];
+    if ($("tasksModal")?.open && state.tasksSelectedId === taskId) {
+      renderTasksModal();
+    }
+  } catch {
+    state.tasksDetailLogs = [];
+  }
+}
+
+function renderTasksModal() {
+  const body = $("tasksModalBody");
+  if (!body) return;
+  const modal = $("tasksModal");
+  if (modal) {
+    for (const btn of modal.querySelectorAll("[data-tasks-status]")) {
+      btn.classList.toggle("is-active", btn.dataset.tasksStatus === state.tasksModalStatus);
+    }
+  }
+  const threadsById = new Map((state.threads || []).map((t) => [t.id, t]));
+  if (state.activeThread?.id) threadsById.set(state.activeThread.id, state.activeThread);
+  body.innerHTML = renderTaskTreeModalHtml({
+    tasks: state.tasks || [],
+    selectedTaskId: state.tasksSelectedId,
+    detailLogs: state.tasksDetailLogs || [],
+    threadsById,
+    statusFilter: state.tasksModalStatus || "open",
+    query: state.tasksModalQuery || "",
+    collapsedIds: state.tasksCollapsedIds,
+    bindPickerTaskId: state.tasksBindPickerId || "",
+  });
+}
+
+async function openTasksModal(selectedTaskId = "") {
+  setTopbarMenuOpen(false);
+  setComposerConfigOpen(false);
+  const modal = $("tasksModal");
+  if (!modal) return;
+  if (selectedTaskId) state.tasksSelectedId = selectedTaskId;
+  else if (!state.tasksSelectedId) {
+    const currentTask = activeThreadTask();
+    if (currentTask) state.tasksSelectedId = currentTask.id;
+  }
+  if (!state.tasksLoaded) await refreshTasks();
+  if (!state.tasksSelectedId && state.tasks.length) {
+    state.tasksSelectedId = state.tasks.find((t) => t.status === "open")?.id || state.tasks[0].id;
+  }
+  renderTasksModal();
+  if (!modal.open) modal.showModal();
+  if (state.tasksSelectedId) {
+    void loadTaskDetailLogs(state.tasksSelectedId);
+  }
+}
+
+async function startLinkedThreadDraft({
+  mode = "same",
+  taskId = "",
+  parentTaskId = "",
+  sourceThreadId = "",
+  cwd = "",
+  taskTitle = "",
+} = {}) {
+  if ($("tasksModal")?.open) $("tasksModal").close();
+  const effectiveSource = sourceThreadId || state.activeThreadId || "";
+  const sourceThread = state.threads.find((t) => t.id === effectiveSource) || state.activeThread || null;
+  const resolvedCwd = cwd || sourceThread?.cwd || state.newThreadCwd || "";
+  const existingTask = taskId
+    ? state.tasks.find((t) => t.id === taskId)
+    : (parentTaskId ? state.tasks.find((t) => t.id === parentTaskId) : activeThreadTask());
+  state.newThreadTaskDraft = {
+    mode,
+    taskId: mode === "same" ? (taskId || existingTask?.id || "") : "",
+    parentTaskId: mode === "child" ? (parentTaskId || existingTask?.id || "") : "",
+    sourceThreadId: effectiveSource,
+    taskTitle: taskTitle || (mode === "same" ? (existingTask?.title || sourceThread?.title || "") : ""),
+    parentTitle: mode === "child" ? (existingTask?.title || sourceThread?.title || "") : "",
+    cwd: resolvedCwd,
+  };
+  await openNewThreadModal({
+    cwd: resolvedCwd,
+    provider: sourceThread?.provider || defaultNewThreadProvider(),
+    preserveTaskDraft: true,
+  });
+}
+
+async function jumpToTaskPlan(taskId) {
+  const task = (state.tasks || []).find((t) => t.id === taskId);
+  if (!task) return;
+  const targetThreadId = task.planRef?.threadId || task.threadIds?.[0] || "";
+  if (!targetThreadId) {
+    showToastBanner("该任务暂无可跳转的会话");
+    return;
+  }
+  if ($("tasksModal")?.open) $("tasksModal").close();
+  await selectThread(targetThreadId, {
+    focusScroll: false,
+    scrollToTurnId: task.planRef?.turnId || "",
+    scrollToTurnIndex: Number.isInteger(task.planRef?.turnIndex) ? task.planRef.turnIndex : -1,
+  });
+}
+
+async function pinTurnAsPlanAction({ threadId, turnId = "", turnIndex = -1, excerpt = "" } = {}) {
+  if (!threadId) return;
+  try {
+    const cleanExcerpt = String(excerpt || "").replace(/\s+/g, " ").trim().slice(0, 140);
+    const res = await apiPost("api/thread/pin-plan", {
+      threadId,
+      turnId,
+      turnIndex,
+      excerpt: cleanExcerpt,
+    });
+    if (res?.task) {
+      await refreshTasks();
+      showToastBanner(`已将此回复设为「${res.task.title}」规划锚点`);
+    }
+  } catch (error) {
+    showToastBanner("设置规划锚点失败", { detail: formatActionError(error), error: true });
+  }
+}
+
 function renderProjectTaskStrip() {
   const stripEl = $("projectTaskStrip");
   if (!stripEl) return;
-  stripEl.hidden = true;
-  stripEl.classList.remove("is-single-task");
-  stripEl.innerHTML = "";
+  if (isBoardViewActive()) {
+    stripEl.hidden = true;
+    stripEl.innerHTML = "";
+    return;
+  }
+  const draft = state.newThreadTaskDraft;
+  const task = draft ? (state.tasks.find((t) => t.id === (draft.taskId || draft.parentTaskId)) || null) : activeThreadTask();
+  if (!shouldShowTaskStrip({ task, draftContext: draft })) {
+    stripEl.hidden = true;
+    stripEl.classList.remove("is-single-task");
+    stripEl.innerHTML = "";
+    return;
+  }
+
+  const threadsById = new Map((state.threads || []).map((t) => [t.id, t]));
+  if (state.activeThread?.id) threadsById.set(state.activeThread.id, state.activeThread);
+  const ancestors = task ? getTaskAncestors(state.tasks || [], task.id) : [];
+  const children = task ? (state.tasks || []).filter((t) => t.parentId === task.id) : [];
+
+  const siblingIds = new Set(task?.threadIds || []);
+  if (draft?.sourceThreadId) siblingIds.add(draft.sourceThreadId);
+  const siblingThreads = [...siblingIds].map((id) => threadsById.get(id) || { id, title: id, missing: true });
+
+  let liveCwdWarning = "";
+  if (draft) {
+    const draftCwd = normalizeProjectCwd(draft.cwd || state.newThreadCwd || "");
+    const liveSibling = siblingThreads.find((th) => (
+      th && !th.missing && th.live && draftCwd && normalizeProjectCwd(th.cwd || "") === draftCwd
+    ));
+    if (liveSibling) {
+      liveCwdWarning = `兄弟会话「${liveSibling.title || liveSibling.id}」正在同目录运行`;
+    }
+  }
+
+  stripEl.hidden = false;
+  stripEl.classList.add("is-single-task");
+  stripEl.innerHTML = renderTaskStripHtml({
+    task,
+    ancestors,
+    children,
+    siblingThreads,
+    activeThreadId: state.activeThreadId || "",
+    draftContext: draft,
+    liveCwdWarning,
+  });
 }
 
 function renderActiveHeading(title, cwd, { editableCwd = false } = {}) {
@@ -3321,7 +3604,10 @@ function renderTopbarAndControls() {
     goalBtn.hidden = true;
     interruptBtn.hidden = true;
     renameBtn.hidden = true;
-    if ($("pinTicketBtn")) $("pinTicketBtn").hidden = true;
+  if ($("pinTicketBtn")) $("pinTicketBtn").hidden = true;
+  if ($("newSiblingThreadBtn")) $("newSiblingThreadBtn").hidden = true;
+  if ($("newChildTaskThreadBtn")) $("newChildTaskThreadBtn").hidden = true;
+  if ($("linkExistingTaskBtn")) $("linkExistingTaskBtn").hidden = true;
     if (toggleImgBtn) toggleImgBtn.hidden = true;
     archiveBtn.hidden = true;
     if (moreDot) moreDot.hidden = !state.updateStatus?.hasUpdate;
@@ -3427,12 +3713,16 @@ function renderTopbarAndControls() {
   interruptBtn.hidden = !running;
   renameBtn.hidden = false;
   const pinTicketBtn = $("pinTicketBtn");
+  const currentTask = activeThreadTask();
   if (pinTicketBtn) {
-    const pinned = (state.missionOverview?.assistantTickets || []).some((tk) => tk.threadIds?.includes(thread.id));
+    const pinned = Boolean(currentTask) || (state.missionOverview?.assistantTickets || []).some((tk) => tk.threadIds?.includes(thread.id));
     pinTicketBtn.hidden = Boolean(thread.internal);
-    pinTicketBtn.textContent = pinned ? "已是工单" : "钉成工单";
+    pinTicketBtn.textContent = pinned ? "已是任务" : "钉成任务";
     pinTicketBtn.disabled = pinned;
   }
+  if ($("newSiblingThreadBtn")) $("newSiblingThreadBtn").hidden = Boolean(thread.internal);
+  if ($("newChildTaskThreadBtn")) $("newChildTaskThreadBtn").hidden = Boolean(thread.internal);
+  if ($("linkExistingTaskBtn")) $("linkExistingTaskBtn").hidden = Boolean(thread.internal);
   if (toggleImgBtn) {
     toggleImgBtn.hidden = false;
     toggleImgBtn.textContent = isThreadImagesUnlocked(thread.id) ? "收起本会话预览图" : "加载本会话预览图";
@@ -4366,13 +4656,36 @@ function renderActiveMessages() {
   const turns = dedupeAdjacentTurns(Array.isArray(thread.turns) ? thread.turns : []);
   syncTurnListIncremental(turnListEl, thread.id || state.activeThreadId || "", turns);
   renderStreamingTurn({ preserveAnchor: false });
-  if (state.autoFollow) {
+  if (state.pendingScrollToTurn && state.pendingScrollToTurn.threadId === (thread.id || state.activeThreadId || "")) {
+    const targetInfo = state.pendingScrollToTurn;
+    state.pendingScrollToTurn = null;
+    requestAnimationFrame(() => applyPendingTurnScroll(targetInfo));
+  } else if (state.autoFollow) {
     scrollViewportIfFollowing();
   } else {
     restoreViewportAnchor(vp, anchor);
   }
   scheduleDeferredImagesObservation(vp);
   scheduleMermaidHydration(vp);
+}
+
+function applyPendingTurnScroll({ turnId = "", turnIndex = -1 } = {}) {
+  const turnListEl = $("turnList");
+  if (!turnListEl) return;
+  let btn = null;
+  if (turnId) {
+    btn = [...turnListEl.querySelectorAll("[data-pin-plan-turn-id]")].find((el) => el.dataset.pinPlanTurnId === turnId) || null;
+  }
+  if (!btn && Number.isInteger(turnIndex) && turnIndex >= 0) {
+    btn = turnListEl.querySelector(`[data-pin-plan-turn-index="${turnIndex}"]`);
+  }
+  const target = btn?.closest(".msg-row") || btn?.closest(".turn-block") || (turnIndex >= 0 ? turnListEl.querySelectorAll(".turn-block")?.[turnIndex] : null);
+  if (!target) return;
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.classList.remove("is-plan-highlight");
+  void target.offsetWidth;
+  target.classList.add("is-plan-highlight");
+  setTimeout(() => target.classList.remove("is-plan-highlight"), 2600);
 }
 
 function renderPendingRequests() {
@@ -5064,6 +5377,7 @@ async function refreshModelsForProfile(provider, profileId) {
     saveCachedModels(state.allModels, state.modelsByProvider);
     syncModelAndEffortSelectors();
     syncNewModelSelect($("newModelSelect")?.value || "");
+    syncAutomationModelAndEffortSelects($("autoModelSelect")?.value || "", $("autoEffortSelect")?.value || "");
     renderComposerControls();
   } catch {
     // Preserve existing model list if profile refresh fails.
@@ -5648,8 +5962,19 @@ function focusThreadInSidebar(threadId) {
 }
 
 async function selectThread(compositeId, { focusScroll = true, preserveStatus = false, newThreadCwd = null } = {}) {
+  const preserveTaskDraft = Boolean(arguments[1]?.preserveTaskDraft);
+  const scrollToTurnId = String(arguments[1]?.scrollToTurnId || "");
+  const scrollToTurnIndex = Number.isInteger(arguments[1]?.scrollToTurnIndex) ? arguments[1].scrollToTurnIndex : -1;
   const shouldFocusSidebar = Boolean(compositeId && (arguments[1]?.focusSidebar || state.boardOpen));
   closeCustomSelectMenu();
+  if (!preserveTaskDraft && (compositeId || newThreadCwd === null)) {
+    state.newThreadTaskDraft = null;
+  }
+  if (compositeId && (scrollToTurnId || (Number.isInteger(scrollToTurnIndex) && scrollToTurnIndex >= 0))) {
+    state.pendingScrollToTurn = { threadId: compositeId, turnId: scrollToTurnId, turnIndex: scrollToTurnIndex };
+  } else if (compositeId !== state.activeThreadId) {
+    state.pendingScrollToTurn = null;
+  }
   if (!preserveStatus) {
     clearComposerStatus();
   }
@@ -5677,7 +6002,10 @@ async function selectThread(compositeId, { focusScroll = true, preserveStatus = 
   }
   state.newThreadCwd = compositeId ? null : newThreadCwd;
   state.boardOpen = !compositeId && newThreadCwd === null;
-  state.autoFollow = focusScroll;
+  if (wasDifferentThread || newThreadCwd !== null) {
+    exitSpriteOverlayForNavigation();
+  }
+  state.autoFollow = state.pendingScrollToTurn ? false : focusScroll;
   state.userPickedDraftModel = false;
   state.activityCursor = "";
   state.streamingText = "";
@@ -5935,6 +6263,7 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
     if (sub.action === "new") {
       const provider = currentComposerProvider();
       const profileId = currentComposerProfileId();
+      const draftTask = state.newThreadTaskDraft;
       const created = await apiPost("api/thread/new", {
         provider,
         profileId,
@@ -5945,11 +6274,22 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
         effort,
         permissionMode,
         goalMode,
+        ...(draftTask ? {
+          taskId: draftTask.taskId || "",
+          parentTaskId: draftTask.parentTaskId || "",
+          sourceThreadId: draftTask.sourceThreadId || "",
+          taskTitle: draftTask.taskTitle || "",
+          taskMode: draftTask.mode || "",
+        } : {}),
       }, { timeoutMs: requestTimeoutMs });
+      state.newThreadTaskDraft = null;
       saveNewThreadPrefs(provider, { model, effort });
       resetDraftIfNeeded();
       state.composerGoal = false;
-      await refreshThreads();
+      await Promise.all([
+        refreshThreads(),
+        draftTask ? refreshTasks() : Promise.resolve(),
+      ]);
       if (created?.thread?.id) {
         saveLocalThreadPrefs(created.thread.id, { model, effort, permissionMode });
         await selectThread(created.thread.id);
@@ -6020,6 +6360,9 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
       }
       if (turnRes.thread) syncThreadSummaryIntoList(turnRes.thread);
     }
+    const autoCompactGrowthK = turnRes?.autoCompact
+      ? Math.max(1, Math.round((Number(turnRes.autoCompact.growthTokens) || 0) / 1000))
+      : 0;
     if (state.activeThread) {
       const optimisticTurnId = turnRes?.turn?.id || turnRes?.turnId || `optimistic-turn-${Date.now()}`;
       const userContent = [
@@ -6056,9 +6399,6 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
         live: true,
         ...(turnRes?.thread?.title ? { title: turnRes.thread.title, name: turnRes.thread.name || turnRes.thread.title } : {}),
       });
-      const autoCompactGrowthK = turnRes?.autoCompact
-        ? Math.max(1, Math.round((Number(turnRes.autoCompact.growthTokens) || 0) / 1000))
-        : 0;
       state.liveActivity = mergeLiveActivity(state.liveActivity, {
         turnId: optimisticTurnId,
         status: "running",
@@ -6526,7 +6866,7 @@ async function triggerProfileLogin({ provider = "", profileId = "", mode = "" } 
         authUrl: res.authUrl,
         loginCommand: res.loginCommand || "",
         title: res.openedBrowser ? "已在浏览器打开独立实例 OAuth 登录页" : "已生成独立实例 OAuth 登录链接",
-        detail: "在浏览器完成授权后，Agent Control 会自动接管并在后台保持在线；授权后即可关闭浏览器窗口。",
+        detail: "在浏览器完成授权后，RemoteDeck 会自动接管并在后台保持在线；授权后即可关闭浏览器窗口。",
       });
       showToastBanner(
         res.openedBrowser ? "已打开独立登录页" : "已生成独立登录链接",
@@ -6539,7 +6879,7 @@ async function triggerProfileLogin({ provider = "", profileId = "", mode = "" } 
         profileId: cleanProfileId,
         loginCommand: res.loginCommand || "",
         title: "已以独立隔离目录启动 Codex 桌面端",
-        detail: "完成登录或配置后可直接关闭桌面端窗口，Agent Control 会在后台持续控制该实例。",
+        detail: "完成登录或配置后可直接关闭桌面端窗口，RemoteDeck 会在后台持续控制该实例。",
       });
       showToastBanner("已拉起独立 Codex 客户端", {
         detail: "登录或操作完成后可随时关闭客户端窗口",
@@ -6558,7 +6898,7 @@ async function triggerProfileLogin({ provider = "", profileId = "", mode = "" } 
       }
       showToastBanner(
         res?.openedTerminal ? "已在终端开启独立登录" : "已复制独立登录命令",
-        { detail: "授权完成后可关闭终端，由 Agent Control 直接调度" },
+        { detail: "授权完成后可关闭终端，由 RemoteDeck 直接调度" },
       );
       setComposerStatus("success", "已准备好独立终端登录引导", { autoClearMs: 3500 });
     }
@@ -7107,6 +7447,10 @@ function bindEventSourceListeners(es) {
     }
   });
 
+  es.addEventListener("task_updated", () => {
+    void refreshTasks();
+  });
+
   es.addEventListener("overview_updated", (ev) => {
     try {
       const data = JSON.parse(ev.data || "{}");
@@ -7179,6 +7523,10 @@ function bindEventSourceListeners(es) {
       const retry401El = $("agyAutoRetryAuth401Toggle");
       if (retry401El && Object.hasOwn(settings, "agyAutoRetryAuth401")) {
         retry401El.checked = settings.agyAutoRetryAuth401 !== false;
+      }
+      const sharedMemEl = $("sharedMemoryToggle");
+      if (sharedMemEl && Object.hasOwn(settings, "sharedMemoryEnabled")) {
+        sharedMemEl.checked = settings.sharedMemoryEnabled !== false;
       }
       const compactTokensEl = $("agyAutoCompactTokensSelect");
       if (compactTokensEl) {
@@ -7844,6 +8192,7 @@ function updateSettingsTabBadge() {
     "autoUpdateCliToggle",
     "agyAutoCompactToggle",
     "agyAutoRetryAuth401Toggle",
+    "sharedMemoryToggle",
   ];
   const els = ids.map((id) => $(id)).filter(Boolean);
   if (!els.length) {
@@ -8086,13 +8435,23 @@ function renderUpdateModal() {
   }
 
   if (desktopBtn) {
+    const menuWrap = $("desktopUpdateMenuWrap");
+    const openLabelEl = $("desktopUpdateOpenLabel");
+    const silentLabelEl = $("desktopUpdateSilentLabel");
     const showDesktopBtn = Boolean(desktopInfo?.supported && (desktopInfo?.installed || desktopInfo?.canBuild));
+    if (menuWrap) menuWrap.hidden = !showDesktopBtn;
     desktopBtn.hidden = !showDesktopBtn;
     desktopBtn.disabled = !showDesktopBtn || !desktopInfo?.canBuild || isBusy;
+    if (!showDesktopBtn || !desktopInfo?.canBuild || isBusy) {
+      setDesktopUpdateMenuOpen(false);
+    }
+    const verb = !desktopInfo?.installed
+      ? "构建"
+      : (desktopInfo?.needsUpdate ? "更新" : "重编");
     if (state.desktopUpdating || snap?.desktopUpdating) desktopBtn.textContent = "编译 App 中…";
-    else if (!desktopInfo?.installed) desktopBtn.textContent = "构建桌面 App";
-    else if (desktopInfo?.needsUpdate) desktopBtn.textContent = "更新桌面 App";
-    else desktopBtn.textContent = "重编桌面 App";
+    else desktopBtn.textContent = `${verb}桌面 App`;
+    if (openLabelEl) openLabelEl.textContent = `${verb}并打开桌面 App`;
+    if (silentLabelEl) silentLabelEl.textContent = `仅${verb}，不自动打开`;
   }
 
   if (restartBtn) {
@@ -8137,7 +8496,7 @@ function applyUpdateStatusSnapshot(snap, { fromReconnectReady = false } = {}) {
             location.reload();
             return;
           }
-          showToastBanner(manualRestart ? "后台服务已重启完成" : "Agent Control 已更新完成", {
+          showToastBanner(manualRestart ? "后台服务已重启完成" : "RemoteDeck 已更新完成", {
             detail: snap.localShortSha ? `当前版本 ${snap.localShortSha}` : "服务已重新启动",
           });
         }
@@ -8146,7 +8505,7 @@ function applyUpdateStatusSnapshot(snap, { fromReconnectReady = false } = {}) {
       try { sessionStorage.removeItem(UPDATE_RESTART_FLAG_KEY); } catch {}
     }
   } else if (!prevHasUpdate && snap.hasUpdate && snap.behindCount > 0) {
-    showToastBanner("发现 Agent Control 新版本", {
+    showToastBanner("发现 RemoteDeck 新版本", {
       detail: `领先 ${snap.behindCount} 个提交，点击右上角菜单或侧栏底部即可一键更新`,
     });
   } else if (!state.updateStatus?.desktopApp?.needsUpdate && snap.desktopApp?.installed && snap.desktopApp?.needsUpdate) {
@@ -8272,16 +8631,30 @@ async function triggerRestartService() {
   }
 }
 
-async function triggerDesktopAppUpdate() {
+function setDesktopUpdateMenuOpen(open) {
+  const menu = $("desktopUpdateMenu");
+  const btn = $("applyDesktopUpdateBtn");
+  if (!menu || !btn) return;
+  const nextOpen = Boolean(open) && !btn.disabled && !btn.hidden;
+  menu.hidden = !nextOpen;
+  btn.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+}
+
+async function triggerDesktopAppUpdate({ openAfterBuild = true } = {}) {
   if (state.desktopUpdating || state.updateApplying || state.updateStatus?.restartPending) return;
+  setDesktopUpdateMenuOpen(false);
   state.desktopUpdating = true;
   renderUpdateIndicators();
   if ($("updateModal")?.open) renderUpdateModal();
   try {
-    const res = await apiPost("api/update/desktop", { reason: "manual", relaunchIfRunning: true }, { timeoutMs: 240_000 });
+    const res = await apiPost("api/update/desktop", {
+      reason: "manual",
+      relaunchIfRunning: Boolean(openAfterBuild),
+      openAfterBuild: Boolean(openAfterBuild),
+    }, { timeoutMs: 240_000 });
     if (res?.status) applyUpdateStatusSnapshot(res.status);
     showToastBanner("桌面 App 壳子已更新", {
-      detail: res?.message || "Agent Control.app 已重新编译安装",
+      detail: res?.message || (openAfterBuild ? "桌面 App 已重新构建并正在打开" : "桌面 App 已重新构建（未自动打开）"),
     });
   } catch (error) {
     const errMsg = formatActionError(error, "更新桌面 App 失败");
@@ -8312,6 +8685,128 @@ function formatAutomationTimeLabel(ms) {
   }
 }
 
+function syncAutomationProfileSelect(preferredProfileId = "") {
+  const provider = $("autoProviderSelect")?.value || "codex";
+  const select = $("autoProfileSelect");
+  if (!select) return;
+  const list = sortProfilesByAvailability(filterProfilesByProvider(state.profiles, provider));
+  const prev = preferredProfileId || select.value;
+  select.innerHTML = (list.length ? list : [{ id: defaultProfileForProvider(provider), label: "默认" }])
+    .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(profileOptionLabel(p))}</option>`)
+    .join("");
+  if (prev && [...select.options].some((o) => o.value === prev)) {
+    select.value = prev;
+  } else {
+    select.value = defaultProfileForProvider(provider);
+  }
+}
+
+function syncAutomationEffortSelect(selectedModelObj = null, preferredEffort = "") {
+  const effortSelect = $("autoEffortSelect");
+  if (!effortSelect) return;
+  const effortLabels = { low: "低思考", medium: "中思考", high: "高思考", xhigh: "超高思考", max: "最高思考" };
+  const efforts = (selectedModelObj?.supportedReasoningEfforts || [])
+    .map(normalizeEffortOptionValue)
+    .filter(Boolean);
+  const cleanPreferred = normalizeEffortOptionValue(preferredEffort);
+  if (cleanPreferred && !efforts.includes(cleanPreferred)) {
+    efforts.push(cleanPreferred);
+  }
+  if (!efforts.length) {
+    effortSelect.innerHTML = `<option value="">默认强度</option>`;
+    effortSelect.value = "";
+    effortSelect.disabled = true;
+    return;
+  }
+  effortSelect.disabled = false;
+  effortSelect.innerHTML = [
+    `<option value="">默认强度</option>`,
+    ...efforts.map((e) => `<option value="${escapeHtml(e)}">${escapeHtml(effortLabels[e] || e)}</option>`),
+  ].join("");
+  effortSelect.value = cleanPreferred && efforts.includes(cleanPreferred) ? cleanPreferred : "";
+}
+
+function syncAutomationModelAndEffortSelects(preferredModel = "", preferredEffort = "") {
+  const provider = $("autoProviderSelect")?.value || "codex";
+  const modelSelect = $("autoModelSelect");
+  if (!modelSelect) return;
+  const rawModels = resolveModelsForProvider(state.modelsByProvider, state.allModels, provider);
+  const models = ensurePreferredModelInList(rawModels, provider, preferredModel);
+  modelSelect.innerHTML = `<option value="">跟随默认模型</option>${renderModelOptionsHtml(models)}`;
+  if (preferredModel && [...modelSelect.options].some((o) => o.value === preferredModel)) {
+    modelSelect.value = preferredModel;
+  } else {
+    modelSelect.value = "";
+  }
+  const selectedObj = models.find((m) => (m.id || m.model) === modelSelect.value) || null;
+  syncAutomationEffortSelect(selectedObj, preferredEffort);
+}
+
+function syncAutomationScheduleInputs(rrule = "") {
+  const scheduleSelect = $("autoScheduleSelect");
+  const customField = $("autoScheduleCustomField");
+  const customInput = $("autoScheduleCustomInput");
+  if (!scheduleSelect) return;
+  const trimmed = String(rrule || "").trim();
+  const hasPreset = trimmed && [...scheduleSelect.options].some((o) => o.value === trimmed && o.value !== "__custom__");
+  if (!trimmed) {
+    scheduleSelect.value = "FREQ=DAILY;BYHOUR=9;BYMINUTE=0";
+    if (customField) customField.hidden = true;
+    if (customInput) customInput.value = "";
+    return;
+  }
+  if (hasPreset) {
+    scheduleSelect.value = trimmed;
+    if (customField) customField.hidden = true;
+    if (customInput) customInput.value = "";
+  } else {
+    scheduleSelect.value = "__custom__";
+    if (customField) customField.hidden = false;
+    if (customInput) customInput.value = trimmed;
+  }
+}
+
+function resetAutomationForm() {
+  $("automationCreateForm")?.reset();
+  if ($("autoTaskIdInput")) $("autoTaskIdInput").value = "";
+  if ($("automationCreateSummary")) {
+    $("automationCreateSummary").textContent = "+ 新建通用定时任务（支持 Codex / Claude / Antigravity / Grok）";
+  }
+  if ($("autoSubmitBtn")) $("autoSubmitBtn").textContent = "保存并启用托管";
+  if ($("autoCancelEditBtn")) $("autoCancelEditBtn").hidden = true;
+  if ($("autoProviderSelect")) $("autoProviderSelect").value = "codex";
+  syncAutomationProfileSelect();
+  syncAutomationModelAndEffortSelects();
+  syncAutomationScheduleInputs();
+}
+
+function startEditAutomationTask(task) {
+  if (!task) return;
+  if ($("autoTaskIdInput")) $("autoTaskIdInput").value = task.id || "";
+  if ($("autoNameInput")) $("autoNameInput").value = task.name || "";
+  const providerSelect = $("autoProviderSelect");
+  const nextProvider = task.provider || "codex";
+  if (providerSelect && [...providerSelect.options].some((o) => o.value === nextProvider)) {
+    providerSelect.value = nextProvider;
+  }
+  syncAutomationProfileSelect(task.profileId || "");
+  syncAutomationModelAndEffortSelects(task.model || "", task.reasoningEffort || "");
+  syncAutomationScheduleInputs(task.rrule || "");
+  if ($("autoCwdInput")) $("autoCwdInput").value = task.cwds?.[0] || "";
+  if ($("autoPromptInput")) $("autoPromptInput").value = task.prompt || "";
+  if ($("automationCreateSummary")) {
+    $("automationCreateSummary").textContent = `编辑定时任务：${task.name || task.id}`;
+  }
+  if ($("autoSubmitBtn")) $("autoSubmitBtn").textContent = "保存修改";
+  if ($("autoCancelEditBtn")) $("autoCancelEditBtn").hidden = false;
+  const details = $("automationCreateDetails");
+  if (details) {
+    details.open = true;
+    details.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+  void refreshModelsForProfile(nextProvider, $("autoProfileSelect")?.value || "");
+}
+
 function renderAutomationsModal(snapshot = state.automationsSnapshot) {
   const badge = $("automationsSummaryBadge");
   const toggle = $("automationsGlobalToggle");
@@ -8337,7 +8832,7 @@ function renderAutomationsModal(snapshot = state.automationsSnapshot) {
   }
   listEl.innerHTML = tasks.map((task) => {
     const pv = providerVisualMeta(task.provider);
-    const sourceBadge = task.source === "agent-control" ? "自建托管" : `${pv.short} 原生`;
+    const sourceBadge = task.source === "agent-control" ? `自建 · ${pv.short}` : `${pv.short} 原生`;
     const statusPill = task.running
       ? `<span class="board-status-pill is-live">执行中</span>`
       : task.managed
@@ -8349,8 +8844,18 @@ function renderAutomationsModal(snapshot = state.automationsSnapshot) {
     const nextRunHtml = task.nextRunAtMs
       ? `<span>下次：${escapeHtml(formatAutomationTimeLabel(task.nextRunAtMs))}</span>`
       : "";
+    const modelLabel = task.model
+      ? `${task.model}${task.reasoningEffort ? ` (${task.reasoningEffort})` : ""}`
+      : "默认模型";
+    const profileMetaHtml = task.source === "agent-control" && task.profileLabel && task.profileId !== "default" && task.profileLabel !== task.provider
+      ? `<span>实例：${escapeHtml(task.profileLabel)}</span>`
+      : "";
+    const modelMetaHtml = `<span>模型：${escapeHtml(modelLabel)}</span>`;
     const threadBtn = task.lastThreadId
       ? `<button type="button" class="btn-secondary btn-xs" data-auto-open-thread="${escapeHtml(task.lastThreadId)}">查看会话</button>`
+      : "";
+    const editBtn = task.source === "agent-control"
+      ? `<button type="button" class="btn-secondary btn-xs" data-auto-edit="${escapeHtml(task.taskKey || task.id)}">编辑</button>`
       : "";
     const delBtn = `<button type="button" class="btn-secondary btn-xs" data-auto-delete="${escapeHtml(task.taskKey || task.id)}">删除</button>`;
     return `
@@ -8363,12 +8868,15 @@ function renderAutomationsModal(snapshot = state.automationsSnapshot) {
           </div>
           <div class="automation-item-actions">
             ${threadBtn}
+            ${editBtn}
             <button type="button" class="btn-primary btn-xs" data-auto-run="${escapeHtml(task.taskKey)}"${task.running ? " disabled" : ""}>立即执行</button>
             <button type="button" class="btn-secondary btn-xs" data-auto-toggle="${escapeHtml(task.taskKey)}" data-auto-next-managed="${task.managed ? "0" : "1"}">${task.managed ? "暂停托管" : "开启托管"}</button>
             ${delBtn}
           </div>
         </div>
         <div class="automation-item-meta">
+          ${profileMetaHtml}
+          ${modelMetaHtml}
           <span>周期：${escapeHtml(task.scheduleLabel || "手动触发")}</span>
           ${nextRunHtml}
           ${lastRunHtml}
@@ -8392,6 +8900,9 @@ async function openAutomationsModal() {
   setComposerConfigOpen(false);
   const modal = $("automationsModal");
   if (!modal) return;
+  if (!$("autoTaskIdInput")?.value) {
+    resetAutomationForm();
+  }
   renderAutomationsModal();
   if (!modal.open) modal.showModal();
   try {
@@ -8498,6 +9009,10 @@ async function openUpdateModal() {
         if (retry401El && res?.settings) {
           retry401El.checked = res.settings.agyAutoRetryAuth401 !== false;
         }
+        const sharedMemEl = $("sharedMemoryToggle");
+        if (sharedMemEl && res?.settings) {
+          sharedMemEl.checked = res.settings.sharedMemoryEnabled !== false;
+        }
         const compactTokensEl = $("agyAutoCompactTokensSelect");
         if (compactTokensEl && res?.settings?.agyAutoCompactTokens) {
           const value = String(res.settings.agyAutoCompactTokens);
@@ -8510,9 +9025,51 @@ async function openUpdateModal() {
         updateSettingsTabBadge();
       }).catch(() => {}),
       renderCliVersionsInModal(),
+      loadMemoryAndSkillSettings(),
     ]);
   } catch {
     // Keep existing modal content when status check is transient.
+  }
+}
+
+function renderSkillSyncStatus(status) {
+  const container = $("skillSyncTargets");
+  if (!container) return;
+  const targets = Array.isArray(status?.targets) ? status.targets : [];
+  if (!targets.length) {
+    container.innerHTML = `<span class="task-muted">未检测到可同步客户端</span>`;
+    return;
+  }
+  const names = { claude: "Claude Code", codex: "Codex", antigravity: "Antigravity" };
+  container.innerHTML = targets.map((item) => {
+    const label = item.upToDate ? "已同步" : (item.conflict ? "有同名未托管目录" : (item.installed ? "需更新" : "未安装"));
+    const cls = item.upToDate ? "is-ok" : (item.conflict ? "is-warn" : "is-idle");
+    return `<span class="skill-sync-pill ${cls}" title="${escapeHtml(item.path || "")}">${escapeHtml(names[item.client] || item.client)}：${escapeHtml(label)}</span>`;
+  }).join("");
+}
+
+async function loadMemoryAndSkillSettings() {
+  try {
+    const [memCfg, skillStatus] = await Promise.all([
+      apiGet("api/memory/config", { useEtagCache: false }),
+      apiGet("api/skills/status", { useEtagCache: false }),
+    ]);
+    state.memoryConfig = memCfg;
+    state.skillSyncStatus = skillStatus;
+    const sharedMemEl = $("sharedMemoryToggle");
+    if (sharedMemEl && memCfg) sharedMemEl.checked = memCfg.enabled !== false;
+    const vaultInput = $("memoryVaultPathInput");
+    if (vaultInput && memCfg) vaultInput.value = memCfg.vaultPath || "";
+    const hintEl = $("memoryVaultEffectiveHint");
+    if (hintEl && memCfg) {
+      hintEl.textContent = memCfg.isDefaultVault
+        ? `当前生效（内置默认）：${memCfg.effectiveVaultPath || "未启用"}`
+        : `当前生效：${memCfg.effectiveVaultPath || "未启用"}`;
+    }
+    renderSkillSyncStatus(skillStatus);
+    updateSettingsTabBadge();
+  } catch {
+    // Keep modal usable if settings load fails transiently.
   }
 }
 
@@ -9140,12 +9697,12 @@ async function browseLocalDirectoryForNewThread() {
   }
 }
 
-async function openNewThreadModal({ cwd = "", provider = "", model = "", promptText = "" } = {}) {
+async function openNewThreadModal({ cwd = "", provider = "", model = "", promptText = "", preserveTaskDraft = false } = {}) {
   setTopbarMenuOpen(false);
   setComposerConfigOpen(false);
   if (typeof closeNewThreadCwdPicker === "function") closeNewThreadCwdPicker();
   const chosenProvider = provider || defaultNewThreadProvider();
-  await selectThread("", { newThreadCwd: cwd });
+  await selectThread("", { newThreadCwd: cwd, preserveTaskDraft });
   $("composerProviderSelect").value = chosenProvider;
   syncComposerProfileSelect();
   if (model) saveNewThreadPrefs(chosenProvider, { model });
@@ -9202,6 +9759,50 @@ async function refreshMissionOverview({ preferredModel = "" } = {}) {
     if (isBoardViewActive() && isOverviewBoardMode()) {
       renderProjectBoard();
     }
+  }
+}
+
+async function syncOverviewProjects({ clearExisting = false } = {}) {
+  if (state.overviewSyncingProjects) return;
+  state.overviewSyncingProjects = true;
+  renderProjectBoard();
+  try {
+    const res = await apiPost("/api/overview/sync", { clearExisting });
+    if (res?.overview && Array.isArray(res.overview.domains)) {
+      state.missionOverview = res.overview;
+    }
+    const addedCount = Number(res?.addedCount) || 0;
+    showToastBanner(
+      addedCount > 0 ? `已同步收录 ${addedCount} 个新项目` : "当前所有项目均已收录",
+      addedCount > 0 ? { detail: (res.addedTopics || []).map((t) => t.name).join("、") } : undefined,
+    );
+  } catch (error) {
+    showToastBanner("同步收录项目失败", { detail: formatActionError(error), error: true });
+  } finally {
+    state.overviewSyncingProjects = false;
+    renderProjectBoard();
+  }
+}
+
+async function inductOverviewWorkspace(cwd = "") {
+  const cleanCwd = String(cwd || "").trim();
+  if (!cleanCwd) return;
+  const name = projectBaseName(cleanCwd) || cleanCwd;
+  try {
+    const res = await apiPost("/api/overview/topic", { name, primaryCwd: cleanCwd });
+    if (res?.overview && Array.isArray(res.overview.domains)) {
+      state.missionOverview = res.overview;
+    }
+    if (res?.topic?.id && state.boardViewMode === "tycoon3d") {
+      state.tycoonSelectedTopicId = res.topic.id;
+      state.tycoonInspectorMode = "topic";
+      state.tycoonInspectorBack = null;
+      tycoon3dInstance?.flyToTopic?.(res.topic.id);
+    }
+    renderProjectBoard();
+    showToastBanner(`已收录为产线「${res?.topic?.name || name}」`);
+  } catch (error) {
+    showToastBanner("收录产线失败", { detail: formatActionError(error), error: true });
   }
 }
 
@@ -9293,9 +9894,11 @@ async function submitSmartDispatch({ confirmOnly = false } = {}) {
   renderProjectBoard();
   try {
     const chosenAgentKey = state.dispatchAgentKey || "auto";
+    const activeSubCwd = state.dispatchTopicId ? (state.selectedSubProjectByTopic?.[state.dispatchTopicId] || "") : "";
     const payload = {
       text,
       topicId: state.dispatchTopicId || "",
+      ...(activeSubCwd ? { cwdOverride: activeSubCwd } : {}),
       mode: state.dispatchMode || "auto",
       preferredProvider: "auto",
       agentKey: chosenAgentKey,
@@ -9357,396 +9960,9 @@ async function submitSmartDispatch({ confirmOnly = false } = {}) {
   }
 }
 
-function stopSpriteSpeech() {
-  const wasSpeaking = Boolean(state.sprite.speaking);
-  state.sprite.speaking = false;
-  if (state.sprite.audioEl) {
-    try {
-      state.sprite.audioEl.pause();
-      state.sprite.audioEl.src = "";
-    } catch {}
-    state.sprite.audioEl = null;
-  }
-  try {
-    if (typeof speechSynthesis !== "undefined") {
-      speechSynthesis.cancel();
-    }
-  } catch {}
-  if (wasSpeaking) {
-    renderSpriteAssistantMount();
-  }
-}
-
-async function speakSpriteText(text = "") {
-  if (!state.sprite.ttsEnabled) return;
-  const clean = stripMarkdownForSpeech(text, 220);
-  if (!clean) return;
-  stopSpriteSpeech();
-  state.sprite.speaking = true;
-  renderSpriteAssistantMount();
-  const clearSpeaking = () => {
-    if (state.sprite.speaking) {
-      state.sprite.speaking = false;
-      renderSpriteAssistantMount();
-    }
-  };
-  const tts = await fetchVoiceTtsAudio({ text: clean });
-  if (!state.sprite.ttsEnabled || !state.sprite.speaking) {
-    clearSpeaking();
-    return;
-  }
-  if (tts?.audioBase64 && typeof Audio !== "undefined") {
-    try {
-      const mime = tts.mimeType || "audio/mp3";
-      const audio = new Audio(`data:${mime};base64,${tts.audioBase64}`);
-      state.sprite.audioEl = audio;
-      audio.addEventListener("ended", clearSpeaking, { once: true });
-      audio.addEventListener("error", clearSpeaking, { once: true });
-      await audio.play();
-      return;
-    } catch {
-      state.sprite.audioEl = null;
-    }
-  }
-  try {
-    if (typeof speechSynthesis !== "undefined" && typeof SpeechSynthesisUtterance !== "undefined") {
-      const u = new SpeechSynthesisUtterance(clean);
-      const v = pickPreferredChineseSpeechVoice(speechSynthesis.getVoices?.() || []);
-      if (v) u.voice = v;
-      u.lang = "zh-CN";
-      u.onend = clearSpeaking;
-      u.onerror = clearSpeaking;
-      speechSynthesis.speak(u);
-      return;
-    }
-  } catch {}
-  clearSpeaking();
-}
-
-function renderSpriteAssistantMount() {
-  const mount = $("spriteAssistantMount");
-  const is3d = Boolean(isBoardViewActive() && state.boardViewMode === "tycoon3d" && !state.scopedProjectCwd);
-  const hasPendingCard = Boolean(
-    state.sprite.pendingPreview
-    || state.sprite.pendingArchive
-    || state.sprite.pendingReorg,
-  );
-  const badgeCount = state.sprite.unreadCount + (hasPendingCard ? 1 : 0);
-  state.sprite.context = buildSpriteContext(findOverviewTopicById(state.sprite.scopedTopicId || state.tycoonSelectedTopicId), state.missionOverview);
-  tycoon3dInstance?.setUserBusy?.(is3d && (state.sprite.open || state.sprite.busy || state.sprite.recording));
-  if (state.sprite.recording) tycoon3dInstance?.setSpriteMood?.("listening");
-  const effMood = hasPendingCard ? "coin" : state.sprite.mood;
-  if (!tycoon3dInstance?.setSpriteMood) tycoon3dInstance?.syncSpriteState?.({ badgeCount: state.sprite.open ? 0 : badgeCount, mood: effMood });
-  if (!mount || !is3d) {
-    if (mount) {
-      mount.hidden = true;
-      mount._acLastStableHtml = "";
-      mount._acLastHtml = "";
-      mount.innerHTML = "";
-    }
-    return;
-  }
-  mount.hidden = false;
-
-  const hasInspector = Boolean(
-    state.tycoonInspectorMode === "unassigned"
-    || state.tycoonInspectorMode === "incubator"
-    || state.tycoonInspectorMode === "recent_done"
-    || state.tycoonSelectedTopicId,
-  );
-  mount.classList.add("is-3d");
-  mount.classList.remove("is-2d", "is-chat", "is-chat-idle");
-  mount.classList.toggle("has-inspector", hasInspector);
-  mount.classList.toggle("is-open", Boolean(state.sprite.open));
-
-  // Sync live input draft before re-rendering so typing is never lost on background SSE ticks
-  const liveInput = $("spriteCommandInput");
-  if (liveInput && document.activeElement === liveInput) {
-    state.sprite.draft = liveInput.value;
-  }
-
-  for (const input of mount.querySelectorAll("[data-sprite-continue-message]")) {
-    state.sprite.continueDrafts ||= {};
-    state.sprite.continueDrafts[input.dataset.spriteContinueMessage] = input.value;
-  }
-  const wasOpen = Boolean(mount._acSpriteWasOpen);
-  const prevToastText = mount._acPrevToastText || "";
-  const curToastText = !state.sprite.open && state.sprite.toastBubble?.text ? String(state.sprite.toastBubble.text) : "";
-  const enteringOpen = Boolean(state.sprite.open && !wasOpen);
-  const enteringToast = Boolean(curToastText && curToastText !== prevToastText);
-
-  mount._acSpriteWasOpen = Boolean(state.sprite.open);
-  mount._acPrevToastText = curToastText;
-
-  const msgs = Array.isArray(state.sprite.messages) ? state.sprite.messages : [];
-  const lastMsgId = msgs.length ? String(msgs[msgs.length - 1]?.id || msgs.length) : "";
-  const isNewMsg = Boolean(lastMsgId && lastMsgId !== mount._acLastMsgId);
-  mount._acLastMsgId = lastMsgId;
-
-  const prevFeedEl = $("spriteFeedList");
-  const feedWasNearBottom = !prevFeedEl
-    || (prevFeedEl.scrollHeight - prevFeedEl.scrollTop - prevFeedEl.clientHeight <= 28);
-  const shouldPinFeedToBottom = enteringOpen || isNewMsg || feedWasNearBottom;
-
-  const { agentOptions } = buildDispatchAgentContext();
-  const excludedAgentKeys = Array.isArray(state.missionOverview?.meta?.dispatchPrefs?.excludedAgentKeys)
-    ? state.missionOverview.meta.dispatchPrefs.excludedAgentKeys
-    : [];
-
-  const stableHtml = renderSpriteAssistantHtml(state.sprite, {
-    is3dMode: is3d,
-    enteringOpen: false,
-    enteringToast: false,
-    agentOptions,
-    excludedAgentKeys,
-  });
-  if (!enteringOpen && !enteringToast && mount._acLastStableHtml === stableHtml) {
-    return;
-  }
-  mount._acLastStableHtml = stableHtml;
-
-  const renderHtml = (enteringOpen || enteringToast)
-    ? renderSpriteAssistantHtml(state.sprite, {
-        is3dMode: is3d,
-        enteringOpen,
-        enteringToast,
-        agentOptions,
-        excludedAgentKeys,
-      })
-    : stableHtml;
-
-  replaceHtmlPreservingUiState(mount, renderHtml, {
-    skipIds: shouldPinFeedToBottom ? new Set(["spriteFeedList"]) : null,
-  });
-
-  if (shouldPinFeedToBottom) {
-    const feedEl = $("spriteFeedList");
-    if (feedEl) {
-      feedEl.scrollTop = feedEl.scrollHeight;
-    }
-  }
-
-  if (enteringOpen || enteringToast) {
-    setTimeout(() => {
-      for (const animEl of mount.querySelectorAll(".is-entering")) {
-        animEl.classList.remove("is-entering");
-      }
-    }, 220);
-  }
-}
-
-function pushSpriteMessage({
-  role = "sprite",
-  tone = "idle",
-  text = "",
-  spokenText = "",
-  chips = [],
-  popToast = false,
-  sources = [], actions = [], candidates = [], originalText = "", trace = null,
-} = {}) {
-  const cleanText = String(text || "").trim();
-  if (!cleanText) return;
-  state.sprite.messages.push({
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    role,
-    tone,
-    text: cleanText,
-    chips: Array.isArray(chips) ? chips : [],
-    sources, actions, candidates, originalText, trace,
-  });
-  if (state.sprite.messages.length > 24) {
-    state.sprite.messages = state.sprite.messages.slice(-24);
-  }
-  if (role === "sprite") {
-    state.sprite.mood = tone || "idle";
-    if (!state.sprite.open && popToast) {
-      state.sprite.unreadCount += 1;
-      state.sprite.toastBubble = { text: cleanText, tone: tone || "idle" };
-      if (state.sprite.toastTimer) clearTimeout(state.sprite.toastTimer);
-      state.sprite.toastTimer = setTimeout(() => {
-        state.sprite.toastBubble = null;
-        state.sprite.toastTimer = null;
-        renderSpriteAssistantMount();
-      }, 9500);
-    }
-  }
-  renderSpriteAssistantMount();
-  if (role === "sprite" && !trace && state.sprite.ttsEnabled) {
-    void speakSpriteText(spokenText || cleanText);
-  }
-}
-
-function syncSpriteWithOverview(overview) {
-  if (!overview || !Array.isArray(overview.domains)) return;
-  const nextSnap = captureSpriteOverviewSnapshot(overview, state.threads);
-  if (!nextSnap) return;
-  const onOverviewScreen = isBoardViewActive() && isOverviewBoardMode() && !state.scopedProjectCwd;
-
-  if (!state.sprite.greetedSession && onOverviewScreen) {
-    state.sprite.greetedSession = true;
-    state.sprite.prevSnapshot = nextSnap;
-    const brief = buildSpriteOpeningBriefing(overview, state.threads);
-    pushSpriteMessage({
-      role: "sprite",
-      tone: brief.tone,
-      text: brief.text,
-      spokenText: brief.spokenText,
-      chips: brief.chips,
-      popToast: true,
-    });
-    return;
-  }
-
-  if (state.sprite.prevSnapshot) {
-    const events = diffSpriteOverviewEvents(state.sprite.prevSnapshot, nextSnap, {
-      recentCompletedByThread: state.recentCompletedByThread,
-    });
-    state.sprite.prevSnapshot = nextSnap;
-    if (onOverviewScreen && events.length > 0) {
-      for (const ev of events.slice(0, 2)) {
-        pushSpriteMessage({
-          role: "sprite",
-          tone: ev.tone,
-          text: ev.text,
-          spokenText: ev.spokenText,
-          chips: ev.chips,
-          popToast: true,
-        });
-      }
-    }
-    return;
-  }
-
-  state.sprite.prevSnapshot = nextSnap;
-}
-
 function findOverviewTopicById(topicId = "") {
   if (!topicId || !Array.isArray(state.missionOverview?.domains)) return null;
   return state.missionOverview.domains.flatMap((d) => d.topics || []).find((t) => t.id === topicId) || null;
-}
-
-function summonSpriteForTopic(topicId = "") {
-  const tp = findOverviewTopicById(topicId);
-  if (!tp) {
-    toggleSpriteAssistant({ open: true });
-    return;
-  }
-  state.sprite.scopedTopicId = tp.id;
-  state.sprite.scopedTopicName = tp.name || tp.id;
-  state.sprite.open = true;
-  state.sprite.unreadCount = 0;
-  state.sprite.toastBubble = null;
-  const brief = buildSpriteTopicBriefing(tp);
-  pushSpriteMessage({
-    role: "sprite",
-    tone: brief.tone,
-    text: brief.text,
-    spokenText: brief.spokenText,
-    chips: brief.chips,
-  });
-  setTimeout(() => $("spriteCommandInput")?.focus(), 30);
-}
-
-async function requestSpriteArchivePreview({ topicId = "", staleDays = 3 } = {}) {
-  const targetId = topicId || state.sprite.scopedTopicId || state.tycoonSelectedTopicId || "";
-  if (!targetId) {
-    state.sprite.open = true;
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "idle",
-      text: "请先点开要整理的产线召唤小精灵，或在指令中说出产线名称（例如：「把国内漫剧过去很久的对话归档总结」）。",
-    });
-    return;
-  }
-  const tp = findOverviewTopicById(targetId);
-  if (tp) {
-    state.sprite.scopedTopicId = tp.id;
-    state.sprite.scopedTopicName = tp.name || tp.id;
-  }
-  state.sprite.open = true;
-  state.sprite.busy = true;
-  state.sprite.pendingPreview = null;
-  renderSpriteAssistantMount();
-  try {
-    const res = await apiPost("/api/overview/archive-digest", {
-      topicId: targetId,
-      staleDays,
-      confirmOnly: true,
-    });
-    state.sprite.pendingArchive = {
-      topicId: res.topicId || targetId,
-      topicName: res.topicName || tp?.name || targetId,
-      staleDays: Number(res.staleDays ?? staleDays),
-      candidates: Array.isArray(res.candidates) ? res.candidates : [],
-      memoryVault: Boolean(res.memoryVault),
-    };
-    const count = state.sprite.pendingArchive.candidates.length;
-    const msg = count > 0
-      ? `已在「${state.sprite.pendingArchive.topicName}」筛出 ${count} 条闲置满 ${state.sprite.pendingArchive.staleDays} 天的历史会话。点下方「确认归档」或说「确认」，${state.sprite.pendingArchive.memoryVault ? "我会先把值得长期保留的成果落进共享记忆库，再批量归档。" : "我将批量归档并提炼产线记忆摘要。"}`
-      : `「${state.sprite.pendingArchive.topicName}」目前没有闲置满 ${state.sprite.pendingArchive.staleDays} 天的会话，可在预览卡切换「≥1天」。`;
-    pushSpriteMessage({
-      role: "sprite",
-      tone: count > 0 ? "coin" : "idle",
-      text: msg,
-      spokenText: count > 0 ? `筛出 ${count} 条闲置会话，确认后将归档并提炼产线记忆摘要。` : "当前没有符合天数的闲置会话。",
-    });
-  } catch (error) {
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "urgent",
-      text: `筛选待归档会话失败：${formatActionError(error)}`,
-    });
-  } finally {
-    state.sprite.busy = false;
-    renderSpriteAssistantMount();
-  }
-}
-
-async function confirmSpriteArchivePreview() {
-  const pending = state.sprite.pendingArchive;
-  if (!pending?.topicId || state.sprite.busy) return;
-  const ids = (pending.candidates || []).map((c) => c.id).filter(Boolean);
-  if (!ids.length) return;
-  state.sprite.busy = true;
-  renderSpriteAssistantMount();
-  try {
-    const res = await apiPost("/api/overview/archive-digest", {
-      topicId: pending.topicId,
-      staleDays: pending.staleDays,
-      threadIds: ids,
-      preferredModel: state.missionOverview?.meta?.preferredModel || "auto",
-      confirmOnly: false,
-    });
-    state.sprite.pendingArchive = null;
-    if (res?.overview) {
-      state.missionOverview = res.overview;
-    }
-    void refreshThreads().catch(() => {});
-    const summary = res?.digest?.summary || "";
-    const archivedCount = res?.archivedCount || ids.length;
-    const toVault = Boolean(res?.digest?.memory);
-    const msg = toVault
-      ? `已完成！先落记忆再归档了 ${archivedCount} 条历史会话（新会话会通过共享记忆指针检索）：\n${summary}`
-      : `已完成！共归档 ${archivedCount} 条历史会话，并已提炼双存「产线归档记忆」（后续新开分身工位将自动继承）：\n${summary}`;
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "work",
-      text: msg,
-      spokenText: toVault
-        ? `已把成果落进记忆库，并归档 ${archivedCount} 条历史会话。`
-        : `已成功归档 ${archivedCount} 条历史会话并生成产线记忆摘要，后续新开工单会自动继承。`,
-    });
-    renderProjectBoard();
-  } catch (error) {
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "urgent",
-      text: `执行归档总结失败：${formatActionError(error)}`,
-    });
-  } finally {
-    state.sprite.busy = false;
-    renderSpriteAssistantMount();
-  }
 }
 
 async function saveOverviewTopicContext(topicId, formEl) {
@@ -9769,859 +9985,55 @@ async function saveOverviewTopicContext(topicId, formEl) {
   }
 }
 
-function toggleSpriteAssistant({ open = null } = {}) {
-  const nextOpen = typeof open === "boolean" ? open : !state.sprite.open;
-  state.sprite.open = nextOpen;
-  if (nextOpen) {
-    if (!state.sprite.scopedTopicId && state.tycoonSelectedTopicId) {
-      const selTp = findOverviewTopicById(state.tycoonSelectedTopicId);
-      if (selTp) {
-        state.sprite.scopedTopicId = selTp.id;
-        state.sprite.scopedTopicName = selTp.name || selTp.id;
-      }
-    }
-    state.sprite.unreadCount = 0;
-    state.sprite.toastBubble = null;
-    if (state.sprite.toastTimer) {
-      clearTimeout(state.sprite.toastTimer);
-      state.sprite.toastTimer = null;
-    }
-    if (!state.sprite.messages.length && state.missionOverview) {
-      const brief = buildSpriteOpeningBriefing(state.missionOverview, state.threads);
-      state.sprite.messages.push({
-        id: `init-${Date.now()}`,
-        role: "sprite",
-        tone: brief.tone,
-        text: brief.text,
-        chips: brief.chips,
-      });
-    }
-  } else if (state.sprite.recording && !state.sprite.handsFree) {
-    void stopSpriteMic({ submit: false });
-  }
-  renderSpriteAssistantMount();
-  if (nextOpen) {
-    setTimeout(() => $("spriteCommandInput")?.focus(), 30);
-  }
-}
+const spriteController = createSpriteController({
+  state,
+  getEl: $,
+  getTycoon3d: () => tycoon3dInstance,
+  deps: {
+    apiPostWithHotFallback,
+    isBoardViewActive,
+    isOverviewBoardMode,
+    setTopbarMenuOpen,
+    setComposerConfigOpen,
+    setSidebarOpen,
+    showToastBanner,
+    formatActionError,
+    buildDispatchAgentContext,
+    findOverviewTopicById,
+    renderProjectBoard,
+    refreshTasks,
+    refreshThreads,
+    selectThread,
+    loadMissionOverview,
+    openProjectBoardView,
+    ensureVoiceAudioUnlocked,
+    playVoiceEarcon,
+    requestVoiceWakeLock,
+    releaseVoiceWakeLock,
+    fetchVoiceTtsAudio,
+  },
+});
 
-async function requestSpriteDispatchPreview({ instruction = "", topicId = "", agentKey = "auto", mode = "auto" } = {}) {
-  const cleanText = String(instruction || "").trim();
-  if (!cleanText) return;
-  state.sprite.open = true;
-  state.sprite.busy = true;
-  renderSpriteAssistantMount();
-  try {
-    const effectiveAgent = agentKey !== "auto" ? agentKey : (state.dispatchAgentKey || "auto");
-    const effectiveModel = effectiveAgent !== "auto" ? (state.dispatchModel || "") : "";
-    const payload = {
-      text: cleanText,
-      topicId: topicId || state.sprite.scopedTopicId || "",
-      mode: mode || "auto",
-      preferredProvider: "auto",
-      agentKey: effectiveAgent,
-      model: effectiveModel,
-      inheritContext: state.dispatchInheritContext !== false,
-    };
-    const res = await submitSpriteDispatch(payload);
-    if (res?.chatOnly) {
-      const replyText = String(res.reply || "我在听，请告诉我你想安排的具体任务或项目。").trim();
-      pushSpriteMessage({
-        role: "sprite",
-        tone: "idle",
-        text: replyText,
-        spokenText: replyText,
-      });
-      return;
-    }
-    const routes = Array.isArray(res?.routes) ? res.routes : [];
-    if (!routes.length) {
-      pushSpriteMessage({
-        role: "sprite",
-        tone: "urgent",
-        text: "未能匹配到可派工的目标产线，请补充产线名称后再试。",
-      });
-      return;
-    }
-    state.sprite.pendingPreview = {
-      payload,
-      routes,
-      aiPlanned: Boolean(res?.aiPlanned),
-      aiModel: String(res?.aiModel || "").trim(),
-      reply: String(res?.reply || "").trim(),
-    };
-    // The concrete confirmation sentence is rendered for every planned route.
-    renderSpriteAssistantMount();
-  } catch (error) {
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "urgent",
-      text: `生成派工预览失败：${formatActionError(error)}`,
-    });
-  } finally {
-    state.sprite.busy = false;
-    renderSpriteAssistantMount();
-  }
-}
-
-async function confirmSpriteDispatchPreview() {
-  const preview = state.sprite.pendingPreview;
-  if (!preview?.payload || state.sprite.busy) return;
-  const { payload, routes } = preview;
-  const chosenAgentKey = payload.agentKey || "auto";
-  const missingAgent = routes.some((rt) => !rt.agentKey);
-  const mismatched = chosenAgentKey !== "auto" && routes.some((rt) => rt.agentKey !== chosenAgentKey);
-  if (missingAgent || mismatched) {
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "urgent",
-      text: missingAgent
-        ? "已拦截：后台服务还是旧版本（未返回账号归属），请先在版本弹窗点「重启服务」后再派单。"
-        : `已拦截：后端解析出的账号与所选「${chosenAgentKey}」不一致，未执行派出。`,
-    });
-    return;
-  }
-
-  state.sprite.busy = true;
-  renderSpriteAssistantMount();
-  try {
-    const res = await submitSpriteDispatch(payload, { confirmed: true, routes });
-    state.sprite.pendingPreview = null;
-    state.lastDispatchReceipt = res;
-    if (res?.overview) {
-      state.missionOverview = res.overview;
-    }
-    void refreshThreads().catch(() => {});
-    const dispatched = Array.isArray(res?.dispatched) ? res.dispatched : [];
-    if (dispatched.length > 0) {
-      const first = dispatched[0];
-      tycoon3dInstance?.triggerDispatchBurst?.(first.topicId || "");
-      const msgText = dispatched.length === 1
-        ? `已派出员工入驻「${first.topicName}」！任务正在执行中。`
-        : `已成功派出 ${dispatched.length} 名并发 AI 员工上岗！`;
-      const chips = dispatched
-        .filter((d) => d.threadId)
-        .slice(0, 2)
-        .map((d) => ({ kind: "thread", id: d.threadId, label: `进入：${d.topicName}` }));
-      pushSpriteMessage({
-        role: "sprite",
-        tone: "work",
-        text: msgText,
-        spokenText: msgText,
-        chips,
-      });
-    }
-    renderProjectBoard();
-  } catch (error) {
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "urgent",
-      text: `派出失败：${formatActionError(error)}`,
-    });
-  } finally {
-    state.sprite.busy = false;
-    renderSpriteAssistantMount();
-  }
-}
-
-async function requestSpriteReorgPreview({ instruction = "" } = {}) {
-  const cleanText = String(instruction || "").trim();
-  if (!cleanText || state.sprite.busy) return;
-  state.sprite.busy = true;
-  renderSpriteAssistantMount();
-  try {
-    const res = await apiPost("/api/overview/reorganize", {
-      instruction: cleanText,
-      confirmOnly: true,
-    });
-    const ops = Array.isArray(res?.operations) ? res.operations : [];
-    if (!ops.length) {
-      pushSpriteMessage({
-        role: "sprite",
-        tone: "idle",
-        text: "未识别到需要调整的产线，请换个说法再试。",
-      });
-      return;
-    }
-    state.sprite.pendingReorg = {
-      instruction: cleanText,
-      summary: res.summary || "",
-      operations: ops,
-    };
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "coin",
-      text: `已规划 ${ops.length} 项梦工厂布局调整：${res.summary || ""}。请点下方「确认调整」或直接说「确认」。`,
-      spokenText: `已规划 ${ops.length} 项梦工厂布局调整，请确认是否应用。`,
-    });
-  } catch (error) {
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "urgent",
-      text: `布局调整规划失败：${formatActionError(error)}`,
-    });
-  } finally {
-    state.sprite.busy = false;
-    renderSpriteAssistantMount();
-  }
-}
-
-async function confirmSpriteReorgPreview() {
-  const pending = state.sprite.pendingReorg;
-  if (!pending?.operations?.length || state.sprite.busy) return;
-  state.sprite.busy = true;
-  renderSpriteAssistantMount();
-  try {
-    const res = await apiPost("/api/overview/reorganize", {
-      instruction: pending.instruction || "",
-      operations: pending.operations,
-      confirmOnly: false,
-    });
-    state.sprite.pendingReorg = null;
-    if (res?.overview) {
-      state.missionOverview = res.overview;
-      renderMissionOverview();
-    }
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "work",
-      text: `梦工厂布局已更新（应用 ${res?.appliedCount || pending.operations.length} 项）：${res?.summary || pending.summary}。`,
-      spokenText: "梦工厂布局已更新。",
-    });
-  } catch (error) {
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "urgent",
-      text: `应用布局调整失败：${formatActionError(error)}`,
-    });
-  } finally {
-    state.sprite.busy = false;
-    renderSpriteAssistantMount();
-  }
-}
-
-async function requestSpriteAnswer(text) {
-  state.sprite.busy = true;
-  tycoon3dInstance?.setSpriteMood?.("thinking");
-  renderSpriteAssistantMount();
-  const traceMessages = [];
-  try {
-    const answer = await askSpriteAssistant({ text,
-      contextTopicId: state.sprite.scopedTopicId || state.tycoonSelectedTopicId || undefined,
-      history: state.sprite.turns.slice(-6), focus: state.sprite.focusStack,
-    }, (trace) => {
-      const icons = { resolve: "🔎", threads: "📂", commits: "🔀", wip: "📌", memory: "📌", compose: "✍️" };
-      tycoon3dInstance?.setSpriteMood?.("thinking", { bubble: trace.label });
-      pushSpriteMessage({ text: `${icons[trace.step] || "🔎"} ${trace.label}`, trace });
-      traceMessages.push(state.sprite.messages.at(-1));
-    });
-    const kinds = { threads: "thread", commits: "commit", wip: "wip", memory: "memory" };
-    for (const message of traceMessages) message.sources = (answer.sources || []).filter((source) => source.kind === kinds[message.trace.step]);
-    if (answer.kind !== "clarify") Object.assign(state.sprite, appendSpriteTurn(state.sprite, text, answer));
-    pushSpriteMessage({ text: answer.text, sources: answer.sources, actions: (answer.actions || []).filter((action) => answer.kind !== "clarify" || action.type !== "clarify_pick"),
-      candidates: answer.kind === "clarify" ? answer.candidates : [], originalText: text,
-      tone: answer.mood || "report" });
-    // Keep the alias supplied by the server alongside the displayed candidates.
-    state.sprite.messages.at(-1).clarifyAlias = answer.actions?.find((action) => action.type === "clarify_pick")?.payload?.alias || text;
-    if (answer.focusTopicId) await tycoon3dInstance?.spriteVisit?.(answer.focusTopicId);
-    tycoon3dInstance?.setSpriteMood?.(answer.mood || "report");
-  } catch (error) {
-    pushSpriteMessage({ text: t("问答暂时不可用：{error}", { error: formatActionError(error) }), tone: "worry" });
-    tycoon3dInstance?.setSpriteMood?.("worry");
-  } finally { state.sprite.busy = false; renderSpriteAssistantMount(); }
-}
-
-function openSpriteCards(topicId, type) {
-  const topic = findOverviewTopicById(topicId);
-  state.sprite.cards = (topic?.assistantSignals?.cards || []).filter((card) => !type || card.type === type);
-  state.sprite.continueDrafts = {};
-  state.sprite.scopedTopicId = topicId || "";
-  state.sprite.scopedTopicName = topic?.name || "";
-  toggleSpriteAssistant({ open: true });
-}
-
-async function actOnSpriteCard(cardId, type) {
-  if (state.sprite.busy) return;
-  const card = state.sprite.cards.find((entry) => entry.id === cardId)
-    || [...(state.missionOverview?.domains?.flatMap((d) => d.topics || []).flatMap((tp) => tp.assistantSignals?.cards || []) || []),
-      ...(state.missionOverview?.assistantInbox?.cards || [])].find((entry) => entry.id === cardId);
-  if (!card) return;
-  if (type === "pin") { await pinThreadAsTicket(card.threadId); return; }
-  if (type === "continue") {
-    if (!state.sprite.cards.some((entry) => entry.id === cardId)) state.sprite.cards = [card];
-    renderSpriteAssistantMount();
-    return;
-  }
-  const input = [...document.querySelectorAll("[data-sprite-continue-message]")].find((entry) => entry.dataset.spriteContinueMessage === cardId);
-  const message = type === "send_continue" ? (input?.value ?? state.sprite.continueDrafts?.[cardId] ?? "").trim() : undefined;
-  if (type === "send_continue" && !message) return;
-  state.sprite.busy = true;
-  renderSpriteAssistantMount();
-  try {
-    const result = await apiPost(`/api/assistant/cards/${encodeURIComponent(cardId)}/action`, {
-      type: type === "send_continue" ? "continue" : type,
-      ...(type === "snooze" ? { until: spriteTomorrowAtEight() } : {}), ...(message ? { message } : {}),
-    });
-    state.sprite.cards = state.sprite.cards.filter((entry) => entry.id !== cardId);
-    const ack = { done: "好，记为完成", park: "先搁着，有新动静再说", snooze: "明早 8 点再提醒你", dismiss: card.ticketId ? "工单已放弃" : "这条以后不再提醒",
-      send_continue: "已发回原工位接着做", retry: "已重新唤起定时任务" }[type];
-    if (ack) tycoon3dInstance?.spriteSay?.(t(ack), { proactive: false });
-    if (type === "harvest" && result.threadId) await selectThread(result.threadId);
-    void loadMissionOverview({ trigger: "assistant-action" });
-  } catch (error) { pushSpriteMessage({ text: formatActionError(error), tone: "worry" }); }
-  finally { state.sprite.busy = false; renderSpriteAssistantMount(); }
-}
-
-// Pins a session as a persistent 工单; the model drafts goal and acceptance
-// criteria from the session, which the user can edit from「我的工单」.
-async function pinThreadAsTicket(threadId) {
-  if (!threadId || state.sprite.busy) return;
-  state.sprite.busy = true;
-  renderSpriteAssistantMount();
-  try {
-    const { ticket } = await apiPost("/api/assistant/tickets", { threadId });
-    const criteria = ticket.criteria?.length ? `\n${ticket.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}` : "";
-    pushSpriteMessage({ text: `${t("已钉成工单：{title}", { title: ticket.title })}${ticket.goal ? `\n${t("目标")}：${ticket.goal}` : ""}${criteria}`,
-      actions: [{ label: t("改验收：{title}", { title: ticket.title.slice(0, 6) }), type: "ticket_edit", payload: { ticketId: ticket.id } }] });
-    state.sprite.cards = state.sprite.cards.map((c) => c.threadId === threadId ? { ...c, ticketId: ticket.id, goal: ticket.goal, criteria: ticket.criteria } : c);
-    showToastBanner(t("已钉成工单：{title}", { title: ticket.title }));
-    void loadMissionOverview({ trigger: "assistant-action" });
-  } catch (error) {
-    showToastBanner(t("钉成工单失败"), { detail: formatActionError(error), error: true });
-  } finally { state.sprite.busy = false; renderSpriteAssistantMount(); }
-}
-
-async function editSpriteTicketCriteria(ticketId) {
-  const ticket = (state.missionOverview?.assistantTickets || []).find((tk) => tk.id === ticketId);
-  const next = prompt(t("验收标准，一行一条（留空表示不设）："), (ticket?.criteria || []).join("\n"));
-  if (next === null) return;
-  const { ticket: saved } = await apiPost(`/api/assistant/tickets/${encodeURIComponent(ticketId)}`, { criteria: next.split(/\n+/).map((c) => c.trim()).filter(Boolean) });
-  pushSpriteMessage({ text: t("工单「{title}」的验收标准已更新", { title: saved.title }) });
-  void loadMissionOverview({ trigger: "assistant-action" });
-}
-
-let spriteTourPending = false;
-let spriteParkVisible = false;
-const SPRITE_LAST_SEEN_KEY = "agentControl.sprite.lastSeenAt";
-async function maybeStartSpriteTour() {
-  if (!state.missionOverview || spriteTourPending || spriteParkVisible || document.hidden) return;
-  spriteParkVisible = true;
-  const now = new Date();
-  let previous = null;
-  try { previous = localStorage.getItem(SPRITE_LAST_SEEN_KEY); localStorage.setItem(SPRITE_LAST_SEEN_KEY, now.toISOString()); } catch {}
-  const previousAt = new Date(previous || 0);
-  const firstToday = previousAt.toDateString() !== now.toDateString();
-  if (!firstToday && now - previousAt < 2 * 3600_000) return;
-  spriteTourPending = true;
-  try {
-    const tour = await apiGet(`/api/assistant/tour${previous && now - previousAt >= 2 * 3600_000 ? `?since=${encodeURIComponent(previous)}` : ""}`);
-    if (!spriteParkVisible) return;
-    if (!tour.stops?.length) {
-      const brief = buildSpriteOpeningBriefing(state.missionOverview, state.threads);
-      tycoon3dInstance?.spriteSay?.(brief.text, { proactive: true });
-      return;
-    }
-    state.sprite.tour = { stops: tour.stops, index: 0 };
-    await showSpriteTourStop();
-  } catch (error) {
-    // Older hosts and demo fixtures have no tour endpoint; keep the existing opening briefing.
-    if (!isDemoMode()) pushSpriteMessage({ text: t("巡园暂时不可用：{error}", { error: formatActionError(error) }) });
-  } finally { spriteTourPending = false; }
-}
-
-async function showSpriteTourStop() {
-  const tour = state.sprite.tour;
-  const stop = tour?.stops[tour.index];
-  if (!stop) { endSpriteTour(); return; }
-  openSpriteCards(stop.topicId);
-  state.sprite.cards = stop.cards || [];
-  if (!stop.topicId) state.sprite.scopedTopicName = stop.topicTitle || "";
-  renderSpriteAssistantMount();
-  // The scheduled-task inbox has no building to fly to; the bubble still speaks.
-  if (stop.topicId) await tycoon3dInstance?.spriteVisit?.(stop.topicId, { bubble: stop.bubble });
-  else tycoon3dInstance?.spriteSay?.(stop.bubble, { proactive: true });
-}
-
-function endSpriteTour() {
-  state.sprite.tour = null;
-  state.sprite.cards = [];
-  renderSpriteAssistantMount();
-}
-
-function noteSpriteParkLeave() {
-  if (!spriteParkVisible) return;
-  spriteParkVisible = false;
-  try { localStorage.setItem(SPRITE_LAST_SEEN_KEY, new Date().toISOString()); } catch {}
-  tycoon3dInstance?.setUserBusy?.(false);
-}
-
-async function runSpriteAnswerAction(action, message) {
-  const payload = action.payload || {};
-  if (action.type === "focus") { await tycoon3dInstance?.spriteVisit?.(payload.topicId); return; }
-  if (action.type === "open_thread") { await selectThread(payload.threadId); return; }
-  if (action.type === "card_action") { await actOnSpriteCard(payload.cardId, payload.action); return; }
-  if (action.type === "ticket_edit") { await editSpriteTicketCriteria(payload.ticketId); return; }
-  if (action.type === "clarify_pick") {
-    await apiPost("/api/assistant/profile/aliases", { alias: payload.alias, topicId: payload.topicId });
-    await requestSpriteAnswer(message.originalText);
-  }
-}
-
-async function handleSpriteCommand(rawInput = "") {
-  const text = String(rawInput || "").trim();
-  if (!text || state.sprite.busy) return;
-  state.sprite.open = true;
-  state.sprite.draft = "";
-  pushSpriteMessage({ role: "user", text });
-
-  const agentCtx = buildDispatchAgentContext();
-  const excludedAgentKeys = Array.isArray(state.missionOverview?.meta?.dispatchPrefs?.excludedAgentKeys)
-    ? state.missionOverview.meta.dispatchPrefs.excludedAgentKeys
-    : [];
-  const parsed = classifySpriteUserInput(text, {
-    hasPendingPreview: Boolean(state.sprite.pendingPreview),
-    hasPendingArchive: Boolean(state.sprite.pendingArchive),
-    hasPendingReorg: Boolean(state.sprite.pendingReorg),
-    scopedTopicId: state.sprite.scopedTopicId,
-    overview: state.missionOverview,
-    agentOptions: agentCtx.agentOptions,
-    excludedAgentKeys,
-  });
-
-  if (parsed.intent === "confirm_reorg") {
-    await confirmSpriteReorgPreview();
-    return;
-  }
-  if (parsed.intent === "cancel_reorg") {
-    state.sprite.pendingReorg = null;
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "idle",
-      text: "好的，已取消本次梦工厂布局调整。",
-      spokenText: "已取消本次梦工厂布局调整。",
-    });
-    return;
-  }
-  if (parsed.intent === "reorg_preview") {
-    await requestSpriteReorgPreview({ instruction: parsed.instruction || text });
-    return;
-  }
-
-  if (parsed.intent === "confirm_archive") {
-    await confirmSpriteArchivePreview();
-    return;
-  }
-  if (parsed.intent === "cancel_archive") {
-    state.sprite.pendingArchive = null;
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "idle",
-      text: "好的，已取消本次归档操作。",
-      spokenText: "已取消本次归档操作。",
-    });
-    return;
-  }
-  if (parsed.intent === "archive_preview") {
-    await requestSpriteArchivePreview({
-      topicId: parsed.topicId,
-      staleDays: parsed.staleDays ?? 3,
-    });
-    return;
-  }
-  if (parsed.intent === "confirm_preview") {
-    await confirmSpriteDispatchPreview();
-    return;
-  }
-  if (parsed.intent === "cancel_preview") {
-    state.sprite.pendingPreview = null;
-    pushSpriteMessage({
-      role: "sprite",
-      tone: "idle",
-      text: "好的，已取消本次派工预览。",
-      spokenText: "已取消本次派工预览。",
-    });
-    return;
-  }
-  if (parsed.intent === "query_tickets") {
-    const reply = buildSpriteTicketReply(state.missionOverview);
-    pushSpriteMessage({ role: "sprite", tone: reply.tone, text: reply.text, spokenText: reply.spokenText, actions: reply.actions });
-    return;
-  }
-  if (parsed.intent === "briefing" || parsed.intent === "query_pending" || parsed.intent === "query_harvest") {
-    const reply = buildSpriteQueryReply(parsed.intent, state.missionOverview, state.threads);
-    pushSpriteMessage({
-      role: "sprite",
-      tone: reply.tone,
-      text: reply.text,
-      spokenText: reply.spokenText,
-      chips: reply.chips,
-    });
-    return;
-  }
-  if (parsed.intent === "ask") {
-    await requestSpriteAnswer(text);
-    return;
-  }
-  if (parsed.intent === "dispatch_preview") {
-    await requestSpriteDispatchPreview({
-      instruction: parsed.instruction,
-      topicId: parsed.topicId,
-      agentKey: parsed.agentKey,
-      mode: parsed.mode,
-    });
-  }
-}
-
-function formatSpriteTimerText(sec = 0) {
-  const s = Math.max(0, Math.floor(Number(sec) || 0));
-  const m = String(Math.floor(s / 60)).padStart(2, "0");
-  const r = String(s % 60).padStart(2, "0");
-  return `${m}:${r}`;
-}
-
-function teardownSpriteMic() {
-  const mic = state.sprite.mic;
-  if (mic.maxTimer) {
-    clearTimeout(mic.maxTimer);
-    mic.maxTimer = null;
-  }
-  if (mic.tickTimer) {
-    clearInterval(mic.tickTimer);
-    mic.tickTimer = null;
-  }
-  try { mic.processor?.disconnect?.(); } catch {}
-  try { mic.source?.disconnect?.(); } catch {}
-  if (mic.micStream) {
-    for (const track of mic.micStream.getTracks()) {
-      try { track.stop(); } catch {}
-    }
-  }
-  if (mic.audioCtx) {
-    try { void mic.audioCtx.close?.(); } catch {}
-  }
-  mic.processor = null;
-  mic.source = null;
-  mic.micStream = null;
-  mic.audioCtx = null;
-  mic.vad = null;
-  mic.bargeInFrames = 0;
-  mic.bargeRing = [];
-  mic.queuedSamples = null;
-  state.sprite.speechActive = false;
-  state.sprite.recordElapsedSec = 0;
-}
-
-async function transcribeSpritePcmSamples(samples) {
-  if (!samples || samples.length < 1600) return false;
-  state.sprite.transcribing = true;
-  renderSpriteAssistantMount();
-  try {
-    const wavBytes = encodePcm16SamplesToWav(samples, 16000);
-    const res = await apiPostWithHotFallback("api/voice/transcribe", {
-      audioBase64: uint8ArrayToBase64(wavBytes),
-      audioMimeType: "audio/wav",
-    });
-    const recognized = String(res?.text || "").trim();
-    state.sprite.transcribing = false;
-    renderSpriteAssistantMount();
-    if (recognized) {
-      await handleSpriteCommand(recognized);
-      return true;
-    }
-    if (!state.sprite.handsFree) {
-      pushSpriteMessage({ role: "sprite", tone: "idle", text: "没有识别到清晰人声，可以再说一次或直接打字。" });
-    }
-    return false;
-  } catch (error) {
-    state.sprite.transcribing = false;
-    pushSpriteAssistantErrorOrNotice(`语音识别失败：${formatActionError(error)}`);
-    return false;
-  } finally {
-    state.sprite.transcribing = false;
-    renderSpriteAssistantMount();
-  }
-}
-
-function pushSpriteAssistantErrorOrNotice(msg) {
-  pushSpriteMessage({ role: "sprite", tone: "urgent", text: msg });
-}
-
-async function stopSpriteMic({ submit = true, stopHandsFree = false, explicitSamples = null } = {}) {
-  if (stopHandsFree && state.sprite.handsFree) {
-    state.sprite.handsFree = false;
-    if (typeof state.sprite.prevTtsPref === "boolean") {
-      state.sprite.ttsEnabled = state.sprite.prevTtsPref;
-      state.sprite.prevTtsPref = null;
-    }
-  }
-  const wasRecording = state.sprite.recording;
-  state.sprite.recording = false;
-
-  let merged = explicitSamples;
-  const vadFlushed = state.sprite.mic.vad?.flush?.();
-  const chunks = state.sprite.mic.chunks;
-  state.sprite.mic.chunks = [];
-  teardownSpriteMic();
-
-  if (!wasRecording && !merged) {
-    renderSpriteAssistantMount();
-    return;
-  }
-
-  if (!merged && submit) {
-    if (vadFlushed?.samples?.length >= 1600) {
-      merged = vadFlushed.samples;
-    } else {
-      const totalLen = chunks.reduce((s, c) => s + c.length, 0);
-      if (totalLen >= 1600) {
-        merged = new Int16Array(totalLen);
-        let offset = 0;
-        for (const chunk of chunks) {
-          merged.set(chunk, offset);
-          offset += chunk.length;
-        }
-      } else if (totalLen > 0 && !stopHandsFree) {
-        renderSpriteAssistantMount();
-        pushSpriteMessage({ role: "sprite", tone: "idle", text: "录音太短没听清，再按一下麦克风告诉我吧。" });
-        return;
-      }
-    }
-  }
-
-  renderSpriteAssistantMount();
-  if (submit && merged && merged.length >= 1600) {
-    await transcribeSpritePcmSamples(merged);
-  }
-}
-
-async function startSpriteMic({ handsFree = false } = {}) {
-  if (state.sprite.recording) {
-    if (handsFree && !state.sprite.handsFree) {
-      state.sprite.prevTtsPref = state.sprite.ttsEnabled;
-      state.sprite.ttsEnabled = true;
-      state.sprite.handsFree = true;
-      if (state.sprite.mic.maxTimer) {
-        clearTimeout(state.sprite.mic.maxTimer);
-        state.sprite.mic.maxTimer = null;
-      }
-      renderSpriteAssistantMount();
-    }
-    return;
-  }
-  if (!handsFree) {
-    stopSpriteSpeech();
-  }
-  if (!navigator.mediaDevices?.getUserMedia) {
-    pushSpriteMessage({ role: "sprite", tone: "urgent", text: "当前环境未开放麦克风权限，可在桌面客户端系统设置中授权麦克风，或直接打字发送。" });
-    return;
-  }
-  // Show immediate visual feedback in Sprite voice bar while awaiting getUserMedia permission/stream
-  state.sprite.recording = true;
-  state.sprite.recordElapsedSec = 0;
-  state.sprite.speechActive = false;
-  if (handsFree && !state.sprite.handsFree) {
-    state.sprite.prevTtsPref = state.sprite.ttsEnabled;
-    state.sprite.ttsEnabled = true;
-    state.sprite.handsFree = true;
-  }
-  renderSpriteAssistantMount();
-
-  try {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) throw new Error("不支持 AudioContext");
-    const ctx = new AudioCtx();
-    if (ctx.state === "suspended") await ctx.resume().catch(() => {});
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        channelCount: 1,
-      },
-    });
-    if (!state.sprite.recording) {
-      // User cancelled while getUserMedia was pending
-      for (const track of stream.getTracks()) {
-        try { track.stop(); } catch {}
-      }
-      try { void ctx.close?.(); } catch {}
-      return;
-    }
-    const source = ctx.createMediaStreamSource(stream);
-    const processor = ctx.createScriptProcessor(2048, 1, 1);
-    const silentGain = ctx.createGain();
-    silentGain.gain.value = 0;
-
-    const vad = createVadTurnDetector({
-      sampleRate: 16000,
-      silenceMs: handsFree ? 950 : 1100,
-      minSpeechMs: 280,
-      maxSpeechMs: 22000,
-      rmsThreshold: 0.016,
-      adaptive: true,
-      requireSustainedOnset: true,
-    });
-
-    state.sprite.mic.chunks = [];
-    state.sprite.mic.vad = vad;
-    state.sprite.mic.startedAtMs = Date.now();
-    state.sprite.mic.lastLevelUiAt = 0;
-    state.sprite.mic.bargeInFrames = 0;
-    state.sprite.mic.bargeRing = [];
-    state.sprite.mic.queuedSamples = null;
-    state.sprite.recordElapsedSec = 0;
-    state.sprite.speechActive = false;
-
-    processor.onaudioprocess = (ev) => {
-      if (!state.sprite.recording) return;
-      const input = ev.inputBuffer?.getChannelData?.(0);
-      if (!input?.length) return;
-      const rms = computeRmsLevel(input);
-      const now = Date.now();
-      if (now - state.sprite.mic.lastLevelUiAt >= 65) {
-        state.sprite.mic.lastLevelUiAt = now;
-        const barEl = $("spriteVoiceBar");
-        if (barEl) {
-          const norm = Math.min(1, Math.max(0.08, rms * 11.5));
-          barEl.style.setProperty("--voice-level", norm.toFixed(2));
-        }
-      }
-
-      const pcm16 = downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000);
-      const mic = state.sprite.mic;
-      const assistantBusy = state.sprite.transcribing || state.sprite.busy;
-
-      // Echo guard + barge-in while Sprite TTS is speaking. Keep the last ~1s so the
-      // first words of an interruption are not lost once playback stops.
-      if (state.sprite.speaking) {
-        mic.bargeRing.push({ pcm16, rms });
-        while (mic.bargeRing.length > 24) mic.bargeRing.shift();
-        if (rms >= 0.045) {
-          mic.bargeInFrames += 1;
-          if (mic.bargeInFrames >= 3) {
-            mic.bargeInFrames = 0;
-            stopSpriteSpeech();
-            vad.reset();
-            for (const frame of mic.bargeRing) vad.pushSamples(frame.pcm16, frame.rms);
-            mic.bargeRing = [];
-          }
-        } else {
-          mic.bargeInFrames = 0;
-        }
-        return;
-      }
-      mic.bargeRing = [];
-
-      if (!assistantBusy && mic.queuedSamples?.length) {
-        const queued = mic.queuedSamples;
-        mic.queuedSamples = null;
-        void transcribeSpritePcmSamples(queued);
-        return;
-      }
-
-      if (!state.sprite.handsFree && mic.chunks.length < 450) {
-        mic.chunks.push(pcm16);
-      }
-
-      const vadEv = vad.pushSamples(pcm16, rms);
-      if (vadEv.type === "speech_start") {
-        if (!state.sprite.speechActive) {
-          state.sprite.speechActive = true;
-          renderSpriteAssistantMount();
-        }
-      } else if (vadEv.type === "utterance" && vadEv.samples?.length >= 1600) {
-        state.sprite.speechActive = false;
-        if (state.sprite.handsFree) {
-          mic.chunks = [];
-          playVoiceEarcon("heard", ctx);
-          if (state.sprite.transcribing || state.sprite.busy) {
-            // Still busy with the previous request: hold this one (stitched) instead of dropping it.
-            mic.queuedSamples = mic.queuedSamples?.length
-              ? mergePcm16ChunksWithGap([mic.queuedSamples, vadEv.samples], 2560)
-              : vadEv.samples;
-          } else {
-            void transcribeSpritePcmSamples(vadEv.samples);
-          }
-        } else {
-          void stopSpriteMic({ submit: true, explicitSamples: vadEv.samples });
-        }
-      } else if (vadEv.type === "discarded_short" || vadEv.type === "discarded_noise") {
-        if (state.sprite.speechActive) {
-          state.sprite.speechActive = false;
-          renderSpriteAssistantMount();
-        }
-      }
-    };
-
-    source.connect(processor);
-    processor.connect(silentGain);
-    silentGain.connect(ctx.destination);
-
-    state.sprite.mic.audioCtx = ctx;
-    state.sprite.mic.micStream = stream;
-    state.sprite.mic.source = source;
-    state.sprite.mic.processor = processor;
-    state.sprite.recording = true;
-
-    state.sprite.mic.tickTimer = setInterval(() => {
-      if (!state.sprite.recording) return;
-      const elapsed = Math.floor((Date.now() - state.sprite.mic.startedAtMs) / 1000);
-      state.sprite.recordElapsedSec = elapsed;
-      const timerEl = $("spriteVoiceTimer");
-      if (timerEl) timerEl.textContent = formatSpriteTimerText(elapsed);
-    }, 1000);
-
-    if (!state.sprite.handsFree) {
-      state.sprite.mic.maxTimer = setTimeout(() => {
-        void stopSpriteMic({ submit: true });
-      }, 25000);
-    }
-    renderSpriteAssistantMount();
-  } catch (error) {
-    teardownSpriteMic();
-    state.sprite.recording = false;
-    state.sprite.handsFree = false;
-    renderSpriteAssistantMount();
-    pushSpriteMessage({ role: "sprite", tone: "urgent", text: `麦克风启动失败：${error?.message || "请检查权限"}` });
-  }
-}
-
-async function toggleSpriteHandsFree() {
-  if (state.sprite.handsFree) {
-    stopSpriteSpeech();
-    await stopSpriteMic({ submit: false, stopHandsFree: true });
-    return;
-  }
-  if (!state.sprite.open) {
-    toggleSpriteAssistant({ open: true });
-  }
-  if (!state.missionOverview && !state.missionOverviewLoading) {
-    void loadMissionOverview({ trigger: "open" });
-  }
-  await startSpriteMic({ handsFree: true });
-}
-
-async function toggleSpriteMic() {
-  if (state.sprite.transcribing || state.sprite.busy) return;
-  if (state.sprite.handsFree) {
-    // In hands-free mode, clicking mic flushes current speech immediately if speaking, else stops hands-free
-    if (state.sprite.speechActive && state.sprite.mic.vad) {
-      const flushed = state.sprite.mic.vad.flush();
-      state.sprite.speechActive = false;
-      if (flushed?.samples?.length >= 1600) {
-        await transcribeSpritePcmSamples(flushed.samples);
-        return;
-      }
-    }
-    await toggleSpriteHandsFree();
-    return;
-  }
-  if (state.sprite.recording) {
-    await stopSpriteMic({ submit: true });
-    return;
-  }
-  await startSpriteMic({ handsFree: false });
-}
+const {
+  stopSpriteSpeech,
+  enterSpriteFullscreen,
+  exitSpriteFullscreen,
+  exitSpriteOverlayForNavigation,
+  minimizeSpritePhoneCall,
+  enterSpritePhoneCall,
+  renderSpriteAssistantMount,
+  syncSpriteWithOverview,
+  handleSpriteDelegatedClick,
+  handleSpriteDelegatedChange,
+  toggleSpriteAssistant,
+  openSpriteCards,
+  pinThreadAsTicket,
+  maybeStartSpriteTour,
+  noteSpriteParkLeave,
+  sendSpritePhoneTurn,
+  handleSpriteCommand,
+  stopSpriteMic,
+} = spriteController;
 
 function setBoardViewMode(mode) {
   let requested = mode;
@@ -10648,6 +10060,7 @@ function setBoardViewMode(mode) {
 }
 
 function openProjectBoardView() {
+  exitSpriteOverlayForNavigation();
   setTopbarMenuOpen(false);
   setComposerConfigOpen(false);
   state.boardOpen = true;
@@ -12978,6 +12391,10 @@ function enterTycoon3DAndSummonSprite({ startVoice = false } = {}) {
   if (legacyModal?.open) {
     try { legacyModal.close(); } catch {}
   }
+  if (startVoice) {
+    void enterSpritePhoneCall();
+    return;
+  }
   if (state.scopedProjectCwd) {
     state.scopedProjectCwd = "";
   }
@@ -12993,15 +12410,11 @@ function enterTycoon3DAndSummonSprite({ startVoice = false } = {}) {
     renderProjectBoard();
   }
   toggleSpriteAssistant({ open: true });
-  if (startVoice && !state.sprite.recording) {
-    void startSpriteMic({ handsFree: false });
-  } else {
-    requestAnimationFrame(() => $("spriteCommandInput")?.focus());
-  }
+  requestAnimationFrame(() => $("spriteCommandInput")?.focus());
 }
 
 async function openVoiceModal() {
-  enterTycoon3DAndSummonSprite({ startVoice: true });
+  void enterSpritePhoneCall();
 }
 
 function hangupVoiceCall({ closeModal = true } = {}) {
@@ -13219,7 +12632,7 @@ function applyThemeMode(mode = loadThemeMode(), { persist = false } = {}) {
         ? `点击切换为${resolved === "light" ? "深色" : "日间"}模式`
         : "点击恢复跟随系统";
     btn.title = `主题：${modeLabel} · ${nextAction}（右键恢复跟随系统）`;
-    btn.setAttribute("aria-label", `Agent Control · ${modeLabel}，${nextAction}`);
+    btn.setAttribute("aria-label", `RemoteDeck · ${modeLabel}，${nextAction}`);
     btn.dataset.themeMode = safeMode;
     btn.dataset.theme = resolved;
   }
@@ -13377,7 +12790,7 @@ function bindEvents() {
       const res = await apiPost("api/cli/install", { provider, force: true });
       if (res?.cliStatus) state.cliStatus = res.cliStatus;
       renderCliMaintenanceBanner();
-      void loadProviders();
+      void refreshProviders();
     } catch {}
   });
 
@@ -13547,7 +12960,11 @@ function bindEvents() {
   }
 
   $("voiceModeBtn").addEventListener("click", () => {
-    enterTycoon3DAndSummonSprite({ startVoice: true });
+    if (state.sprite.phoneCallActive) {
+      void enterSpritePhoneCall();
+    } else {
+      enterSpriteFullscreen();
+    }
   });
 
   $("activeProfileBadge")?.addEventListener("click", () => {
@@ -13701,6 +13118,14 @@ function bindEvents() {
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      if (state.sprite.viewMode === "phone") {
+        minimizeSpritePhoneCall();
+        return;
+      }
+      if (state.sprite.viewMode === "fullscreen") {
+        exitSpriteFullscreen();
+        return;
+      }
       if (state.batchSelect.active) exitBatchSelectMode();
       if (state.topbarMenuOpen) setTopbarMenuOpen(false);
       if (state.composerConfigOpen) setComposerConfigOpen(false);
@@ -13712,6 +13137,38 @@ function bindEvents() {
   });
 
   $("projectTaskStrip").addEventListener("click", (e) => {
+    const openTaskModalBtn = e.target.closest("[data-task-open-modal]");
+    if (openTaskModalBtn) {
+      void openTasksModal(openTaskModalBtn.dataset.taskOpenModal || "");
+      return;
+    }
+    const planBtn = e.target.closest("[data-task-jump-plan]");
+    if (planBtn) {
+      void jumpToTaskPlan(planBtn.dataset.taskJumpPlan);
+      return;
+    }
+    const siblingBtn = e.target.closest("[data-task-new-sibling]");
+    if (siblingBtn) {
+      void startLinkedThreadDraft({ mode: "same", taskId: siblingBtn.dataset.taskNewSibling });
+      return;
+    }
+    const childBtn = e.target.closest("[data-task-new-child]");
+    if (childBtn) {
+      void startLinkedThreadDraft({ mode: "child", parentTaskId: childBtn.dataset.taskNewChild });
+      return;
+    }
+    if (e.target.closest("[data-task-cancel-draft]")) {
+      state.newThreadTaskDraft = null;
+      renderProjectTaskStrip();
+      return;
+    }
+    const taskThreadBtn = e.target.closest("[data-task-strip-thread]");
+    if (taskThreadBtn) {
+      void selectThread(taskThreadBtn.dataset.taskStripThread).catch((error) => {
+        showToastBanner("切换会话失败", { detail: formatActionError(error), error: true });
+      });
+      return;
+    }
     if (e.target.closest("[data-strip-board]")) {
       openProjectBoardView();
       return;
@@ -13843,52 +13300,7 @@ function bindEvents() {
       state.dispatchPreview = null;
       return;
     }
-    const spriteInheritCheck = e.target.closest("[data-sprite-toggle-inherit]");
-    if (spriteInheritCheck && state.sprite.pendingPreview?.payload) {
-      const checked = Boolean(spriteInheritCheck.checked);
-      state.dispatchInheritContext = checked;
-      state.sprite.pendingPreview.payload.inheritContext = checked;
-      renderSpriteAssistantMount();
-      return;
-    }
-    const spriteExcludeCheck = e.target.closest("[data-sprite-toggle-excluded]");
-    if (spriteExcludeCheck) {
-      const targetKey = String(spriteExcludeCheck.dataset.spriteToggleExcluded || "").trim();
-      if (!targetKey) return;
-      const prev = Array.isArray(state.missionOverview?.meta?.dispatchPrefs?.excludedAgentKeys)
-        ? state.missionOverview.meta.dispatchPrefs.excludedAgentKeys
-        : [];
-      const nextSet = new Set(prev);
-      if (spriteExcludeCheck.checked) nextSet.add(targetKey);
-      else nextSet.delete(targetKey);
-      const excludedAgentKeys = [...nextSet];
-      if (state.missionOverview) {
-        if (!state.missionOverview.meta) state.missionOverview.meta = {};
-        if (!state.missionOverview.meta.dispatchPrefs) state.missionOverview.meta.dispatchPrefs = {};
-        state.missionOverview.meta.dispatchPrefs.excludedAgentKeys = excludedAgentKeys;
-      }
-      state.dispatchPreview = null;
-      renderSpriteAssistantMount();
-      void apiPost("/api/overview/dispatch-prefs", { excludedAgentKeys }).then((res) => {
-        if (res?.overview) {
-          if (!Array.isArray(res.overview?.meta?.dispatchPrefs?.excludedAgentKeys)) {
-            if (!res.overview.meta) res.overview.meta = {};
-            if (!res.overview.meta.dispatchPrefs) res.overview.meta.dispatchPrefs = {};
-            res.overview.meta.dispatchPrefs.excludedAgentKeys = excludedAgentKeys;
-            showToastBanner("后台服务尚未重启，跳过账号暂未持久化", {
-              detail: "请在左下角版本弹窗点击「重启服务」后再保存",
-              error: true,
-            });
-          }
-          state.missionOverview = res.overview;
-        }
-        renderSpriteAssistantMount();
-        renderProjectBoard();
-      }).catch((error) => {
-        showToastBanner("保存跳过账号设置失败", { detail: formatActionError(error), error: true });
-      });
-      return;
-    }
+    if (handleSpriteDelegatedChange(e)) return;
     if (e.target.id === "moDispatchModeSelect") {
       state.dispatchMode = e.target.value || "auto";
       state.dispatchPreview = null;
@@ -13948,180 +13360,7 @@ function bindEvents() {
       }
       return;
     }
-    const cardAction = e.target.closest("[data-sprite-card-action]");
-    if (cardAction) { void actOnSpriteCard(cardAction.dataset.spriteCardId, cardAction.dataset.spriteCardAction); return; }
-    const answerAction = e.target.closest("[data-sprite-answer-action], [data-sprite-clarify-topic]");
-    if (answerAction && !state.sprite.busy) {
-      const message = state.sprite.messages.find((entry) => entry.id === (answerAction.dataset.spriteAnswerId || answerAction.dataset.spriteClarifyId));
-      if (!message) return;
-      const action = answerAction.dataset.spriteClarifyTopic
-        ? { type: "clarify_pick", payload: { alias: message.clarifyAlias, topicId: answerAction.dataset.spriteClarifyTopic } }
-        : message.actions[Number(answerAction.dataset.spriteAnswerAction)];
-      if (action) void runSpriteAnswerAction(action, message).catch((error) => pushSpriteMessage({ text: formatActionError(error), tone: "worry" }));
-      return;
-    }
-    const spriteActionBtn = e.target.closest("[data-sprite-action]");
-    if (spriteActionBtn) {
-      e.stopPropagation();
-      const sAct = spriteActionBtn.dataset.spriteAction;
-      if (sAct === "hud-more") {
-        const panel = $("tycoonHudMore");
-        panel?.classList.toggle("is-expanded");
-        spriteActionBtn.setAttribute("aria-expanded", String(panel?.classList.contains("is-expanded")));
-      } else if (sAct === "edit-dispatch") {
-        state.sprite.draft = state.sprite.pendingPreview?.payload?.text || "";
-        state.sprite.pendingPreview = null;
-        renderSpriteAssistantMount();
-        $("spriteCommandInput")?.focus();
-      } else if (sAct === "load-memory" || sAct === "clear-memory") {
-        void apiRequest("/api/assistant/profile", { method: sAct === "clear-memory" ? "DELETE" : "GET" }).then((profile) => {
-          state.sprite.profile = sAct === "clear-memory" ? { aliases: {} } : profile;
-          renderSpriteAssistantMount();
-        }).catch((error) => pushSpriteMessage({ text: formatActionError(error), tone: "worry" }));
-      } else if (sAct === "tour-next" || sAct === "tour-skip") {
-        if (state.sprite.tour) { state.sprite.tour.index += 1; void showSpriteTourStop(); }
-      } else if (sAct === "tour-end") {
-        endSpriteTour();
-      } else if (sAct === "toggle") {
-        toggleSpriteAssistant();
-      } else if (sAct === "open") {
-        toggleSpriteAssistant({ open: true });
-      } else if (sAct === "close") {
-        toggleSpriteAssistant({ open: false });
-      } else if (sAct === "dismiss-toast") {
-        state.sprite.toastBubble = null;
-        if (state.sprite.toastTimer) {
-          clearTimeout(state.sprite.toastTimer);
-          state.sprite.toastTimer = null;
-        }
-        renderSpriteAssistantMount();
-      } else if (sAct === "toggle-dispatch-prefs") {
-        state.sprite.prefsOpen = !state.sprite.prefsOpen;
-        renderSpriteAssistantMount();
-      } else if (sAct === "toggle-tts") {
-        const nextTts = !state.sprite.ttsEnabled;
-        state.sprite.ttsEnabled = nextTts;
-        saveSpritePrefs({ ttsEnabled: nextTts });
-        if (!nextTts) stopSpriteSpeech();
-        renderSpriteAssistantMount();
-        showToastBanner(nextTts ? "已开启小精灵语音播报" : "已静音小精灵语音播报");
-      } else if (sAct === "briefing") {
-        const brief = buildSpriteOpeningBriefing(state.missionOverview, state.threads);
-        pushSpriteMessage({
-          role: "sprite",
-          tone: brief.tone,
-          text: brief.text,
-          spokenText: brief.spokenText,
-          chips: brief.chips,
-        });
-      } else if (sAct === "open-call") {
-        void toggleSpriteHandsFree();
-      } else if (sAct === "mic") {
-        void toggleSpriteMic();
-      } else if (sAct === "finish-mic") {
-        void stopSpriteMic({ submit: true });
-      } else if (sAct === "cancel-mic") {
-        void stopSpriteMic({ submit: false });
-      } else if (sAct === "stop-speech") {
-        stopSpriteSpeech();
-      } else if (sAct === "clear-scope") {
-        state.sprite.scopedTopicId = "";
-        state.sprite.scopedTopicName = "";
-        renderSpriteAssistantMount();
-      } else if (sAct === "confirm-reorg") {
-        void confirmSpriteReorgPreview();
-      } else if (sAct === "cancel-reorg") {
-        state.sprite.pendingReorg = null;
-        pushSpriteMessage({ role: "sprite", tone: "idle", text: "好的，已取消本次梦工厂布局调整。" });
-      } else if (sAct === "reorg-guide") {
-        pushSpriteMessage({
-          role: "sprite",
-          tone: "idle",
-          text: "你可以直接语音或打字告诉我如何调整梦工厂，例如：\n•「把 xxx 改名为 yyy」\n•「把 xxx 移到内容工坊」\n•「把 A 和 B 合并」\n•「删除 xxx 产线」\n•「重新扫描本地仓库」",
-        });
-      } else if (sAct === "confirm-archive") {
-        void confirmSpriteArchivePreview();
-      } else if (sAct === "cancel-archive") {
-        state.sprite.pendingArchive = null;
-        pushSpriteMessage({ role: "sprite", tone: "idle", text: "好的，已取消本次归档操作。" });
-      } else if (sAct === "confirm-dispatch") {
-        void confirmSpriteDispatchPreview();
-      } else if (sAct === "cancel-dispatch") {
-        state.sprite.pendingPreview = null;
-        pushSpriteMessage({ role: "sprite", tone: "idle", text: "好的，已取消本次派工预览。" });
-      }
-      return;
-    }
-
-    const summonTopicBtn = e.target.closest("[data-sprite-summon-topic]");
-    if (summonTopicBtn) {
-      e.stopPropagation();
-      summonSpriteForTopic(summonTopicBtn.dataset.spriteSummonTopic || "");
-      return;
-    }
-
-    const archiveTopicBtn = e.target.closest("[data-sprite-archive-topic]");
-    if (archiveTopicBtn) {
-      e.stopPropagation();
-      void requestSpriteArchivePreview({
-        topicId: archiveTopicBtn.dataset.spriteArchiveTopic || "",
-        staleDays: 3,
-      });
-      return;
-    }
-
-    const archiveDaysBtn = e.target.closest("[data-sprite-archive-days]");
-    if (archiveDaysBtn && state.sprite.pendingArchive?.topicId) {
-      e.stopPropagation();
-      const nextDays = Number.parseInt(archiveDaysBtn.dataset.spriteArchiveDays || "3", 10) || 3;
-      void requestSpriteArchivePreview({
-        topicId: state.sprite.pendingArchive.topicId,
-        staleDays: nextDays,
-      });
-      return;
-    }
-
-    const topicBriefBtn = e.target.closest("[data-sprite-topic-brief]");
-    if (topicBriefBtn) {
-      e.stopPropagation();
-      summonSpriteForTopic(topicBriefBtn.dataset.spriteTopicBrief || "");
-      return;
-    }
-
-    const spriteSayBtn = e.target.closest("[data-sprite-say]");
-    if (spriteSayBtn) {
-      e.stopPropagation();
-      void handleSpriteCommand(spriteSayBtn.dataset.spriteSay || "");
-      return;
-    }
-
-    const spriteFocusTopicBtn = e.target.closest("[data-sprite-focus-topic]");
-    if (spriteFocusTopicBtn) {
-      e.stopPropagation();
-      const tid = spriteFocusTopicBtn.dataset.spriteFocusTopic || "";
-      if (state.boardViewMode === "tycoon3d") {
-        state.tycoonSelectedTopicId = tid;
-        state.tycoonInspectorMode = "topic";
-        void tycoon3dInstance?.spriteVisit?.(tid);
-        tycoon3dInstance?.flyToTopic?.(tid);
-        renderProjectBoard();
-      } else {
-        const card = document.getElementById(`mo-topic-${tid}`);
-        card?.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-      return;
-    }
-
-    const spriteQuickPreviewBtn = e.target.closest("[data-sprite-quick-preview]");
-    if (spriteQuickPreviewBtn) {
-      e.stopPropagation();
-      const qText = spriteQuickPreviewBtn.dataset.spriteQuickPreview || "";
-      const qTopic = spriteQuickPreviewBtn.dataset.spriteQuickTopic || "";
-      pushSpriteMessage({ role: "user", text: qText });
-      void requestSpriteDispatchPreview({ instruction: qText, topicId: qTopic });
-      return;
-    }
-
+    if (handleSpriteDelegatedClick(e)) return;
     const viewSwitchBtn = e.target.closest("[data-board-view-mode]");
     if (viewSwitchBtn) {
       setBoardViewMode(viewSwitchBtn.dataset.boardViewMode);
@@ -14130,6 +13369,9 @@ function bindEvents() {
 
     if (e.target.closest("[data-tycoon-open-unassigned]")) {
       state.tycoonInspectorMode = state.tycoonInspectorMode === "unassigned" ? "" : "unassigned";
+      state.tycoonInspectorRoomId = "";
+      state.tycoonInspectorClusterOnly = false;
+      state.tycoonInspectorBack = null;
       state.tycoonSelectedTopicId = "";
       renderProjectBoard();
       return;
@@ -14137,8 +13379,66 @@ function bindEvents() {
 
     if (e.target.closest("[data-tycoon-open-recent-done]")) {
       state.tycoonInspectorMode = state.tycoonInspectorMode === "recent_done" ? "" : "recent_done";
+      state.tycoonInspectorRoomId = "";
+      state.tycoonInspectorClusterOnly = false;
+      state.tycoonInspectorBack = null;
       state.tycoonSelectedTopicId = "";
       renderProjectBoard();
+      return;
+    }
+
+    if (e.target.closest("[data-tycoon-open-directory]")) {
+      state.tycoonInspectorMode = state.tycoonInspectorMode === "directory" ? "" : "directory";
+      state.tycoonInspectorRoomId = "";
+      state.tycoonInspectorClusterOnly = false;
+      state.tycoonInspectorBack = null;
+      state.tycoonSelectedTopicId = "";
+      renderProjectBoard();
+      return;
+    }
+
+    if (e.target.closest("[data-tycoon-toggle-cluster-scope]")) {
+      state.tycoonInspectorClusterOnly = !state.tycoonInspectorClusterOnly;
+      state.tycoonInspectorMode = state.tycoonInspectorClusterOnly ? "cluster" : "room";
+      renderProjectBoard();
+      return;
+    }
+
+    if (e.target.closest("[data-tycoon-inspector-back]")) {
+      const back = state.tycoonInspectorBack;
+      state.tycoonInspectorBack = null;
+      state.tycoonSelectedTopicId = "";
+      if (back && ["room", "cluster", "directory"].includes(back.mode)) {
+        state.tycoonInspectorMode = back.mode;
+        state.tycoonInspectorRoomId = back.roomId || "";
+        state.tycoonInspectorClusterOnly = Boolean(back.clusterOnly);
+      } else {
+        state.tycoonInspectorMode = "";
+      }
+      renderProjectBoard();
+      return;
+    }
+
+    const subProjBtn = e.target.closest("[data-mo-select-subproject]");
+    if (subProjBtn) {
+      const tid = subProjBtn.dataset.moSelectSubproject || "";
+      const subCwd = subProjBtn.dataset.moSubprojectCwd || "";
+      if (tid) {
+        if (subCwd) state.selectedSubProjectByTopic = { ...state.selectedSubProjectByTopic, [tid]: subCwd };
+        else {
+          const next = { ...state.selectedSubProjectByTopic };
+          delete next[tid];
+          state.selectedSubProjectByTopic = next;
+        }
+        renderProjectBoard();
+      }
+      return;
+    }
+
+    const inductBtn = e.target.closest("[data-mo-induct-cwd]");
+    if (inductBtn) {
+      e.stopPropagation();
+      void inductOverviewWorkspace(inductBtn.dataset.moInductCwd || "");
       return;
     }
 
@@ -14148,6 +13448,8 @@ function bindEvents() {
       if (act === "refresh") {
         const modelSel = $("overviewModelSelect");
         void refreshMissionOverview({ preferredModel: modelSel?.value || "" });
+      } else if (act === "sync-projects") {
+        void syncOverviewProjects();
       } else if (act === "toggle-immersive") {
         state.immersiveOverview = !state.immersiveOverview;
         renderProjectBoard();
@@ -14172,14 +13474,22 @@ function bindEvents() {
     const tycoonCamBtn = e.target.closest("[data-tycoon-cam-room]");
     if (tycoonCamBtn) {
       const rm = tycoonCamBtn.dataset.tycoonCamRoom || "all";
+      state.tycoonSelectedTopicId = "";
+      state.tycoonInspectorBack = null;
+      state.tycoonInspectorClusterOnly = false;
       if (rm === "incubator") {
         state.tycoonInspectorMode = "incubator";
-        state.tycoonSelectedTopicId = "";
+        state.tycoonInspectorRoomId = "";
         tycoon3dInstance?.flyToRoom?.("incubator");
+      } else if (rm === "all") {
+        state.overviewDomainFilter = "all";
+        state.tycoonInspectorMode = "";
+        state.tycoonInspectorRoomId = "";
+        tycoon3dInstance?.flyToRoom?.("all");
       } else {
         state.overviewDomainFilter = rm;
-        state.tycoonInspectorMode = "";
-        state.tycoonSelectedTopicId = "";
+        state.tycoonInspectorMode = "room";
+        state.tycoonInspectorRoomId = rm;
         tycoon3dInstance?.flyToRoom?.(rm);
       }
       renderProjectBoard();
@@ -14189,6 +13499,13 @@ function bindEvents() {
     const tycoonTopicBtn = e.target.closest("[data-tycoon-select-topic]");
     if (tycoonTopicBtn) {
       const tid = tycoonTopicBtn.dataset.tycoonSelectTopic || "";
+      if (["room", "cluster", "directory"].includes(state.tycoonInspectorMode)) {
+        state.tycoonInspectorBack = {
+          mode: state.tycoonInspectorMode,
+          roomId: state.tycoonInspectorRoomId,
+          clusterOnly: state.tycoonInspectorClusterOnly,
+        };
+      }
       state.tycoonSelectedTopicId = tid;
       state.tycoonInspectorMode = "topic";
       tycoon3dInstance?.flyToTopic?.(tid);
@@ -14198,6 +13515,9 @@ function bindEvents() {
 
     if (e.target.closest("[data-tycoon-close-inspector]")) {
       state.tycoonInspectorMode = "";
+      state.tycoonInspectorRoomId = "";
+      state.tycoonInspectorClusterOnly = false;
+      state.tycoonInspectorBack = null;
       state.tycoonSelectedTopicId = "";
       renderProjectBoard();
       return;
@@ -14376,7 +13696,17 @@ function bindEvents() {
 
     const selectDispatchTopicBtn = e.target.closest("[data-mo-select-dispatch-topic]");
     if (selectDispatchTopicBtn) {
-      state.dispatchTopicId = selectDispatchTopicBtn.dataset.moSelectDispatchTopic || "";
+      const tid = selectDispatchTopicBtn.dataset.moSelectDispatchTopic || "";
+      state.dispatchTopicId = tid;
+      if (tid && "moSubprojectCwd" in selectDispatchTopicBtn.dataset) {
+        const subCwd = selectDispatchTopicBtn.dataset.moSubprojectCwd || "";
+        if (subCwd) state.selectedSubProjectByTopic = { ...state.selectedSubProjectByTopic, [tid]: subCwd };
+        else {
+          const next = { ...state.selectedSubProjectByTopic };
+          delete next[tid];
+          state.selectedSubProjectByTopic = next;
+        }
+      }
       state.dispatchPreview = null;
       state.tycoonMobileDockOpen = true;
       renderProjectBoard();
@@ -14386,7 +13716,17 @@ function bindEvents() {
 
     const quickDispatchBtn = e.target.closest("[data-mo-quick-dispatch-text]");
     if (quickDispatchBtn) {
-      state.dispatchTopicId = quickDispatchBtn.dataset.moQuickDispatchTopic || "";
+      const tid = quickDispatchBtn.dataset.moQuickDispatchTopic || "";
+      state.dispatchTopicId = tid;
+      if (tid && "moSubprojectCwd" in quickDispatchBtn.dataset) {
+        const subCwd = quickDispatchBtn.dataset.moSubprojectCwd || "";
+        if (subCwd) state.selectedSubProjectByTopic = { ...state.selectedSubProjectByTopic, [tid]: subCwd };
+        else {
+          const next = { ...state.selectedSubProjectByTopic };
+          delete next[tid];
+          state.selectedSubProjectByTopic = next;
+        }
+      }
       state.dispatchDraft = quickDispatchBtn.dataset.moQuickDispatchText || "";
       state.dispatchSparkId = "";
       state.dispatchPreview = null;
@@ -14636,6 +13976,7 @@ function bindEvents() {
         toggleBatchThreadSelection(item.dataset.threadId, { shiftKey: e.shiftKey });
         return;
       }
+      exitSpriteOverlayForNavigation();
       void selectThread(item.dataset.threadId).catch((error) => {
         const errMsg = formatActionError(error, "加载会话失败");
         setComposerStatus("error", `加载会话失败：${errMsg}`);
@@ -15262,15 +14603,34 @@ function bindEvents() {
     const cleanThreadId = String(threadId || "").trim();
     const cleanPath = String(path || "").trim();
     if (!cleanThreadId || !cleanPath) return;
+    const managerName = localFileManagerName();
     if (triggerBtn) triggerBtn.disabled = true;
     try {
       await apiPost("api/thread/reveal", { threadId: cleanThreadId, path: cleanPath });
     } catch (error) {
-      showToastBanner("打开访达失败", { detail: formatActionError(error, "无法在访达中定位该文件"), error: true });
+      showToastBanner(`打开${managerName}失败`, { detail: formatActionError(error, `无法在${managerName}中定位该文件`), error: true });
     } finally {
       if (triggerBtn) triggerBtn.disabled = false;
     }
   }
+
+  document.addEventListener("contextmenu", (e) => {
+    if (!isLoopbackHostname(location.hostname)) return;
+    const fileTrigger = e.target?.closest?.("[data-local-file-path]");
+    const filePath = fileTrigger?.dataset?.localFilePath || "";
+    if (!filePath) return;
+    const hasMacNativeMenu = Boolean(window.webkit?.messageHandlers?.localFileContextMenu);
+    if (hasMacNativeMenu && filePath.startsWith("/") && !filePath.startsWith("//")) {
+      return;
+    }
+    e.preventDefault();
+    const targetThreadId = (fileTrigger.id === "imagePreviewImg" || fileTrigger.id === "imagePreviewCaption")
+      ? (state.imagePreview?.revealThreadId || state.activeThread?.id || state.activeThreadId || "")
+      : (fileTrigger.closest?.("#filePreviewModal")
+        ? (state.filePreview?.threadId || state.activeThread?.id || state.activeThreadId || "")
+        : (state.activeThread?.id || state.activeThreadId || ""));
+    openLocalFileContextMenu(targetThreadId, filePath, e.clientX, e.clientY, fileTrigger);
+  });
 
   $("imagePreviewRevealBtn")?.addEventListener("click", () => {
     const info = state.imagePreview;
@@ -15654,6 +15014,25 @@ function bindEvents() {
       }
       return;
     }
+    const pinPlanBtn = targetEl.closest("[data-pin-plan-turn-index]");
+    if (pinPlanBtn) {
+      if (!state.activeThreadId || pinPlanBtn.disabled) return;
+      const turnIndex = Number(pinPlanBtn.dataset.pinPlanTurnIndex);
+      const turnId = pinPlanBtn.dataset.pinPlanTurnId || "";
+      const excerpt = pinPlanBtn.closest(".msg-row")?.querySelector("[data-copy-message]")?.dataset?.copyMessage || "";
+      pinPlanBtn.disabled = true;
+      try {
+        await pinTurnAsPlanAction({
+          threadId: state.activeThreadId,
+          turnId,
+          turnIndex: Number.isInteger(turnIndex) ? turnIndex : -1,
+          excerpt,
+        });
+      } finally {
+        pinPlanBtn.disabled = false;
+      }
+      return;
+    }
     if (handleMermaidInteraction(e)) return;
     await handleCopyButtonClick(e);
   });
@@ -15828,6 +15207,161 @@ function bindEvents() {
   $("pinTicketBtn")?.addEventListener("click", () => {
     setTopbarMenuOpen(false);
     void pinThreadAsTicket(state.activeThreadId);
+  });
+  $("newSiblingThreadBtn")?.addEventListener("click", () => {
+    setTopbarMenuOpen(false);
+    if (!state.activeThreadId) return;
+    void startLinkedThreadDraft({ mode: "same", sourceThreadId: state.activeThreadId });
+  });
+  $("newChildTaskThreadBtn")?.addEventListener("click", () => {
+    setTopbarMenuOpen(false);
+    if (!state.activeThreadId) return;
+    void startLinkedThreadDraft({ mode: "child", sourceThreadId: state.activeThreadId });
+  });
+  $("linkExistingTaskBtn")?.addEventListener("click", () => {
+    setTopbarMenuOpen(false);
+    if (!state.activeThreadId) return;
+    state.tasksBindPickerId = state.tasksSelectedId || state.tasks.find((t) => t.status === "open")?.id || "";
+    void openTasksModal(state.tasksBindPickerId);
+  });
+  $("sidebarTasksBtn")?.addEventListener("click", () => {
+    setSidebarOpen(false);
+    void openTasksModal();
+  });
+  $("openTasksModalBtn")?.addEventListener("click", () => {
+    setTopbarMenuOpen(false);
+    void openTasksModal();
+  });
+  $("tasksModal")?.addEventListener("click", async (e) => {
+    if (e.target === $("tasksModal")) {
+      $("tasksModal").close();
+      return;
+    }
+    const statusTab = e.target.closest("[data-tasks-status]");
+    if (statusTab) {
+      state.tasksModalStatus = statusTab.dataset.tasksStatus || "open";
+      renderTasksModal();
+      return;
+    }
+    const toggleCollapse = e.target.closest("[data-task-toggle-collapse]");
+    if (toggleCollapse) {
+      e.stopPropagation();
+      const id = toggleCollapse.dataset.taskToggleCollapse;
+      if (state.tasksCollapsedIds.has(id)) state.tasksCollapsedIds.delete(id);
+      else state.tasksCollapsedIds.add(id);
+      renderTasksModal();
+      return;
+    }
+    const selectRow = e.target.closest("[data-task-select]");
+    if (selectRow) {
+      const id = selectRow.dataset.taskSelect;
+      if (id && state.tasksSelectedId !== id) {
+        state.tasksSelectedId = id;
+        state.tasksBindPickerId = "";
+        renderTasksModal();
+        void loadTaskDetailLogs(id);
+      }
+      return;
+    }
+    const planBtn = e.target.closest("[data-task-jump-plan]");
+    if (planBtn) {
+      void jumpToTaskPlan(planBtn.dataset.taskJumpPlan);
+      return;
+    }
+    const siblingBtn = e.target.closest("[data-task-new-sibling]");
+    if (siblingBtn) {
+      void startLinkedThreadDraft({ mode: "same", taskId: siblingBtn.dataset.taskNewSibling });
+      return;
+    }
+    const childBtn = e.target.closest("[data-task-new-child]");
+    if (childBtn) {
+      void startLinkedThreadDraft({ mode: "child", parentTaskId: childBtn.dataset.taskNewChild });
+      return;
+    }
+    const toggleBind = e.target.closest("[data-task-toggle-bind]");
+    if (toggleBind) {
+      const id = toggleBind.dataset.taskToggleBind;
+      state.tasksBindPickerId = state.tasksBindPickerId === id ? "" : id;
+      renderTasksModal();
+      return;
+    }
+    const bindBtn = e.target.closest("[data-task-bind-thread]");
+    if (bindBtn) {
+      const id = bindBtn.dataset.taskBindThread;
+      const tid = bindBtn.dataset.threadId;
+      await apiPost(`api/tasks/${encodeURIComponent(id)}`, { addThreadId: tid });
+      state.tasksBindPickerId = "";
+      await refreshTasks();
+      await loadTaskDetailLogs(id);
+      showToastBanner("已将历史会话挂入任务");
+      return;
+    }
+    const unbindBtn = e.target.closest("[data-task-unbind-thread]");
+    if (unbindBtn) {
+      const id = unbindBtn.dataset.taskUnbindThread;
+      const tid = unbindBtn.dataset.threadId;
+      await apiPost(`api/tasks/${encodeURIComponent(id)}`, { removeThreadId: tid });
+      await refreshTasks();
+      await loadTaskDetailLogs(id);
+      return;
+    }
+    const statusBtn = e.target.closest("[data-task-set-status]");
+    if (statusBtn) {
+      const id = statusBtn.dataset.taskSetStatus;
+      const nextStatus = statusBtn.dataset.status;
+      await apiPost(`api/tasks/${encodeURIComponent(id)}`, { status: nextStatus });
+      await refreshTasks();
+      await loadTaskDetailLogs(id);
+      return;
+    }
+    const threadJump = e.target.closest("[data-task-strip-thread]");
+    if (threadJump) {
+      $("tasksModal").close();
+      await selectThread(threadJump.dataset.taskStripThread, { focusScroll: true });
+    }
+  });
+  $("tasksModal")?.addEventListener("submit", async (e) => {
+    if (e.target.id === "taskQuickLogForm") {
+      e.preventDefault();
+      const taskId = e.target.dataset.taskId;
+      const input = $("taskQuickLogInput");
+      const text = input?.value?.trim() || "";
+      if (!taskId || !text) return;
+      await apiPost(`api/tasks/${encodeURIComponent(taskId)}/log`, { text, kind: "agent_log", actor: "user" });
+      if (input) input.value = "";
+      await refreshTasks();
+      await loadTaskDetailLogs(taskId);
+    }
+  });
+  $("tasksSearchInput")?.addEventListener("input", (e) => {
+    state.tasksModalQuery = e.target.value || "";
+    renderTasksModal();
+  });
+  $("newRootTaskBtn")?.addEventListener("click", () => {
+    const form = $("newRootTaskForm");
+    if (!form) return;
+    form.hidden = !form.hidden;
+    if (!form.hidden) $("newRootTaskTitleInput")?.focus();
+  });
+  $("cancelNewRootTaskBtn")?.addEventListener("click", () => {
+    const form = $("newRootTaskForm");
+    if (form) form.hidden = true;
+  });
+  $("newRootTaskForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const title = $("newRootTaskTitleInput")?.value?.trim() || "";
+    const goal = $("newRootTaskGoalInput")?.value?.trim() || "";
+    if (!title) return;
+    const res = await apiPost("api/tasks", { title, goal, cwd: state.activeThread?.cwd || state.newThreadCwd || "" });
+    $("newRootTaskTitleInput").value = "";
+    $("newRootTaskGoalInput").value = "";
+    $("newRootTaskForm").hidden = true;
+    await refreshTasks();
+    if (res?.task?.id) {
+      state.tasksSelectedId = res.task.id;
+      renderTasksModal();
+      void loadTaskDetailLogs(res.task.id);
+    }
   });
 
   $("toggleThreadImagesBtn")?.addEventListener("click", () => {
@@ -16384,6 +15918,8 @@ function bindEvents() {
   window.addEventListener("ac:locale-change", () => {
     if ($("updateModal")?.open) renderUpdateModal();
   });
+  spriteController.bindFullscreenEvents();
+
   $("openAutomationsModalBtn")?.addEventListener("click", () => void openAutomationsModal());
   $("sidebarAutomationsBtn")?.addEventListener("click", () => void openAutomationsModal());
   $("refreshAutomationsBtn")?.addEventListener("click", () => void refreshAutomations().catch(() => {}));
@@ -16395,30 +15931,75 @@ function bindEvents() {
       })
       .catch(() => {});
   });
+  $("autoProviderSelect")?.addEventListener("change", () => {
+    const provider = $("autoProviderSelect")?.value || "codex";
+    syncAutomationProfileSelect();
+    syncAutomationModelAndEffortSelects();
+    void refreshModelsForProfile(provider, $("autoProfileSelect")?.value || "");
+  });
+  $("autoProfileSelect")?.addEventListener("change", () => {
+    const provider = $("autoProviderSelect")?.value || "codex";
+    void refreshModelsForProfile(provider, $("autoProfileSelect")?.value || "");
+  });
+  $("autoModelSelect")?.addEventListener("change", () => {
+    const provider = $("autoProviderSelect")?.value || "codex";
+    const modelId = $("autoModelSelect")?.value || "";
+    const models = resolveModelsForProvider(state.modelsByProvider, state.allModels, provider);
+    const selectedObj = models.find((m) => (m.id || m.model) === modelId) || null;
+    syncAutomationEffortSelect(selectedObj, "");
+  });
+  $("autoScheduleSelect")?.addEventListener("change", () => {
+    const isCustom = $("autoScheduleSelect")?.value === "__custom__";
+    const customField = $("autoScheduleCustomField");
+    if (customField) customField.hidden = !isCustom;
+    if (isCustom) $("autoScheduleCustomInput")?.focus();
+  });
+  $("autoCancelEditBtn")?.addEventListener("click", () => {
+    resetAutomationForm();
+    const details = $("automationCreateDetails");
+    if (details) details.open = false;
+  });
   $("automationCreateForm")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const prompt = $("autoPromptInput")?.value?.trim() || "";
     if (!prompt) return;
+    const editingId = $("autoTaskIdInput")?.value?.trim() || "";
+    const scheduleVal = $("autoScheduleSelect")?.value || "FREQ=DAILY;BYHOUR=9;BYMINUTE=0";
+    const rrule = scheduleVal === "__custom__"
+      ? ($("autoScheduleCustomInput")?.value?.trim() || "FREQ=DAILY;BYHOUR=9;BYMINUTE=0")
+      : scheduleVal;
+    const provider = $("autoProviderSelect")?.value || "codex";
     try {
       const snap = await apiPost("api/automations/custom", {
         action: "create",
+        ...(editingId ? { id: editingId } : {}),
         name: $("autoNameInput")?.value?.trim() || "",
-        provider: $("autoProviderSelect")?.value || "codex",
-        rrule: $("autoScheduleSelect")?.value || "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
+        provider,
+        profileId: $("autoProfileSelect")?.value || defaultProfileForProvider(provider),
+        model: $("autoModelSelect")?.value || "",
+        reasoningEffort: $("autoEffortSelect")?.disabled ? "" : ($("autoEffortSelect")?.value || ""),
+        rrule,
         cwd: $("autoCwdInput")?.value?.trim() || "",
         prompt,
       });
       state.automationsSnapshot = snap;
       renderAutomationsModal(snap);
-      $("automationCreateForm")?.reset();
+      resetAutomationForm();
       const details = $("automationCreateDetails");
       if (details) details.open = false;
-      showToastBanner("已添加定时任务并开启后台托管");
+      showToastBanner(editingId ? "已更新定时任务配置" : "已添加定时任务并开启后台托管");
     } catch (error) {
-      showToastBanner("创建定时任务失败", { detail: formatActionError(error), error: true });
+      showToastBanner(editingId ? "更新定时任务失败" : "创建定时任务失败", { detail: formatActionError(error), error: true });
     }
   });
   $("automationsList")?.addEventListener("click", async (e) => {
+    const editBtn = e.target.closest("[data-auto-edit]");
+    if (editBtn) {
+      const key = editBtn.dataset.autoEdit;
+      const task = (state.automationsSnapshot?.tasks || []).find((t) => t.taskKey === key || t.id === key);
+      if (task) startEditAutomationTask(task);
+      return;
+    }
     const runBtn = e.target.closest("[data-auto-run]");
     if (runBtn) {
       const key = runBtn.dataset.autoRun;
@@ -16479,7 +16060,41 @@ function bindEvents() {
     if (e.target === $("automationsModal")) $("automationsModal").close();
   });
   $("restartServiceBtn")?.addEventListener("click", () => void triggerRestartService());
-  $("applyDesktopUpdateBtn")?.addEventListener("click", () => void triggerDesktopAppUpdate());
+  $("applyDesktopUpdateBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const menu = $("desktopUpdateMenu");
+    setDesktopUpdateMenuOpen(Boolean(menu?.hidden));
+  });
+  $("desktopUpdateMenu")?.addEventListener("click", (e) => {
+    const choice = e.target?.closest?.("[data-desktop-open]");
+    if (!choice) return;
+    e.stopPropagation();
+    void triggerDesktopAppUpdate({ openAfterBuild: choice.dataset.desktopOpen === "1" });
+  });
+  $("updateModal")?.addEventListener("close", () => setDesktopUpdateMenuOpen(false));
+  $("updateModal")?.addEventListener("cancel", (e) => {
+    const menu = $("desktopUpdateMenu");
+    if (menu && !menu.hidden) {
+      e.preventDefault();
+      setDesktopUpdateMenuOpen(false);
+    }
+  });
+  document.addEventListener("click", (e) => {
+    const menu = $("desktopUpdateMenu");
+    if (!menu || menu.hidden) return;
+    if (!e.target?.closest?.("#desktopUpdateMenuWrap")) {
+      setDesktopUpdateMenuOpen(false);
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const menu = $("desktopUpdateMenu");
+    if (menu && !menu.hidden) {
+      e.preventDefault();
+      e.stopPropagation();
+      setDesktopUpdateMenuOpen(false);
+    }
+  }, true);
   $("checkUpdateBtn")?.addEventListener("click", () => void triggerCheckUpdates());
   $("applyUpdateBtn")?.addEventListener("click", () => void triggerApplyUpdate());
   $("autoCheckUpdateToggle")?.addEventListener("change", (e) => {
@@ -16552,6 +16167,57 @@ function bindEvents() {
       e.target.checked = !enabled;
       updateSettingsTabBadge();
       showToastBanner("保存设置失败", { detail: error?.message || "未知错误", error: true });
+    }
+  });
+  $("sharedMemoryToggle")?.addEventListener("change", async (e) => {
+    const enabled = Boolean(e.target.checked);
+    updateSettingsTabBadge();
+    try {
+      await apiPost("api/memory/config", { enabled });
+      await loadMemoryAndSkillSettings();
+      showToastBanner(enabled ? "已启用内置共享记忆与任务投影" : "已关闭内置共享记忆注入");
+    } catch (error) {
+      e.target.checked = !enabled;
+      updateSettingsTabBadge();
+      showToastBanner("保存设置失败", { detail: error?.message || "未知错误", error: true });
+    }
+  });
+  $("saveMemoryConfigBtn")?.addEventListener("click", async () => {
+    const vaultPath = $("memoryVaultPathInput")?.value?.trim() || "";
+    await apiPost("api/memory/config", { vaultPath });
+    await loadMemoryAndSkillSettings();
+    showToastBanner(vaultPath ? "已更新自定义记忆库路径" : "已切回内置默认记忆库");
+  });
+  $("resetMemoryVaultBtn")?.addEventListener("click", async () => {
+    if ($("memoryVaultPathInput")) $("memoryVaultPathInput").value = "";
+    await apiPost("api/memory/config", { vaultPath: "" });
+    await loadMemoryAndSkillSettings();
+    showToastBanner("已恢复内置默认记忆目录");
+  });
+  $("installSkillSyncBtn")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await apiPost("api/skills/sync", { action: "install" });
+      renderSkillSyncStatus(res?.status);
+      showToastBanner("已同步内置记忆与任务技能到 Claude / Codex / Antigravity");
+    } catch (error) {
+      showToastBanner("同步技能失败", { detail: formatActionError(error), error: true });
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+  $("uninstallSkillSyncBtn")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await apiPost("api/skills/sync", { action: "uninstall" });
+      renderSkillSyncStatus(res?.status);
+      showToastBanner("已移除由 RemoDeck 托管的三端技能链接");
+    } catch (error) {
+      showToastBanner("卸载技能失败", { detail: formatActionError(error), error: true });
+    } finally {
+      if (btn) btn.disabled = false;
     }
   });
   $("checkCliUpdatesBtn")?.addEventListener("click", async (e) => {
@@ -17137,6 +16803,9 @@ async function init() {
     if (e.key === "Escape") {
       if (state.tycoonInspectorMode || state.tycoonSelectedTopicId) {
         state.tycoonInspectorMode = "";
+        state.tycoonInspectorRoomId = "";
+        state.tycoonInspectorClusterOnly = false;
+        state.tycoonInspectorBack = null;
         state.tycoonSelectedTopicId = "";
         renderProjectBoard();
         return;
@@ -17160,14 +16829,22 @@ async function init() {
       };
       const rm = roomByKey[e.key];
       if (rm) {
+        state.tycoonSelectedTopicId = "";
+        state.tycoonInspectorBack = null;
+        state.tycoonInspectorClusterOnly = false;
         if (rm === "incubator") {
           state.tycoonInspectorMode = "incubator";
-          state.tycoonSelectedTopicId = "";
+          state.tycoonInspectorRoomId = "";
           tycoon3dInstance?.flyToRoom?.("incubator");
+        } else if (rm === "all") {
+          state.overviewDomainFilter = "all";
+          state.tycoonInspectorMode = "";
+          state.tycoonInspectorRoomId = "";
+          tycoon3dInstance?.flyToRoom?.("all");
         } else {
           state.overviewDomainFilter = rm;
-          state.tycoonInspectorMode = "";
-          state.tycoonSelectedTopicId = "";
+          state.tycoonInspectorMode = "room";
+          state.tycoonInspectorRoomId = rm;
           tycoon3dInstance?.flyToRoom?.(rm);
         }
         renderProjectBoard();
@@ -17195,6 +16872,7 @@ async function init() {
 
   const modelsPromise = refreshModels().catch(() => {});
   const telemetryPromise = refreshTelemetry().catch(() => {});
+  void refreshTasks().catch(() => {});
   void refreshLocalApps().catch(() => {});
   void refreshUpdateStatus().catch(() => {});
 

@@ -41,7 +41,30 @@ import { RemoteBridge } from "./remote-bridge.mjs";
 import { logRequestError } from "./request-logging.mjs";
 import { acquireRuntimeLease } from "./runtime-lease.mjs";
 import { AutomationScheduler } from "./automation-scheduler.mjs";
+import { defaultVaultPath, MemoryVault, resolveEffectiveVaultPath, resolveVaultPath, writeMemoryConfig } from "./memory-vault.mjs";
 import { MissionOverviewService } from "./mission-overview-service.mjs";
+import { SpritePhoneArchive } from "./sprite-phone-archive.mjs";
+
+function splitSpeechSegments(text = "") {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (!clean) return [];
+  const rawParts = clean.match(/[^。！？；.!?\n]+[。！？；.!?\n]*/g) || [clean];
+  const segments = [];
+  for (const part of rawParts) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    if (segments.length > 0 && Array.from(segments[segments.length - 1]).length < 8) {
+      segments[segments.length - 1] = `${segments[segments.length - 1]} ${trimmed}`.trim();
+    } else if (segments.length > 1 && Array.from(trimmed).length < 8) {
+      segments[segments.length - 1] = `${segments[segments.length - 1]} ${trimmed}`.trim();
+    } else {
+      segments.push(trimmed);
+    }
+  }
+  return segments.length ? segments : [clean];
+}
+import { getSkillSyncStatus, installSkill, uninstallSkill } from "./skill-sync.mjs";
+import { buildTaskTree, TaskStore } from "./task-store.mjs";
 import { UpdateService } from "./update-service.mjs";
 import { createUsagePing } from "./usage-ping.mjs";
 import { VoiceCallService } from "./voice-call-service.mjs";
@@ -61,6 +84,7 @@ const MIME_TYPES = {
   ".jpg": "image/jpeg",
   ".webp": "image/webp",
   ".ico": "image/x-icon",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
 const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024;
@@ -153,8 +177,6 @@ export async function createAgentControlServer({
   writeErrorLog,
 } = {}) {
   const identity = await ensureInstanceIdentity({ dataDir });
-  const hub = customHub || new ProviderHub({ env, dataDir, providers });
-  await hub.init();
   const sseClients = new Set();
   const broadcastSse = (eventName, payload) => {
     const chunk = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
@@ -166,6 +188,25 @@ export async function createAgentControlServer({
       res.write(chunk);
     }
   };
+  let hubRef = null;
+  const projectTaskToVault = async (task, logs, { parentTitle = "", childTitles = [] } = {}) => {
+    if (!dataDir) return;
+    const enabled = hubRef ? hubRef.getSettings?.().sharedMemoryEnabled !== false : true;
+    if (!enabled) return;
+    const vaultRoot = await resolveEffectiveVaultPath({ env, dataDir, enabled });
+    if (!vaultRoot) return;
+    const vault = new MemoryVault(vaultRoot);
+    const scope = await vault.resolveTopic({ topic: task.topicId, cwd: task.cwd }).catch(() => "");
+    await vault.projectTask(task, logs, { scope: scope || task.topicId || "", parentTitle, childTitles });
+  };
+  const taskStore = customHub?.taskStore || (dataDir ? new TaskStore({
+    dataDir,
+    onChange: (evt) => broadcastSse("task_updated", evt),
+    projectToVault: projectTaskToVault,
+  }) : null);
+  const hub = customHub || new ProviderHub({ env, dataDir, providers, taskStore });
+  hubRef = hub;
+  await hub.init();
 
   const voiceService = new VoiceCallService({
     hub,
@@ -179,11 +220,14 @@ export async function createAgentControlServer({
     env,
     dataDir,
     broadcast: (eventName, payload) => broadcastSse(eventName, payload),
+    assistantOptions: { taskStore },
   });
+  overviewService.voiceService = voiceService;
 
   const unsubscribeHub = hub.subscribe((eventName, payload) => {
     broadcastSse(eventName, payload);
     void voiceService.handleHubEvent?.(eventName, payload);
+    void overviewService.assistant?.handleHubEvent?.(eventName, payload);
   });
 
   const bridgeInternalToken = randomBytes(32).toString("hex");
@@ -228,10 +272,11 @@ export async function createAgentControlServer({
   });
 
   let closeServerResources = null;
+  const effectiveEnv = Number(port) > 0 ? { ...env, PORT: String(port) } : env;
   const updateService = new UpdateService({
-    ...(updateServiceOptions || {}),
     dataDir,
-    env,
+    env: effectiveEnv,
+    ...(updateServiceOptions || {}),
     canAutoUpdateIdle: async () => {
       if (typeof updateServiceOptions?.canAutoUpdateIdle === "function") {
         return updateServiceOptions.canAutoUpdateIdle();
@@ -264,6 +309,9 @@ export async function createAgentControlServer({
     onEvent: (eventName, payload) => broadcastSse(eventName, payload),
     ...(humanVerifyOptions || {}),
   });
+
+  const spritePhoneArchive = new SpritePhoneArchive({ dataDir });
+  spritePhoneArchive.startCleanupTimer();
 
   const heartbeat = setInterval(() => {
     for (const res of [...sseClients]) {
@@ -611,25 +659,51 @@ export async function createAgentControlServer({
       if (pathname === "/api/assistant/ask" && request.method === "POST") {
         const body = await readJsonBody(request);
         const streaming = String(request.headers.accept || "").includes("application/x-ndjson");
+        const abortController = new AbortController();
+        const onDisconnect = () => {
+          if (!response.writableEnded) abortController.abort();
+        };
+        request.once("aborted", onDisconnect);
+        response.once("close", onDisconnect);
         const writeLine = (value) => {
+          if (response.writableEnded || response.destroyed || abortController.signal.aborted) return;
           if (!response.headersSent) {
             response.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
           }
           response.write(`${JSON.stringify(value)}\n`);
         };
+        let heartbeatTimer = null;
+        if (streaming) {
+          heartbeatTimer = setInterval(() => {
+            if (response.headersSent && !response.writableEnded && !abortController.signal.aborted) {
+              writeLine({ type: "ping", ts: Date.now() });
+            }
+          }, 8_000);
+          heartbeatTimer.unref?.();
+        }
         try {
           const result = await overviewService.assistant.ask(body, {
             onTrace: streaming ? (item) => writeLine({ type: "trace", ...item }) : undefined,
+            signal: abortController.signal,
           });
+          if (abortController.signal.aborted || response.writableEnded || response.destroyed) return;
           if (streaming) {
             const { trace: _trace, ...answer } = result;
             writeLine({ type: "answer", ...answer });
             response.end();
           } else sendJson(response, 200, result, { requestId });
         } catch (error) {
+          if (abortController.signal.aborted || error?.aborted || error?.name === "AbortError") {
+            if (response.headersSent && !response.writableEnded) response.end();
+            return;
+          }
           if (!response.headersSent) throw error;
           writeLine({ type: "error", message: error.message || "检索失败" });
           response.end();
+        } finally {
+          clearInterval(heartbeatTimer);
+          request.removeListener("aborted", onDisconnect);
+          response.removeListener("close", onDisconnect);
         }
         return;
       }
@@ -658,10 +732,602 @@ export async function createAgentControlServer({
         sendJson(response, 200, await overviewService.assistant.updateTicket(decodeURIComponent(assistantTicket[1]), await readJsonBody(request)), { requestId });
         return;
       }
+
+      if (pathname === "/api/tasks" && request.method === "GET") {
+        const status = url.searchParams.get("status") || "open";
+        const topicId = url.searchParams.get("topicId") || "";
+        const cwd = url.searchParams.get("cwd") || "";
+        const threadId = url.searchParams.get("threadId") || "";
+        const { tasks } = await overviewService.assistant.listTickets({ status });
+        let filtered = tasks;
+        if (topicId) filtered = filtered.filter((t) => t.topicId === topicId);
+        if (cwd) {
+          const norm = normalizeWorkspacePath(cwd);
+          filtered = filtered.filter((t) => normalizeWorkspacePath(t.cwd || "") === norm);
+        }
+        if (threadId) filtered = filtered.filter((t) => (t.threadIds || []).includes(threadId));
+        sendJson(response, 200, { tasks: filtered, tree: buildTaskTree(filtered) }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/tasks" && request.method === "POST") {
+        if (!taskStore) throw Object.assign(new Error("任务存储未就绪"), { status: 500 });
+        const body = await readJsonBody(request);
+        const initialThreads = Array.isArray(body.threadIds) ? [...body.threadIds] : [];
+        if (body.sourceThreadId && !initialThreads.includes(body.sourceThreadId)) {
+          initialThreads.unshift(String(body.sourceThreadId).trim());
+        }
+        const task = await taskStore.create({
+          title: body.title,
+          goal: body.goal || "",
+          criteria: body.criteria ?? [],
+          parentId: body.parentId || "",
+          topicId: body.topicId || "",
+          cwd: body.cwd ? normalizeWorkspacePath(expandHomePath(String(body.cwd), env)) : "",
+          threadIds: initialThreads,
+          actor: "user",
+        });
+        for (const tid of task.threadIds) {
+          await hub.setThreadTask?.(tid, task.id).catch(() => {});
+        }
+        sendJson(response, 200, { ok: true, task }, { requestId });
+        return;
+      }
+
+      const taskPlanMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/plan$/);
+      if (taskPlanMatch && request.method === "POST") {
+        if (!taskStore) throw Object.assign(new Error("任务存储未就绪"), { status: 500 });
+        const id = decodeURIComponent(taskPlanMatch[1]);
+        const body = await readJsonBody(request);
+        const task = await taskStore.pinPlan(id, {
+          threadId: body.threadId,
+          turnId: body.turnId || "",
+          turnIndex: Number.isInteger(Number(body.turnIndex)) ? Number(body.turnIndex) : -1,
+          excerpt: body.excerpt || "",
+          actor: "user",
+        });
+        await hub.setThreadTask?.(body.threadId, task.id).catch(() => {});
+        sendJson(response, 200, { ok: true, task }, { requestId });
+        return;
+      }
+
+      const taskLogMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/log$/);
+      if (taskLogMatch && request.method === "POST") {
+        if (!taskStore) throw Object.assign(new Error("任务存储未就绪"), { status: 500 });
+        const id = decodeURIComponent(taskLogMatch[1]);
+        const body = await readJsonBody(request);
+        const entry = await taskStore.appendLog(id, {
+          kind: body.kind || "agent_log",
+          actor: body.actor || "user",
+          threadId: body.threadId || "",
+          text: body.text || "",
+        });
+        sendJson(response, 200, { ok: true, entry }, { requestId });
+        return;
+      }
+
+      const taskItemMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
+      if (taskItemMatch && request.method === "GET") {
+        if (!taskStore) throw Object.assign(new Error("任务存储未就绪"), { status: 500 });
+        const id = decodeURIComponent(taskItemMatch[1]);
+        const task = await taskStore.get(id);
+        if (!task) throw Object.assign(new Error("任务不存在"), { status: 404 });
+        const [ancestors, children, logs, listed] = await Promise.all([
+          taskStore.getAncestors(id),
+          taskStore.getChildren(id),
+          taskStore.readLogs(id, { limit: Number(url.searchParams.get("limit")) || 50 }),
+          hub.listThreads({ archived: "all", limit: 200 }).catch(() => ({ threads: [] })),
+        ]);
+        const threadById = new Map((listed.threads || []).map((t) => [t.id, t]));
+        const threads = task.threadIds.map((tid) => threadById.get(tid) || { id: tid, title: tid, missing: true });
+        sendJson(response, 200, { task, ancestors, children, logs, threads }, { requestId });
+        return;
+      }
+
+      if (taskItemMatch && request.method === "POST") {
+        const id = decodeURIComponent(taskItemMatch[1]);
+        const result = await overviewService.assistant.updateTicket(id, await readJsonBody(request));
+        sendJson(response, 200, { ok: true, task: result.ticket }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/thread/pin-plan" && request.method === "POST") {
+        if (!taskStore) throw Object.assign(new Error("任务存储未就绪"), { status: 500 });
+        const body = await readJsonBody(request);
+        const threadId = String(body.threadId || "").trim();
+        if (!threadId) throw Object.assign(new Error("缺少会话 ID"), { status: 400 });
+        context.threadId = threadId;
+        let task = null;
+        if (body.taskId) {
+          task = await taskStore.get(body.taskId);
+        }
+        if (!task) {
+          const metaTaskId = hub.listThreadsMeta?.()?.[threadId]?.taskId;
+          task = (metaTaskId ? await taskStore.get(metaTaskId) : null) || await taskStore.findByThreadId(threadId);
+        }
+        if (!task) {
+          const readRes = await hub.readThread(threadId, { limit: 1, detail: "auto" }).catch(() => null);
+          const th = readRes?.thread || {};
+          const fallbackTitle = String(body.taskTitle || th.title || th.name || body.excerpt || "规划任务").replace(/\s+/g, " ").trim().slice(0, 48);
+          task = await taskStore.create({
+            title: fallbackTitle,
+            cwd: th.cwd || "",
+            threadIds: [threadId],
+            actor: "user",
+          });
+        }
+        task = await taskStore.pinPlan(task.id, {
+          threadId,
+          turnId: body.turnId || "",
+          turnIndex: Number.isInteger(Number(body.turnIndex)) ? Number(body.turnIndex) : -1,
+          excerpt: body.excerpt || "",
+          actor: "user",
+        });
+        await hub.setThreadTask?.(threadId, task.id).catch(() => {});
+        sendJson(response, 200, { ok: true, task }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/memory/config" && request.method === "GET") {
+        const enabled = hub.getSettings().sharedMemoryEnabled !== false;
+        const explicit = await resolveVaultPath({ env, dataDir });
+        const effective = await resolveEffectiveVaultPath({ env, dataDir, enabled });
+        sendJson(response, 200, {
+          enabled,
+          vaultPath: explicit === defaultVaultPath(dataDir) ? "" : explicit,
+          envVaultPath: env?.AC_MEMORY_VAULT || "",
+          effectiveVaultPath: effective,
+          defaultVaultPath: defaultVaultPath(dataDir),
+          isDefaultVault: !explicit && !env?.AC_MEMORY_VAULT,
+        }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/memory/config" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        if (Object.hasOwn(body || {}, "enabled")) {
+          await hub.setSettings({ sharedMemoryEnabled: Boolean(body.enabled) });
+        }
+        if (Object.hasOwn(body || {}, "vaultPath")) {
+          const rawVault = String(body.vaultPath || "").trim();
+          const expanded = rawVault ? expandHomePath(rawVault, env) : "";
+          await writeMemoryConfig(dataDir, { vaultPath: expanded });
+        }
+        const enabled = hub.getSettings().sharedMemoryEnabled !== false;
+        const explicit = await resolveVaultPath({ env, dataDir });
+        const effective = await resolveEffectiveVaultPath({ env, dataDir, enabled });
+        sendJson(response, 200, {
+          ok: true,
+          enabled,
+          vaultPath: explicit,
+          effectiveVaultPath: effective,
+          defaultVaultPath: defaultVaultPath(dataDir),
+          isDefaultVault: !explicit && !env?.AC_MEMORY_VAULT,
+        }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/skills/status" && request.method === "GET") {
+        sendJson(response, 200, await getSkillSyncStatus(), { requestId });
+        return;
+      }
+
+      if (pathname === "/api/skills/sync" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const action = String(body?.action || "install").trim();
+        const clients = Array.isArray(body?.clients) ? body.clients : undefined;
+        const result = action === "uninstall"
+          ? await uninstallSkill({ ...(clients ? { clients } : {}) })
+          : await installSkill({ ...(clients ? { clients } : {}), force: Boolean(body?.force) });
+        sendJson(response, 200, { ok: true, ...result }, { requestId });
+        return;
+      }
       const assistantCardAction = pathname.match(/^\/api\/assistant\/cards\/([^/]+)\/action$/);
       if (assistantCardAction && request.method === "POST") {
         sendJson(response, 200, await overviewService.assistant.cardAction(decodeURIComponent(assistantCardAction[1]), await readJsonBody(request)), { requestId });
         return;
+      }
+
+      if (pathname === "/api/assistant/models" && request.method === "GET") {
+        sendJson(response, 200, await voiceService.listVoiceModelOptions(), { requestId });
+        return;
+      }
+
+      if (pathname === "/api/assistant/action" && request.method === "POST") {
+        sendJson(response, 200, await overviewService.assistant.executeProposedAction(await readJsonBody(request)), { requestId });
+        return;
+      }
+
+      if (pathname === "/api/assistant/notices" && request.method === "GET") {
+        const limit = Number(url.searchParams.get("limit") || 10);
+        sendJson(response, 200, await overviewService.assistant.listUnreadNotices({ limit }), { requestId });
+        return;
+      }
+
+      if (pathname === "/api/assistant/notices/ack" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await overviewService.assistant.ackNotices(body.ids), { requestId });
+        return;
+      }
+
+      if (pathname === "/api/assistant/call/warm" && request.method === "POST") {
+        const [warm, popped] = await Promise.all([
+          voiceService.warmAssistantCall(),
+          overviewService.assistant.popPendingVoiceNotices({ limit: 2 }).catch(() => ({ notices: [], remainingCount: 0 })),
+        ]);
+        sendJson(response, 200, {
+          ...warm,
+          notices: popped.notices || [],
+          remainingNoticeCount: popped.remainingCount || 0,
+        }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/assistant/phone-log" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        await spritePhoneArchive.logEvent({
+          stage: "client",
+          requestId,
+          callId: String(body.callId || "").trim(),
+          turnId: String(body.turnId || "").trim(),
+          event: String(body.event || "state_change").trim(),
+          fromPhase: String(body.fromPhase || "").trim(),
+          toPhase: String(body.toPhase || "").trim(),
+          detail: body.detail && typeof body.detail === "object" ? body.detail : String(body.detail || "").slice(0, 200),
+        });
+        sendJson(response, 200, { ok: true }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/assistant/voice-turn" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const wantsNdjson = String(request.headers.accept || "").includes("application/x-ndjson");
+        const audioBase64 = String(body.audioBase64 || "").trim();
+        const callId = String(body.callId || "").trim();
+        const turnId = String(body.turnId || "").trim() || `spturn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        const turnStartedAt = Date.now();
+        let heardText = String(body.transcriptText || "").trim();
+        let asrResult = null;
+        let ndjsonStarted = false;
+        let ndjsonPing = null;
+        const userAudioTask = audioBase64
+          ? spritePhoneArchive.saveAudio({
+              callId,
+              turnId,
+              role: "user",
+              audioBase64,
+              mimeType: body.audioMimeType || "audio/wav",
+            })
+          : Promise.resolve(null);
+        const writeNdjson = (obj) => {
+          if (response.destroyed || response.writableEnded) return false;
+          response.write(`${JSON.stringify(obj)}\n`);
+          return true;
+        };
+        const ensureNdjson = () => {
+          if (!wantsNdjson || ndjsonStarted) return;
+          ndjsonStarted = true;
+          response.writeHead(200, {
+            "Content-Type": "application/x-ndjson; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            ...(requestId ? { "X-Request-Id": requestId } : {}),
+          });
+          ndjsonPing = setInterval(() => {
+            writeNdjson({ type: "ping" });
+          }, 8000);
+          ndjsonPing.unref?.();
+        };
+
+        try {
+          if (wantsNdjson) ensureNdjson();
+          if (audioBase64 && !heardText) {
+            const asrStartedAt = Date.now();
+            asrResult = await voiceService.transcribeAudio({
+              audioBase64,
+              audioMimeType: body.audioMimeType || "audio/wav",
+              language: body.language || "zh",
+              promptHints: await voiceService.getAsrPromptHints(),
+              overlapMs: Number(body.overlapDurationMs) || 0,
+            });
+            const asrMs = Date.now() - asrStartedAt;
+            const userAudioMeta = await userAudioTask;
+            const isNoSpeech = Boolean(asrResult?.noSpeech || !String(asrResult?.text || "").trim());
+            void spritePhoneArchive.logEvent({
+              stage: "asr",
+              event: "asr_done",
+              requestId,
+              callId,
+              turnId,
+              asrMs,
+              noSpeech: isNoSpeech,
+              silenceReason: asrResult?.silenceReason || (isNoSpeech ? "no_speech" : ""),
+              localAudioFiltered: Boolean(asrResult?.localAudioFiltered),
+              asrEngine: asrResult?.engine || "",
+              heardText: String(asrResult?.text || "").trim().slice(0, 300),
+              userAudioPath: userAudioMeta?.path || "",
+              userAudioBytes: userAudioMeta?.bytes || 0,
+            });
+            if (isNoSpeech) {
+              const noSpeechPayload = {
+                ok: true,
+                noSpeech: true,
+                turnId,
+                silenceReason: asrResult?.silenceReason || "no_speech",
+                localAudioFiltered: Boolean(asrResult?.localAudioFiltered),
+                asrEngine: asrResult?.engine || "",
+                heardText: "",
+              };
+              if (wantsNdjson) {
+                writeNdjson({ type: "no_speech", ...noSpeechPayload });
+                response.end();
+              } else {
+                sendJson(response, 200, noSpeechPayload, { requestId });
+              }
+              return;
+            }
+            heardText = String(asrResult.text || "").trim();
+          } else if (heardText) {
+            void spritePhoneArchive.logEvent({
+              stage: "asr",
+              event: "transcript_input",
+              requestId,
+              callId,
+              turnId,
+              heardText: heardText.slice(0, 300),
+            });
+          }
+          if (!heardText) {
+            const emptyPayload = { ok: true, noSpeech: true, turnId, silenceReason: "empty_input", heardText: "" };
+            if (wantsNdjson) {
+              writeNdjson({ type: "no_speech", ...emptyPayload });
+              response.end();
+            } else {
+              sendJson(response, 200, emptyPayload, { requestId });
+            }
+            return;
+          }
+
+          if (wantsNdjson) {
+            writeNdjson({ type: "heard", turnId, heardText, asrEngine: asrResult?.engine || "" });
+          }
+
+          const wantTts = body.tts !== false;
+          const llmStartedAt = Date.now();
+          const overlapMs = Math.max(0, Math.round(Number(body.overlapDurationMs) || 0));
+          const callKey = String(body.sessionId || callId || "").trim();
+          const proposalId = String(body.proposalId || body.pendingProposal?.id || "").trim();
+          const pendingEntry = proposalId
+            ? overviewService.assistant.getPendingProposal(proposalId, { callKey })
+            : null;
+          const fastConfirmRe = /^(?:确认|确定|好|好的|好呀|好啊|行|行的|可以|执行|同意|批准|发吧|发|做吧|开工|派吧|对|对的|是的|是|嗯|嗯嗯|嗯对|没问题|没毛病|就这么办|yes|ok|okay|confirm)[!！。.,，~～]*$/i;
+          const fastCancelRe = /^(?:取消|算了|不要|别|别发|别派|不用了|不用|放弃|不执行|停|cancel|no)[!！。.,，~～]*$/i;
+
+          let prefetchedTts = null;
+          let spokenReadyMs = 0;
+          let firstTtsChunkMs = 0;
+          let prefetchedTtsHit = false;
+          let answer = null;
+
+          if (pendingEntry && overlapMs === 0 && fastConfirmRe.test(heardText)) {
+            let executedAction = null;
+            let replyText = "";
+            let mood = "good";
+            try {
+              executedAction = await overviewService.assistant.executeProposedAction({ proposalId: pendingEntry.id });
+              replyText = `好的，${executedAction.summary || "已经执行"}。`;
+            } catch (err) {
+              executedAction = { ok: false, intent: pendingEntry.intent || "", error: err?.message || "执行失败" };
+              replyText = `执行没有成功：${executedAction.error}`;
+              mood = "worry";
+            }
+            answer = { kind: "answer", text: replyText, spokenReply: replyText, executedAction, clearedProposal: true, usedModel: true, sources: [], actions: [], mood };
+          } else if (pendingEntry && overlapMs === 0 && fastCancelRe.test(heardText)) {
+            overviewService.assistant.cancelProposal(pendingEntry.id);
+            const replyText = "好的，已经取消，不执行刚才的操作。";
+            answer = { kind: "answer", text: replyText, spokenReply: replyText, clearedProposal: true, usedModel: true, sources: [], actions: [], mood: "idle" };
+          } else if (proposalId && !pendingEntry && overlapMs === 0 && fastConfirmRe.test(heardText)) {
+            const replyText = "刚才那个待确认操作已经过期或已经执行过了，需要的话请重新告诉我。";
+            answer = { kind: "answer", text: replyText, spokenReply: replyText, clearedProposal: true, usedModel: true, sources: [], actions: [], mood: "idle" };
+          } else if (proposalId && !pendingEntry && overlapMs === 0 && fastCancelRe.test(heardText)) {
+            const replyText = "好的，已经取消。";
+            answer = { kind: "answer", text: replyText, spokenReply: replyText, clearedProposal: true, usedModel: true, sources: [], actions: [], mood: "idle" };
+          } else {
+            const speechTiming = (overlapMs > 0 || asrResult?.duringPlaybackText)
+              ? {
+                  overlapDurationMs: overlapMs,
+                  overlapBotText: String(body.overlapBotText || "").trim(),
+                  duringPlaybackText: String(asrResult?.duringPlaybackText || "").trim() || (overlapMs > 0 ? heardText : ""),
+                  afterPlaybackText: String(asrResult?.afterPlaybackText || "").trim(),
+                }
+              : null;
+            const onSpokenReply = (wantsNdjson && wantTts)
+              ? (earlyText) => {
+                  const cleanEarly = String(earlyText || "").trim();
+                  if (!cleanEarly || prefetchedTts) return;
+                  spokenReadyMs = Date.now() - llmStartedAt;
+                  const segments = splitSpeechSegments(cleanEarly);
+                  if (!segments.length) return;
+                  const tasks = segments.map((seg) =>
+                    voiceService.synthesizeSpeech({ text: seg, callId, source: "turn", register: false })
+                      .catch(() => ({ audioBase64: "", mimeType: "", provider: "none", text: seg, expectedMs: 0 })),
+                  );
+                  prefetchedTts = { text: cleanEarly, segments, tasks };
+                }
+              : null;
+            answer = await overviewService.assistant.ask({
+              text: heardText,
+              history: body.history,
+              focus: body.focus,
+              contextTopicId: body.contextTopicId,
+              mode: "phone",
+              modelKey: body.modelKey || "auto",
+              sessionId: body.sessionId || callId,
+              callId,
+              proposalId: pendingEntry?.id || "",
+              autoExecute: Boolean(body.autoExecute),
+              ...(speechTiming ? { speechTiming } : {}),
+            }, { onSpokenReply });
+          }
+
+          if (answer && !answer.proposal) {
+            const poppedNotices = await overviewService.assistant.popPendingVoiceNotices({ limit: 1 }).catch(() => ({ notices: [], remainingCount: 0 }));
+            if (poppedNotices.notices.length) {
+              answer.notices = poppedNotices.notices;
+              const noticePhrase = `顺便说一下，${poppedNotices.notices[0].text}。`;
+              const baseSpoken = String(answer.spokenReply || answer.text || "").trim();
+              answer.spokenReply = baseSpoken ? `${baseSpoken} ${noticePhrase}` : noticePhrase;
+            }
+          }
+
+          const llmMs = Date.now() - llmStartedAt;
+          const spokenText = String(answer?.spokenReply || answer?.text || "").trim();
+          void spritePhoneArchive.logEvent({
+            stage: "llm",
+            event: "llm_done",
+            requestId,
+            callId,
+            turnId,
+            llmMs,
+            ...(spokenReadyMs > 0 ? { spokenReadyMs } : {}),
+            modelKey: body.modelKey || "auto",
+            usedModel: Boolean(answer?.usedModel),
+            mood: answer?.mood || "",
+            hasProposal: Boolean(answer?.proposal),
+            executedAction: answer?.executedAction?.intent || "",
+            replyLen: String(answer?.text || "").length,
+            spokenLen: spokenText.length,
+          });
+          if (response.destroyed || response.writableEnded || Boolean(response.socket?.destroyed)) {
+            void spritePhoneArchive.logEvent({
+              stage: "tts",
+              event: "client_disconnected",
+              requestId,
+              callId,
+              turnId,
+              totalTurnMs: Date.now() - turnStartedAt,
+            });
+            return;
+          }
+
+          if (wantsNdjson) {
+            writeNdjson({ type: "answer", turnId, heardText, asrEngine: asrResult?.engine || "", answer });
+            if (wantTts && spokenText && !response.destroyed) {
+              const ttsStartedAt = Date.now();
+              const usePrefetch = Boolean(prefetchedTts && prefetchedTts.text === spokenText);
+              prefetchedTtsHit = usePrefetch;
+              const segments = usePrefetch ? prefetchedTts.segments : splitSpeechSegments(spokenText);
+              const total = segments.length;
+              const synthTasks = usePrefetch
+                ? prefetchedTts.tasks
+                : segments.map((seg) =>
+                    voiceService.synthesizeSpeech({ text: seg, callId, source: "turn", register: false })
+                      .catch(() => ({ audioBase64: "", mimeType: "", provider: "none", text: seg, expectedMs: 0 })),
+                  );
+              const aiAudioPaths = [];
+              let totalTtsBytes = 0;
+              let lastProvider = "none";
+              for (let i = 0; i < total; i += 1) {
+                if (response.destroyed || response.writableEnded) break;
+                const chunkTts = await synthTasks[i];
+                if (chunkTts?.provider) lastProvider = chunkTts.provider;
+                if (chunkTts?.audioBase64) {
+                  const savedAi = await spritePhoneArchive.saveAudio({
+                    callId,
+                    turnId,
+                    role: "ai",
+                    index: i,
+                    audioBase64: chunkTts.audioBase64,
+                    mimeType: chunkTts.mimeType || "audio/mp3",
+                  });
+                  if (savedAi) {
+                    aiAudioPaths.push(savedAi.path);
+                    totalTtsBytes += savedAi.bytes;
+                  }
+                }
+                if (!firstTtsChunkMs) firstTtsChunkMs = Date.now() - turnStartedAt;
+                writeNdjson({ type: "tts_chunk", index: i, total, text: segments[i], tts: chunkTts });
+              }
+              void spritePhoneArchive.logEvent({
+                stage: "tts",
+                event: "tts_done",
+                requestId,
+                callId,
+                turnId,
+                ttsMs: Date.now() - ttsStartedAt,
+                totalTurnMs: Date.now() - turnStartedAt,
+                ...(spokenReadyMs > 0 ? { spokenReadyMs } : {}),
+                ...(firstTtsChunkMs > 0 ? { firstTtsChunkMs } : {}),
+                prefetchedTtsHit,
+                provider: lastProvider,
+                segments: total,
+                aiAudioPaths,
+                totalBytes: totalTtsBytes,
+              });
+            }
+            writeNdjson({ type: "done", turnId });
+            response.end();
+            return;
+          }
+
+          const ttsStartedAt = Date.now();
+          const tts = wantTts && spokenText
+            ? await voiceService.synthesizeSpeech({ text: spokenText, callId, source: "turn", register: false }).catch(() => ({ audioBase64: "", mimeType: "", provider: "none", text: spokenText, expectedMs: 0 }))
+            : { audioBase64: "", mimeType: "", provider: "none", text: spokenText, expectedMs: 0 };
+          const savedAi = tts?.audioBase64
+            ? await spritePhoneArchive.saveAudio({
+                callId,
+                turnId,
+                role: "ai",
+                index: 0,
+                audioBase64: tts.audioBase64,
+                mimeType: tts.mimeType || "audio/mp3",
+              })
+            : null;
+          if (wantTts && spokenText) {
+            void spritePhoneArchive.logEvent({
+              stage: "tts",
+              event: "tts_done",
+              requestId,
+              callId,
+              turnId,
+              ttsMs: Date.now() - ttsStartedAt,
+              totalTurnMs: Date.now() - turnStartedAt,
+              provider: tts?.provider || "none",
+              segments: 1,
+              aiAudioPaths: savedAi ? [savedAi.path] : [],
+              totalBytes: savedAi?.bytes || 0,
+            });
+          }
+          sendJson(response, 200, {
+            ok: true,
+            noSpeech: false,
+            turnId,
+            heardText,
+            asrEngine: asrResult?.engine || "",
+            answer,
+            tts,
+          }, { requestId });
+          return;
+        } catch (err) {
+          void spritePhoneArchive.logEvent({
+            stage: "error",
+            event: "turn_error",
+            requestId,
+            callId,
+            turnId,
+            totalTurnMs: Date.now() - turnStartedAt,
+            message: err?.message || "语音通话请求失败",
+          });
+          if (wantsNdjson && ndjsonStarted) {
+            writeNdjson({ type: "error", message: err?.message || "语音通话请求失败" });
+            response.end();
+            return;
+          }
+          throw err;
+        } finally {
+          if (ndjsonPing) clearInterval(ndjsonPing);
+        }
       }
 
       if (pathname === "/api/overview/refresh" && request.method === "POST") {
@@ -690,6 +1356,15 @@ export async function createAgentControlServer({
       if (pathname === "/api/overview/topic" && request.method === "POST") {
         const body = await readJsonBody(request);
         const result = await overviewService.upsertTopic(body);
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview/sync" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.syncProjects({
+          clearExisting: Boolean(body.clearExisting),
+        });
         sendJson(response, 200, result, { requestId });
         return;
       }
@@ -731,6 +1406,7 @@ export async function createAgentControlServer({
         const result = await overviewService.dispatchTask({
           text: body.text || "",
           topicId: body.topicId || "",
+          cwdOverride: body.cwdOverride || "",
           mode: body.mode || "auto",
           preferredProvider: body.preferredProvider || "auto",
           agentKey: body.agentKey || "auto",
@@ -1082,6 +1758,11 @@ export async function createAgentControlServer({
           permissionMode: body.permissionMode || "workspace",
           runMode: body.runMode || "normal",
           goalMode: Boolean(body.goalMode),
+          ...(body.taskId ? { taskId: String(body.taskId) } : {}),
+          ...(body.parentTaskId ? { parentTaskId: String(body.parentTaskId) } : {}),
+          ...(body.sourceThreadId ? { sourceThreadId: String(body.sourceThreadId) } : {}),
+          ...(body.taskTitle ? { taskTitle: String(body.taskTitle) } : {}),
+          ...(body.taskMode ? { taskMode: String(body.taskMode) } : {}),
         });
         sendJson(response, 200, result, { requestId });
         return;
@@ -1661,6 +2342,7 @@ export async function createAgentControlServer({
         const result = await updateService.applyDesktopUpdate({
           reason: body?.reason || "manual",
           relaunchIfRunning: body?.relaunchIfRunning !== false,
+          openAfterBuild: typeof body?.openAfterBuild === "boolean" ? body.openAfterBuild : undefined,
         });
         sendJson(response, 200, result, { requestId });
         return;
@@ -1823,7 +2505,9 @@ export async function createAgentControlServer({
       quickTunnel.close(),
       bridge.close(),
       voiceService.close(),
+      spritePhoneArchive.close(),
       hub.close(),
+      taskStore?.flush?.(),
     ]);
     await leaseHandle?.release().catch(() => {});
     server.closeIdleConnections?.();
@@ -1834,6 +2518,7 @@ export async function createAgentControlServer({
   return {
     server,
     hub,
+    taskStore,
     bridge,
     quickTunnel,
     tunnelAuth,

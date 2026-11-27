@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -129,6 +129,46 @@ function pathMatchesPrefix(targetPath, prefix) {
   const sep = cleanPrefix.includes("\\") ? "\\" : "/";
   const normalizedPrefix = cleanPrefix.endsWith(sep) ? cleanPrefix : `${cleanPrefix}${sep}`;
   return cleanTarget.startsWith(normalizedPrefix);
+}
+
+export function isCwdCoveredByTopics(cwd = "", topics = []) {
+  const clean = normPath(cwd);
+  if (!clean) return false;
+  return (Array.isArray(topics) ? topics : []).some((topic) => (
+    (topic?.primaryCwd && pathMatchesPrefix(clean, topic.primaryCwd))
+    || (Array.isArray(topic?.cwdPrefixes) && topic.cwdPrefixes.some((p) => pathMatchesPrefix(clean, p)))
+  ));
+}
+
+export function isNonProjectDiscoveryCwd(cwd = "", existingTopics = []) {
+  const clean = normPath(cwd);
+  if (!clean || clean === "/" || isScratchNoiseCwd(clean)) return true;
+  const homeNorm = normPath(os.homedir());
+  if (homeNorm && clean === homeNorm) return true;
+  const tmpNorm = normPath(os.tmpdir());
+  if (tmpNorm && (clean === tmpNorm || pathMatchesPrefix(clean, tmpNorm))) return true;
+  const slash = clean.replace(/\\/g, "/");
+  if (
+    /^\/(?:private\/)?tmp(?:\/|$)/i.test(slash)
+    || /^\/var\/tmp(?:\/|$)/i.test(slash)
+    || /^\/var\/folders\/[^/]+\/[^/]+\/T(?:\/|$)/i.test(slash)
+    || /(?:^|[\\/])AppData[\\/]Local[\\/]Temp(?:[\\/]|$)/i.test(clean)
+    || /^[a-z]:\\Temp(?:\\|$)/i.test(clean)
+  ) {
+    return true;
+  }
+  if (/^\/(?:Users|home)\/[^/]+$/i.test(slash) || /^[a-z]:\\Users\\[^\\]+$/i.test(clean)) {
+    return true;
+  }
+  for (const topic of Array.isArray(existingTopics) ? existingTopics : []) {
+    for (const p of [topic?.primaryCwd, ...(topic?.cwdPrefixes || [])]) {
+      const existingPath = normPath(p);
+      if (existingPath && existingPath !== clean && pathMatchesPrefix(existingPath, clean)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 const ARCHIVE_TRANSCRIPT_TURNS = 8;
@@ -447,6 +487,15 @@ export const DISPATCH_PRIORITY_STRATEGIES = Object.freeze([
 ]);
 
 export const DEFAULT_DISPATCH_PROVIDER_ORDER = Object.freeze(["antigravity", "claude", "codex", "grok"]);
+
+const DISPATCH_PROVIDER_NAMES = new Set(["codex", "claude", "antigravity", "grok", "qoder"]);
+
+function normalizeDispatchProvider(value) {
+  const lower = String(value || "").trim().toLowerCase();
+  if (!lower || lower === "auto") return "";
+  if (lower === "agy") return "antigravity";
+  return DISPATCH_PROVIDER_NAMES.has(lower) ? lower : "";
+}
 
 export const TASK_DIFFICULTY_LABELS = Object.freeze({
   heavy: "复杂深度 · 最强模型",
@@ -827,6 +876,10 @@ export class MissionOverviewService {
 
   #domains = [...DEFAULT_MISSION_DOMAINS];
   #topics = [...DEFAULT_MISSION_TOPICS];
+  #ignoredCwds = [];
+  #domainsMtimeMs = 0;
+  #vaultCardsCache = { at: 0, cards: [] };
+  #lastSyncDiscoverAt = 0;
   #sparksState = {
     version: 1,
     manualSparks: [],
@@ -887,6 +940,7 @@ export class MissionOverviewService {
     this.#runAiImpl = typeof runAiImpl === "function" ? runAiImpl : null;
     this.#collectGitImpl = typeof collectGitImpl === "function" ? collectGitImpl : collectRepoGitSnapshot;
     this.#env = env;
+    this.voiceService = null;
     this.assistant = new AssistantService({
       hub, dataDir, env,
       getOverview: () => this.getOverview({ trigger: "assistant" }),
@@ -894,6 +948,7 @@ export class MissionOverviewService {
         if (!this.#broadcast) return;
         void this.getOverview({ trigger: "assistant" }).then((overview) => this.#broadcast?.("overview_updated", overview)).catch(() => {});
       },
+      dispatchImpl: (opts) => this.dispatchTask(opts),
       ...assistantOptions,
       // Tests never reach a real model: without an injected runner there is no channel at all.
       llmOptions: { completeImpl: this.#runAiImpl || !isTestRuntime(env) ? (input) => this.completeAssistantText(input) : null, ...(assistantOptions.llmOptions || {}) },
@@ -901,21 +956,50 @@ export class MissionOverviewService {
   }
 
   async #ensureLoaded() {
-    if (this.#loaded) return;
+    const normalizeIgnoredList = (list) => [
+      ...new Set((Array.isArray(list) ? list : []).map((p) => normPath(p)).filter(Boolean)),
+    ];
+    if (this.#loaded) {
+      try {
+        const st = await stat(this.#domainsPath);
+        if (st.mtimeMs && st.mtimeMs !== this.#domainsMtimeMs) {
+          const rawDomains = JSON.parse(await readFile(this.#domainsPath, "utf8"));
+          if (Array.isArray(rawDomains?.domains) && rawDomains.domains.length) {
+            this.#domains = rawDomains.domains;
+          }
+          if (Array.isArray(rawDomains?.topics)) {
+            this.#topics = rawDomains.topics;
+          }
+          this.#ignoredCwds = normalizeIgnoredList(rawDomains?.ignoredCwds);
+          this.#domainsMtimeMs = st.mtimeMs;
+          this.#gitCache.clear();
+          this.#autoMetricsCache.at = 0;
+        }
+      } catch {}
+      return;
+    }
     this.#loaded = true;
     try {
-      const rawDomains = JSON.parse(await readFile(this.#domainsPath, "utf8"));
+      const [rawText, st] = await Promise.all([
+        readFile(this.#domainsPath, "utf8"),
+        stat(this.#domainsPath).catch(() => null),
+      ]);
+      const rawDomains = JSON.parse(rawText);
       if (Array.isArray(rawDomains?.domains) && rawDomains.domains.length) {
         this.#domains = rawDomains.domains;
       }
       if (Array.isArray(rawDomains?.topics)) {
         this.#topics = rawDomains.topics;
       }
+      this.#ignoredCwds = normalizeIgnoredList(rawDomains?.ignoredCwds);
+      this.#domainsMtimeMs = st?.mtimeMs || 0;
     } catch {
       // Fresh install with no mission-domains.json yet: keep topics empty so
-      // #discoverTopicsFromThreads() populates from the user's own local repos.
+      // #syncDiscoveredTopics() populates from the user's own local repos.
       this.#domains = [...DEFAULT_MISSION_DOMAINS];
       this.#topics = [];
+      this.#ignoredCwds = [];
+      this.#domainsMtimeMs = 0;
     }
 
     try {
@@ -979,7 +1063,49 @@ export class MissionOverviewService {
       version: DOMAINS_SCHEMA_VERSION,
       domains: this.#domains,
       topics: this.#topics,
+      ignoredCwds: this.#ignoredCwds,
     }).catch(() => {});
+    const st = await stat(this.#domainsPath).catch(() => null);
+    if (st?.mtimeMs) this.#domainsMtimeMs = st.mtimeMs;
+  }
+
+  async #readVaultProjectCards({ force = false } = {}) {
+    if (!force && this.#vaultCardsCache.at > 0 && (Date.now() - this.#vaultCardsCache.at) < 60_000) {
+      return this.#vaultCardsCache.cards;
+    }
+    const root = await resolveVaultPath({ env: this.#env, dataDir: this.#dataDir }).catch(() => "");
+    if (!root) {
+      this.#vaultCardsCache = { at: Date.now(), cards: [] };
+      return [];
+    }
+    try {
+      const vault = new MemoryVault(root);
+      const rawCards = await vault.projectCards();
+      const cards = rawCards.map((note) => {
+        const meta = note?.meta || {};
+        const cwds = []
+          .concat(meta.cwd || [])
+          .map((p) => normPath(p))
+          .filter(Boolean);
+        const bodyLines = String(note?.body || "")
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith("#") && !l.startsWith("|") && !l.startsWith("-") && !l.startsWith(">"));
+        return {
+          topic: String(meta.topic || "").trim(),
+          name: String(meta.name || meta.topic || "").trim(),
+          domain: String(meta.domain || "").trim(),
+          cwds,
+          keywords: [].concat(meta.keywords || []).map((k) => String(k || "").trim()).filter(Boolean),
+          aliases: [].concat(meta.aliases || []).map((a) => String(a || "").trim()).filter(Boolean),
+          description: compactHeadline(bodyLines[0] || "", 80),
+        };
+      }).filter((c) => c.topic || c.cwds.length > 0);
+      this.#vaultCardsCache = { at: Date.now(), cards };
+      return cards;
+    } catch {
+      return this.#vaultCardsCache.cards || [];
+    }
   }
 
   async #persistSparks() {
@@ -1480,6 +1606,78 @@ export class MissionOverviewService {
             const activeProviders = [...new Set(primaryOnly.filter((t) => t.live).map((t) => t.provider))];
             const recentProviders = [...new Set(primaryOnly.slice(0, 4).map((t) => t.provider))];
 
+            const uniquePrefixes = [];
+            const seenPrefixes = new Set();
+            for (const p of [topic.primaryCwd, ...(topic.cwdPrefixes || [])]) {
+              const np = normPath(p);
+              if (!np || seenPrefixes.has(np)) continue;
+              seenPrefixes.add(np);
+              uniquePrefixes.push(np);
+            }
+            let subProjects = [];
+            if (uniquePrefixes.length >= 2) {
+              const primaryNorm = normPath(topic.primaryCwd);
+              const baseCounts = new Map();
+              for (const p of uniquePrefixes) {
+                const b = basename(p) || p;
+                baseCounts.set(b, (baseCounts.get(b) || 0) + 1);
+              }
+              const subMap = new Map(uniquePrefixes.map((cwd, sIdx) => {
+                const base = basename(cwd) || cwd;
+                const parent = basename(dirname(cwd));
+                const name = (baseCounts.get(base) || 0) > 1 && parent ? `${parent}/${base}` : base;
+                return [cwd, {
+                  id: `${topic.id}::sub-${sIdx + 1}`,
+                  name,
+                  cwd,
+                  isPrimary: cwd === primaryNorm,
+                  order: sIdx,
+                  activeCount: 0,
+                  liveCount: 0,
+                  pendingCount: 0,
+                  archivedCount: 0,
+                  latestUpdatedAt: 0,
+                }];
+              }));
+              const matchSubPrefix = (threadCwd) => {
+                const nc = normPath(threadCwd);
+                if (!nc) return "";
+                let best = "";
+                for (const prefix of uniquePrefixes) {
+                  if (pathMatchesPrefix(nc, prefix) && prefix.length > best.length) {
+                    best = prefix;
+                  }
+                }
+                return best;
+              };
+              for (const th of primaryOnly) {
+                const matched = matchSubPrefix(th.cwd);
+                const entry = matched ? subMap.get(matched) : null;
+                if (!entry) continue;
+                entry.activeCount += 1;
+                if (th.live) entry.liveCount += 1;
+                entry.pendingCount += Number(th.pendingCount) || 0;
+                if ((th.updatedAt || 0) > entry.latestUpdatedAt) entry.latestUpdatedAt = th.updatedAt || 0;
+              }
+              for (const th of bucket.archived) {
+                const matched = matchSubPrefix(th.cwd);
+                const entry = matched ? subMap.get(matched) : null;
+                if (!entry) continue;
+                entry.archivedCount += 1;
+                if ((th.updatedAt || 0) > entry.latestUpdatedAt) entry.latestUpdatedAt = th.updatedAt || 0;
+              }
+              subProjects = [...subMap.values()]
+                .sort((a, b) => (
+                  ((b.pendingCount > 0 ? 1 : 0) - (a.pendingCount > 0 ? 1 : 0))
+                  || ((b.liveCount > 0 ? 1 : 0) - (a.liveCount > 0 ? 1 : 0))
+                  || ((b.activeCount > 0 ? 1 : 0) - (a.activeCount > 0 ? 1 : 0))
+                  || ((b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0))
+                  || (b.latestUpdatedAt - a.latestUpdatedAt)
+                  || (a.order - b.order)
+                ))
+                .map(({ order: _order, ...rest }) => rest);
+            }
+
             return {
               ...topic,
               landmark,
@@ -1496,6 +1694,7 @@ export class MissionOverviewService {
               metrics,
               archiveDigest: this.#contextsStore.topics?.[topic.id] || null,
               workerPods,
+              subProjects,
               sliceCount,
               activeProviders: activeProviders.length ? activeProviders : recentProviders.slice(0, 2),
               activeThreads: bucket.active,
@@ -1574,38 +1773,103 @@ export class MissionOverviewService {
     };
   }
 
-  async #discoverTopicsFromThreads(rawThreads = []) {
-    if (this.#topics.length > 0 || !Array.isArray(rawThreads) || !rawThreads.length) {
-      return false;
+  async #syncDiscoveredTopics(rawThreads = [], { forceRescan = false, clearExisting = false } = {}) {
+    const hadTopicsBefore = !clearExisting && this.#topics.length > 0;
+    if (clearExisting) {
+      this.#topics = [];
+      this.#ignoredCwds = [];
     }
-    const homeNorm = normPath(os.homedir());
+
+    const metaMap = typeof this.#hub?.listThreadsMeta === "function" ? this.#hub.listThreadsMeta() : {};
+    const nowSec = Math.floor(Date.now() / 1000);
+    const ignoredSet = clearExisting ? [] : this.#ignoredCwds;
+    const isIgnored = (cwd) => ignoredSet.some((ign) => pathMatchesPrefix(cwd, ign));
+    const vaultCards = await this.#readVaultProjectCards({ force: forceRescan });
+
     const byCwd = new Map();
-    for (const t of rawThreads) {
-      if (!t || isScratchNoiseCwd(t.cwd)) continue;
+    for (const t of Array.isArray(rawThreads) ? rawThreads : []) {
+      if (!t || t.archived || t.internal || metaMap[t.id]?.internal || isInternalOverviewThread(t)) continue;
       const cwd = normPath(t.cwd);
-      if (!cwd || cwd === "/" || cwd === homeNorm) continue;
+      if (!cwd || isNonProjectDiscoveryCwd(cwd, this.#topics) || isCwdCoveredByTopics(cwd, this.#topics) || isIgnored(cwd)) {
+        continue;
+      }
       let bucket = byCwd.get(cwd);
       if (!bucket) {
-        bucket = { cwd, threads: [], latestAt: 0 };
+        bucket = { cwd, threads: [], latestAt: 0, vaultCard: null, hasActiveWindow: false };
         byCwd.set(cwd, bucket);
       }
       bucket.threads.push(t);
       const upd = toEpochSeconds(t.updatedAt);
       if (upd > bucket.latestAt) bucket.latestAt = upd;
+      if (this.#isThreadActiveInWindow(t, nowSec)) bucket.hasActiveWindow = true;
     }
-    if (!byCwd.size) return false;
 
-    const sortedWorkspaces = [...byCwd.values()]
+    for (const card of vaultCards) {
+      for (const rawCwd of card.cwds || []) {
+        const cwd = normPath(rawCwd);
+        if (!cwd || isNonProjectDiscoveryCwd(cwd, this.#topics) || isCwdCoveredByTopics(cwd, this.#topics) || isIgnored(cwd)) {
+          continue;
+        }
+        let bucket = byCwd.get(cwd);
+        if (!bucket) {
+          bucket = { cwd, threads: [], latestAt: nowSec, vaultCard: card, hasActiveWindow: true };
+          byCwd.set(cwd, bucket);
+        } else if (!bucket.vaultCard) {
+          bucket.vaultCard = card;
+          bucket.hasActiveWindow = true;
+        }
+      }
+    }
+
+    this.#lastSyncDiscoverAt = Date.now();
+    if (!byCwd.size) return { changed: false, added: [] };
+
+    const keptBuckets = [];
+    for (const bucket of byCwd.values()) {
+      if (hadTopicsBefore && !forceRescan) {
+        if (!bucket.vaultCard && !bucket.hasActiveWindow && bucket.threads.length < 2) continue;
+      }
+      if (!bucket.vaultCard && vaultCards.length) {
+        const folderLower = (basename(bucket.cwd) || "").toLowerCase();
+        bucket.vaultCard = vaultCards.find((card) => (
+          card.cwds.some((c) => pathMatchesPrefix(bucket.cwd, c))
+          || (folderLower && card.topic && card.topic.toLowerCase() === folderLower)
+        )) || null;
+      }
+      keptBuckets.push(bucket);
+    }
+    if (!keptBuckets.length) return { changed: false, added: [] };
+
+    // Merge child sub-directories into the shallowest uncovered parent candidate
+    keptBuckets.sort((a, b) => (a.cwd.length - b.cwd.length) || (b.latestAt - a.latestAt));
+    const mergedBuckets = [];
+    for (const cand of keptBuckets) {
+      const parent = mergedBuckets.find((p) => pathMatchesPrefix(cand.cwd, p.cwd));
+      if (parent) {
+        parent.threads.push(...cand.threads);
+        if (cand.latestAt > parent.latestAt) parent.latestAt = cand.latestAt;
+        if (cand.hasActiveWindow) parent.hasActiveWindow = true;
+        if (!parent.vaultCard && cand.vaultCard) parent.vaultCard = cand.vaultCard;
+      } else {
+        mergedBuckets.push(cand);
+      }
+    }
+
+    const capacityLeft = Math.max(0, 80 - this.#topics.length);
+    if (!capacityLeft) return { changed: false, added: [] };
+
+    const sortedWorkspaces = mergedBuckets
       .sort((a, b) => (b.latestAt - a.latestAt) || (b.threads.length - a.threads.length))
-      .slice(0, 12);
+      .slice(0, capacityLeft);
 
-    const usedIds = new Set();
-    const domainCycle = ["indie-lab", "drama-studio", "global-pub", "bounty-guild"];
-    const discovered = sortedWorkspaces.map((ws, idx) => {
+    const usedIds = new Set(this.#topics.map((t) => t.id));
+    const nextOrderBase = this.#topics.reduce((max, t) => Math.max(max, Number(t.order) || 0), 0);
+    const added = sortedWorkspaces.map((ws, idx) => {
       const folderName = basename(ws.cwd) || `workspace-${idx + 1}`;
-      const baseSlug = folderName
+      const preferredSlug = String(ws.vaultCard?.topic || "").trim();
+      const baseSlug = (preferredSlug || folderName)
         .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
         .replace(/^-+|-+$/g, "") || `repo-${idx + 1}`;
       let id = baseSlug;
       let suffix = 2;
@@ -1616,62 +1880,92 @@ export class MissionOverviewService {
       usedIds.add(id);
 
       const sampleText = ws.threads.slice(0, 8).map((t) => `${t.title || ""} ${t.preview || ""}`).join(" ").toLowerCase();
-      let domainId = domainCycle[idx % domainCycle.length];
+      const vaultDomain = ws.vaultCard?.domain ? this.#findDomainByQuery(ws.vaultCard.domain) : null;
+      let domainId = vaultDomain?.id || "indie-lab";
       let yieldType = "growth";
-      if (/(video|story|novel|script|media|design|content|视频|小说|创作)/.test(`${folderName} ${sampleText}`.toLowerCase())) {
-        domainId = "drama-studio";
+      const hay = `${folderName} ${ws.vaultCard?.name || ""} ${sampleText}`.toLowerCase();
+      if (/(video|story|novel|script|media|design|content|drama|comic|manga|movie|audio|music|视频|小说|创作|漫剧|短剧|分镜|动画)/.test(hay)) {
+        if (!vaultDomain) domainId = "drama-studio";
         yieldType = "coin";
-      } else if (/(seo|publish|social|marketing|youtube|tiktok|growth|推广|发行)/.test(`${folderName} ${sampleText}`.toLowerCase())) {
-        domainId = "global-pub";
+      } else if (/(seo|publish|social|marketing|youtube|tiktok|growth|推广|发行|出海|运营|引流)/.test(hay)) {
+        if (!vaultDomain) domainId = "global-pub";
         yieldType = "growth";
-      } else if (/(ops|support|bug|issue|infra|deploy|ops|运维|排查)/.test(`${folderName} ${sampleText}`.toLowerCase())) {
-        domainId = "bounty-guild";
+      } else if (/(ops|support|bug|issue|infra|deploy|health|life|finance|stock|client|运维|排查|体检|医疗|炒股|投研|客户|专项)/.test(hay)) {
+        if (!vaultDomain) domainId = "bounty-guild";
         yieldType = "bounty";
-      } else if (idx < 5) {
-        domainId = "indie-lab";
       }
 
       const recentTitles = ws.threads
         .slice(0, 2)
         .map((t) => compactHeadline(t.title || "", 18))
         .filter(Boolean);
-      const description = recentTitles.length
-        ? `自动发现本地仓库 · 近期：${recentTitles.join(" / ")}`
-        : `自动发现本地工作区：${ws.cwd}`;
+      const description = ws.vaultCard?.description
+        || (recentTitles.length
+          ? `自动发现本地仓库 · 近期：${recentTitles.join(" / ")}`
+          : `自动发现本地工作区：${ws.cwd}`);
 
+      const kwSet = new Set([
+        folderName.toLowerCase(),
+        ...(ws.vaultCard?.keywords || []).map((k) => k.toLowerCase()),
+        ...(ws.vaultCard?.aliases || []).map((a) => a.toLowerCase()),
+      ].filter(Boolean));
+      const cwds = [...new Set([ws.cwd, ...(ws.vaultCard?.cwds || []).filter((c) => pathMatchesPrefix(c, ws.cwd))])];
       const topicObj = {
         id,
         domainId,
-        name: folderName,
+        name: ws.vaultCard?.name || folderName,
         description,
         primaryCwd: ws.cwd,
-        cwdPrefixes: [ws.cwd],
-        keywords: [folderName.toLowerCase()],
+        cwdPrefixes: cwds,
+        keywords: [...kwSet],
         yieldType,
         yieldLabel: YIELD_META[yieldType]?.label || "产线推进",
         ledgerId: "",
-        pinned: idx < 4,
+        pinned: !hadTopicsBefore && idx < 4,
         autoDiscovered: true,
-        order: idx + 1,
+        order: nextOrderBase + idx + 1,
       };
-      topicObj.landmark = inferLandmarkForTopic(topicObj, idx);
+      topicObj.landmark = inferLandmarkForTopic(topicObj, this.#topics.length + idx);
       return topicObj;
     });
 
-    this.#topics = discovered;
+    this.#topics = [...this.#topics, ...added];
+    if (!clearExisting && this.#ignoredCwds.length && added.length) {
+      const addedCwds = added.flatMap((t) => [t.primaryCwd, ...(t.cwdPrefixes || [])].filter(Boolean));
+      this.#ignoredCwds = this.#ignoredCwds.filter((ign) => !addedCwds.some((c) => pathMatchesPrefix(c, ign)));
+    }
     await this.#persistDomains();
-    return true;
+    this.#autoMetricsCache.at = 0;
+    return { changed: true, added };
+  }
+
+  async syncProjects({ clearExisting = false } = {}) {
+    await this.#ensureLoaded();
+    const listRes = typeof this.#hub?.listThreads === "function"
+      ? await this.#hub.listThreads({ includeArchived: false, limit: 500 }).catch(() => ({ threads: [] }))
+      : { threads: [] };
+    const rawThreads = Array.isArray(listRes) ? listRes : (Array.isArray(listRes?.threads) ? listRes.threads : []);
+    const res = await this.#syncDiscoveredTopics(rawThreads, {
+      forceRescan: true,
+      clearExisting: Boolean(clearExisting),
+    });
+    const overview = await this.getOverview({ trigger: "view", force: false });
+    if (this.#broadcast) this.#broadcast("overview_updated", overview);
+    return {
+      ok: true,
+      addedCount: res.added.length,
+      addedTopics: res.added,
+      overview,
+    };
   }
 
   async getOverview({ trigger = "view", force = false } = {}) {
     await this.#ensureLoaded();
     const listRes = typeof this.#hub?.listThreads === "function"
-      ? await this.#hub.listThreads({ includeArchived: false })
+      ? await this.#hub.listThreads({ includeArchived: false, limit: 500 })
       : { threads: [] };
     const rawThreads = await this.assistant.readThreadEvidence((listRes?.threads || []).filter((t) => !isInternalOverviewThread(t)));
-    if (this.#topics.length === 0 && rawThreads.length > 0) {
-      await this.#discoverTopicsFromThreads(rawThreads);
-    }
+    await this.#syncDiscoveredTopics(rawThreads);
 
     const [gitSnapshots, ledger, metricsMap] = await Promise.all([
       this.#collectAllGitSnapshots({ force }),
@@ -1716,7 +2010,7 @@ export class MissionOverviewService {
 
     this.#inFlightPromise = (async () => {
       try {
-        const threads = rawThreads || (await this.#hub?.listThreads?.({ includeArchived: false }))?.threads || [];
+        const threads = rawThreads || (await this.#hub?.listThreads?.({ includeArchived: false, limit: 500 }))?.threads || [];
         const [snaps, ledger] = await Promise.all([
           gitSnapshots || this.#collectAllGitSnapshots({ force: true }),
           this.#readProjectValueLedger(),
@@ -1988,12 +2282,21 @@ export class MissionOverviewService {
     };
 
     const cleanKey = String(agentKey || "auto").trim();
-    if (cleanKey && cleanKey !== "auto") {
+    const cleanKeyLower = cleanKey.toLowerCase();
+    const explicitProvider = (cleanKey && cleanKeyLower !== "auto" && !cleanKey.includes(":"))
+      ? normalizeDispatchProvider(cleanKey)
+      : "";
+    if (cleanKey && cleanKeyLower !== "auto" && !explicitProvider) {
       const hit = pick(cleanKey, "manual", "手动指定账号");
       if (!hit) {
         throw Object.assign(new Error(`所选账号「${cleanKey}」当前不可用（未安装、已停用或未登录），请换一个`), { status: 400 });
       }
       return hit;
+    }
+
+    const providerFilter = explicitProvider || normalizeDispatchProvider(preferredProvider);
+    if (explicitProvider && !profiles.some((p) => p.provider === explicitProvider)) {
+      throw Object.assign(new Error(`所选账号「${cleanKey}」当前不可用（未安装、已停用或未登录），请换一个`), { status: 400 });
     }
 
     const excludedSet = new Set(prefs.excludedAgentKeys || []);
@@ -2006,10 +2309,16 @@ export class MissionOverviewService {
     const remembered = topic ? String(this.#cache.topicAgentPrefs?.[topic.id]?.agentKey || "") : "";
     if (remembered) {
       const rememberedProfile = autoByKey.get(remembered);
+      const matchesProviderFilter = !providerFilter || rememberedProfile?.provider === providerFilter;
       const rememberedQuota = rememberedProfile ? extractProfileQuotaScore(rememberedProfile) : null;
-      const hasHealthyAlternative = autoPool.some((p) => !extractProfileQuotaScore(p).exhausted);
-      if (rememberedProfile && (!rememberedQuota?.exhausted || !hasHealthyAlternative || prefs.strategy === "provider")) {
-        return pick(remembered, "remembered", rememberedQuota?.summary || "沿用该项目记忆账号");
+      const scopedPool = providerFilter ? autoPool.filter((p) => p.provider === providerFilter) : autoPool;
+      const hasHealthyAlternative = scopedPool.some((p) => !extractProfileQuotaScore(p).exhausted);
+      if (rememberedProfile && matchesProviderFilter && (!rememberedQuota?.exhausted || !hasHealthyAlternative || prefs.strategy === "provider")) {
+        return pick(
+          remembered,
+          explicitProvider ? "manual" : "remembered",
+          rememberedQuota?.summary || (explicitProvider ? `指定 ${explicitProvider} 渠道（沿用项目记忆）` : "沿用该项目记忆账号"),
+        );
       }
     }
 
@@ -2018,7 +2327,6 @@ export class MissionOverviewService {
         ? topic.agentAffinity
         : computeAgentAffinity(topic.activeThreads || [], topic.archivedThreads || []))
       : [];
-    const providerFilter = preferredProvider && preferredProvider !== "auto" ? preferredProvider : "";
 
     // Global recency across all topics so newly created / less-used topics still prefer the user's favorite active agents.
     const globalRecency = new Map();
@@ -2030,7 +2338,10 @@ export class MissionOverviewService {
       }
     }
 
-    const eligible = autoPool.filter((p) => !providerFilter || p.provider === providerFilter);
+    let eligible = autoPool.filter((p) => !providerFilter || p.provider === providerFilter);
+    if (eligible.length === 0 && providerFilter) {
+      eligible = profiles.filter((p) => p.provider === providerFilter);
+    }
     if (eligible.length > 0) {
       const affinityRank = new Map(affinity.map((k, idx) => [k, idx]));
       const anyQuota = eligible.some((p) => extractProfileQuotaScore(p).hasQuota);
@@ -2046,19 +2357,21 @@ export class MissionOverviewService {
         const orderIdx = orderList.indexOf(p.provider);
         const orderScore = orderIdx >= 0 ? Math.max(0, (orderList.length - orderIdx) * 10) : 0;
         const quotaScore = quotaInfo.hasQuota ? quotaInfo.score : (quotaInfo.exhausted ? -1000 : 50);
+        const healthStatus = String(p?.health?.status || "").toLowerCase();
+        const healthPenalty = healthStatus === "unavailable" ? -1500 : healthStatus === "cooldown" ? -400 : 0;
         const specialtyTable = AGENT_SPECIALTY_SCORES[taskSpecialty] || AGENT_SPECIALTY_SCORES.general;
         const specialtyScore = Number(specialtyTable[p.provider] || 0);
 
         let total = 0;
         if (prefs.strategy === "quota") {
-          total = quotaScore * 2.0 + topicAffScore * 0.4 + globalUseScore * 0.25 + orderScore * 0.2;
+          total = quotaScore * 2.0 + topicAffScore * 0.4 + globalUseScore * 0.25 + orderScore * 0.2 + healthPenalty;
         } else if (prefs.strategy === "recent") {
-          total = (quotaInfo.exhausted ? -1000 : 0) + topicAffScore * 2.0 + globalUseScore * 1.5 + quotaScore * 0.2 + orderScore * 0.15;
+          total = (quotaInfo.exhausted ? -1000 : 0) + topicAffScore * 2.0 + globalUseScore * 1.5 + quotaScore * 0.2 + orderScore * 0.15 + healthPenalty;
         } else if (prefs.strategy === "provider") {
-          total = (quotaInfo.exhausted ? -800 : 0) + orderScore * 3.0 + quotaScore * 0.35 + topicAffScore * 0.25;
+          total = (quotaInfo.exhausted ? -800 : 0) + orderScore * 3.0 + quotaScore * 0.35 + topicAffScore * 0.25 + healthPenalty;
         } else {
           // adaptive: balance remaining quota, agent specialty (hardcore vs creative), topic affinity, recency, and priority.
-          total = quotaScore * 0.85 + specialtyScore + topicAffScore * 1.15 + globalUseScore * 0.75 + orderScore * 0.45;
+          total = quotaScore * 0.85 + specialtyScore + topicAffScore * 1.15 + globalUseScore * 0.75 + orderScore * 0.45 + healthPenalty;
         }
         return { p, key, total, quotaInfo, affIdx, orderIdx, specialtyScore, specialtyLabel: specialtyTable.label, idx };
       });
@@ -2066,13 +2379,14 @@ export class MissionOverviewService {
       scored.sort((a, b) => b.total - a.total || a.idx - b.idx);
       const winner = scored[0];
       if (winner) {
-        let source = prefs.strategy;
-        if (winner.affIdx === 0 && (!anyQuota || prefs.strategy === "recent" || (!winner.quotaInfo.exhausted && !winner.quotaInfo.lowQuota))) {
+        let source = explicitProvider ? "manual" : prefs.strategy;
+        if (!explicitProvider && winner.affIdx === 0 && (!anyQuota || prefs.strategy === "recent" || (!winner.quotaInfo.exhausted && !winner.quotaInfo.lowQuota))) {
           source = "affinity";
-        } else if (!anyQuota && !winner.quotaInfo.hasQuota && winner.affIdx < 0 && winner.key === defaultKey && prefs.strategy === "adaptive") {
+        } else if (!explicitProvider && !anyQuota && !winner.quotaInfo.hasQuota && winner.affIdx < 0 && winner.key === defaultKey && prefs.strategy === "adaptive") {
           source = "default";
         }
         const reasonParts = [];
+        if (explicitProvider) reasonParts.push(`指定 ${explicitProvider} 渠道`);
         if (winner.specialtyScore >= 18 && winner.specialtyLabel) reasonParts.push(winner.specialtyLabel);
         if (winner.quotaInfo.summary) reasonParts.push(winner.quotaInfo.summary);
         if (winner.affIdx === 0) reasonParts.push("项目近期常用");
@@ -2194,6 +2508,7 @@ export class MissionOverviewService {
   async dispatchTask({
     text = "",
     topicId = "",
+    cwdOverride = "",
     mode = "auto",
     preferredProvider = "auto",
     agentKey = "auto",
@@ -2215,6 +2530,7 @@ export class MissionOverviewService {
       throw Object.assign(new Error("请输入要派发的任务指令"), { status: 400 });
     }
     const cleanModel = String(model || "").trim();
+    const cleanCwdOverride = normPath(cwdOverride);
 
     const [overview, profileInfo] = await Promise.all([
       this.getOverview({ trigger: "view", force: false }),
@@ -2223,6 +2539,12 @@ export class MissionOverviewService {
     const flatTopics = overview.domains.flatMap((d) => d.topics);
     const topicMap = new Map(flatTopics.map((t) => [t.id, t]));
     const profileByKey = new Map(profileInfo.profiles.map((p) => [`${p.provider}:${p.id || "default"}`, p]));
+    const resolveTargetCwd = (tp) => {
+      if (!cleanCwdOverride || !tp) return tp?.primaryCwd || "";
+      const matchesTopic = (tp.primaryCwd && pathMatchesPrefix(cleanCwdOverride, tp.primaryCwd))
+        || (Array.isArray(tp.cwdPrefixes) && tp.cwdPrefixes.some((p) => pathMatchesPrefix(cleanCwdOverride, p)));
+      return matchesTopic ? cleanCwdOverride : (tp.primaryCwd || "");
+    };
 
     let routes = [];
     let aiPlanned = false;
@@ -2259,6 +2581,9 @@ export class MissionOverviewService {
             });
         const topicDigest = this.#contextsStore.topics?.[targetTopic.id] || null;
         const hasTopicDigest = Boolean(topicDigest?.summary);
+        const routeCwd = rt?.cwd && ((targetTopic.primaryCwd && pathMatchesPrefix(rt.cwd, targetTopic.primaryCwd)) || (targetTopic.cwdPrefixes || []).some((p) => pathMatchesPrefix(rt.cwd, p)))
+          ? normPath(rt.cwd)
+          : resolveTargetCwd(targetTopic);
         let reuseThread = null;
         if (rt?.action === "reuse_clean" && rt?.threadId && mode !== "new") {
           reuseThread = (targetTopic.activeThreads || []).find(
@@ -2270,7 +2595,7 @@ export class MissionOverviewService {
           action: reuseThread ? "reuse_clean" : "spawn_parallel",
           topicId: targetTopic.id,
           topicName: targetTopic.name,
-          cwd: targetTopic.primaryCwd,
+          cwd: routeCwd,
           stage: rt.stage || inferStageTag({ title: segText, preview: "" }, targetTopic),
           threadId: reuseThread ? reuseThread.id : "",
           threadTitle: reuseThread ? reuseThread.title : compactHeadline(segText, 24),
@@ -2419,6 +2744,8 @@ export class MissionOverviewService {
           const topicDigest = this.#contextsStore.topics?.[targetTopic.id] || null;
           const hasTopicDigest = Boolean(topicDigest?.summary);
           const forceNew = mode === "new";
+          const effectiveCwd = resolveTargetCwd(targetTopic);
+          const isSubOverride = Boolean(cleanCwdOverride && effectiveCwd === cleanCwdOverride && effectiveCwd !== normPath(targetTopic.primaryCwd));
 
           let reuseThread = null;
           if (!forceNew && item?.action === "reuse_clean" && item?.targetThreadId) {
@@ -2431,6 +2758,7 @@ export class MissionOverviewService {
               && !t.isCrossWorkspace
               && !t.isMultiTaskSession
               && agentKeyOfThread(t) === agent.agentKey
+              && (!isSubOverride || (t.cwd && pathMatchesPrefix(t.cwd, effectiveCwd)))
             ));
             if (cand) reuseThread = cand;
           }
@@ -2442,7 +2770,7 @@ export class MissionOverviewService {
               action: "reuse_clean",
               topicId: targetTopic.id,
               topicName: targetTopic.name,
-              cwd: targetTopic.primaryCwd,
+              cwd: effectiveCwd,
               stage: segStage,
               threadId: reuseThread.id,
               threadTitle: reuseThread.title,
@@ -2470,7 +2798,7 @@ export class MissionOverviewService {
               action: "spawn_parallel",
               topicId: targetTopic.id,
               topicName: targetTopic.name,
-              cwd: targetTopic.primaryCwd,
+              cwd: effectiveCwd,
               stage: segStage,
               threadId: "",
               threadTitle: compactHeadline(segText, 24),
@@ -2489,7 +2817,9 @@ export class MissionOverviewService {
               willInheritContext: willInherit,
               contextSummaryPreview: willInherit ? compactHeadline(topicDigest.summary, 64) : "",
               contextFilePath: topicDigest?.contextFilePath || "",
-              reason: String(item?.reason || "").trim() || `在「${targetTopic.name}」开启独立干净工位`,
+              reason: String(item?.reason || "").trim() || (isSubOverride
+                ? `在「${targetTopic.name} · ${basename(effectiveCwd)}」子项目目录开启独立干净工位`
+                : `在「${targetTopic.name}」开启独立干净工位`),
             });
           }
         }
@@ -2564,12 +2894,15 @@ export class MissionOverviewService {
 
       const segStage = inferStageTag({ title: segText, preview: "" }, targetTopic);
       const segFootprints = extractThreadFootprints({ title: segText }).allLabels;
+      const effectiveCwd = resolveTargetCwd(targetTopic);
+      const isSubOverride = Boolean(cleanCwdOverride && effectiveCwd === cleanCwdOverride && effectiveCwd !== normPath(targetTopic.primaryCwd));
 
       // Only sessions on the SAME account are eligible for reuse, so personal work never lands in a company account.
       const candidates = (targetTopic?.activeThreads || []).filter((t) => (
         !t.isSlice
         && !usedThreadIds.has(t.id)
         && agentKeyOfThread(t) === agent.agentKey
+        && (!isSubOverride || (t.cwd && pathMatchesPrefix(t.cwd, effectiveCwd)))
       ));
       let bestIdleClean = null;
       let bestIdleScore = 0;
@@ -2606,7 +2939,7 @@ export class MissionOverviewService {
           action: "reuse_clean",
           topicId: targetTopic.id,
           topicName: targetTopic.name,
-          cwd: targetTopic.primaryCwd,
+          cwd: effectiveCwd,
           stage: segStage,
           threadId: bestIdleClean.id,
           threadTitle: bestIdleClean.title,
@@ -2618,7 +2951,9 @@ export class MissionOverviewService {
           reason: `复用同账号下空闲且未串项的工位「${compactHeadline(bestIdleClean.title, 18)}」`,
         });
       } else {
-        let reason = `在「${targetTopic.name}」主目录开启独立干净工位并锁定归属`;
+        let reason = isSubOverride
+          ? `在「${targetTopic.name} · ${basename(effectiveCwd)}」子项目目录开启独立干净工位并锁定归属`
+          : `在「${targetTopic.name}」主目录开启独立干净工位并锁定归属`;
         if (forceNew) {
           reason = "按指令强制开启独立并发分身，隔离上下文";
         } else if (busyMatch) {
@@ -2632,7 +2967,7 @@ export class MissionOverviewService {
           action: "spawn_parallel",
           topicId: targetTopic.id,
           topicName: targetTopic.name,
-          cwd: targetTopic.primaryCwd,
+          cwd: effectiveCwd,
           stage: segStage,
           threadId: "",
           threadTitle: compactHeadline(segText, 24),
@@ -2767,48 +3102,105 @@ export class MissionOverviewService {
 
   // Tries each channel in order through the user's own CLI logins and returns
   // the first output that `accept` turns into a value.
-  async #runModelChain(prompt, candidates, accept) {
+  async #runModelChain(prompt, candidates, accept, { deadlineMs = 0, maxAttempts = candidates.length, signal = null } = {}) {
     let lastErr = "无可用均衡模型通道";
-    for (const cand of candidates) {
+    const list = candidates.slice(0, Math.max(1, maxAttempts));
+    for (const cand of list) {
+      if (signal?.aborted) return { value: null, error: "请求已取消" };
+      const remainingMs = deadlineMs > 0 ? (deadlineMs - Date.now()) : 0;
+      if (deadlineMs > 0 && remainingMs <= 3_000) {
+        lastErr = "总思考时间已用尽";
+        break;
+      }
+      const claudeCodexTimeout = deadlineMs > 0 ? Math.min(22_000, remainingMs) : 35_000;
+      const agyTimeout = deadlineMs > 0 ? Math.min(22_000, remainingMs) : 40_000;
       try {
         let text = "";
         if (cand.provider === "claude") {
-          text = await this.#runClaudeOnce(prompt, cand.model);
+          text = await this.#runClaudeOnce(prompt, cand.model, claudeCodexTimeout, cand.profileId || "", signal);
         } else if (cand.provider === "codex") {
-          text = await this.#runCodexOnce(prompt, cand.model);
+          text = await this.#runCodexOnce(prompt, cand.model, claudeCodexTimeout, cand.profileId || "", signal);
         } else if (cand.provider === "antigravity") {
-          text = await this.#runAntigravityOnce(prompt, cand.model);
+          text = await this.#runAntigravityOnce(prompt, cand.model, agyTimeout, cand.profileId || "", signal);
         }
         const value = accept(text);
         if (value) return { value, modelLabel: cand.label };
         lastErr = `${cand.label} 返回格式不符`;
       } catch (err) {
+        if (signal?.aborted) return { value: null, error: "请求已取消" };
         lastErr = err?.message || `${cand.label} 调用失败`;
       }
     }
     return { value: null, error: lastErr };
   }
 
+  #assistantCandidates(modelKey = "auto") {
+    const raw = String(modelKey || "auto").trim();
+    const base = this.#lightweightCandidates("auto");
+    if (!raw || raw === "auto") return base;
+    const firstColon = raw.indexOf(":");
+    if (firstColon < 0) return base;
+    const provider = raw.slice(0, firstColon).trim().toLowerCase();
+    const rest = raw.slice(firstColon + 1);
+    const secondColon = rest.indexOf(":");
+    const profileId = secondColon >= 0 ? rest.slice(0, secondColon).trim() : "";
+    const model = (secondColon >= 0 ? rest.slice(secondColon + 1) : rest).trim();
+    if (!["antigravity", "codex", "claude"].includes(provider) || !model) return base;
+    const explicit = { key: raw, label: `${provider}:${model}`, provider, profileId, model };
+    return [explicit, ...base.filter((c) => !(c.provider === provider && c.model === model))];
+  }
+
   // One-shot completion adapter for the sprite assistant (answers and harvest
-  // verdicts). Same channels and fallback order as the overview summariser.
-  async completeAssistantText({ system = "", prompt = "" } = {}) {
+  // verdicts). Uses warm voice sessions only for interactive chat, keeping
+  // background harvest verdicts isolated on ephemeral runners.
+  async completeAssistantText({ system = "", prompt = "", modelKey = "auto", model = "auto", sessionId = "", background = false, signal = null, onDelta = null } = {}) {
+    if (signal?.aborted) return null;
+    const effectiveModel = String(modelKey && modelKey !== "auto" ? modelKey : model || "auto").trim() || "auto";
     const fullPrompt = system ? `${system}\n\n${prompt}` : prompt;
     if (this.#runAiImpl) {
-      const raw = await this.#runAiImpl({ prompt: fullPrompt, preferredModel: "auto", purpose: "assistant" });
+      const raw = await this.#runAiImpl({ prompt: fullPrompt, preferredModel: effectiveModel, modelKey: effectiveModel, sessionId, purpose: "assistant", background: Boolean(background), signal, onDelta });
       return typeof raw === "string" ? raw : typeof raw?.text === "string" ? raw.text : null;
     }
     if (isTestRuntime(this.#env)) return null;
-    const result = await this.#runModelChain(fullPrompt, this.#lightweightCandidates("auto"), (text) => String(text || "").trim() || null);
+    const deadlineMs = background ? 0 : Date.now() + 50_000;
+    if (!background && this.voiceService?.completeAssistantChat) {
+      const remainingForWarm = Math.min(25_000, deadlineMs - Date.now());
+      if (remainingForWarm > 3_000) {
+        const warm = await this.voiceService.completeAssistantChat({
+          sessionId,
+          system,
+          prompt,
+          modelKey: effectiveModel,
+          timeoutMs: remainingForWarm,
+          signal,
+          onDelta,
+        }).catch(() => null);
+        if (warm) return warm;
+        if (signal?.aborted) return null;
+      }
+    }
+    const chainOpts = background
+      ? { signal }
+      : { deadlineMs, maxAttempts: 2, signal };
+    const result = await this.#runModelChain(
+      fullPrompt,
+      this.#assistantCandidates(effectiveModel),
+      (text) => String(text || "").trim() || null,
+      chainOpts,
+    );
     return result.value;
   }
 
-  async #runClaudeOnce(prompt, model = "claude-sonnet-5-5", timeoutMs = 35_000) {
+  async #runClaudeOnce(prompt, model = "claude-sonnet-5-5", timeoutMs = 35_000, preferredProfileId = "", signal = null) {
+    if (signal?.aborted) throw new Error("请求已取消");
     const profiles = typeof this.#hub?.listProfiles === "function"
-      ? this.#hub.listProfiles("claude").filter((p) => p?.installed !== false && !p.health?.disabled)
+      ? this.#hub.listProfiles("claude").filter((p) => p?.installed !== false && !p.health?.disabled && p.health?.status !== "unavailable")
       : [{ id: "default", home: "" }];
-    const target = profiles[0] || { id: "default", home: "" };
+    if (!profiles.length) throw new Error("Claude 账号均处于限流或不可用状态");
+    const target = (preferredProfileId && profiles.find((p) => p.id === preferredProfileId)) || profiles[0];
     const configDir = target.home || "";
     const auth = await readClaudeCliAuthStatus({ configDir, env: this.#env, timeoutMs: 2_500 }).catch(() => ({ loggedIn: false }));
+    if (signal?.aborted) throw new Error("请求已取消");
     if (!auth.loggedIn && !target.endpointLabel) {
       throw new Error("Claude 未登录");
     }
@@ -2826,40 +3218,69 @@ export class MissionOverviewService {
       const proc = spawn(prepared.command, prepared.args, prepared.options);
       let settled = false;
       let out = "";
+      let onAbort = null;
+      const cleanup = () => {
+        clearTimeout(timer);
+        if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      };
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
+        cleanup();
         killProcessTreeCrossPlatform(proc, { signal: "SIGTERM", platform: process.platform });
         rejectRun(new Error("Claude 汇总超时"));
       }, timeoutMs);
       timer.unref?.();
+      if (signal) {
+        onAbort = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          killProcessTreeCrossPlatform(proc, { signal: "SIGTERM", platform: process.platform });
+          rejectRun(new Error("请求已取消"));
+        };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
       proc.stdout?.on("data", (c) => {
         if (out.length < 65_536) out += String(c);
       });
       proc.once("error", (err) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        cleanup();
         rejectRun(err);
       });
       proc.once("close", (code) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        cleanup();
         if (code === 0 && out.trim()) resolveRun(out.trim());
         else rejectRun(new Error(`Claude 退出码 ${code}`));
       });
     });
   }
 
-  async #runCodexOnce(prompt, model = "gpt-6.1-terra", timeoutMs = 35_000) {
+  async #runCodexOnce(prompt, model = "gpt-6.1-terra", timeoutMs = 35_000, preferredProfileId = "", signal = null) {
+    if (signal?.aborted) throw new Error("请求已取消");
+    const profiles = typeof this.#hub?.listProfiles === "function"
+      ? this.#hub.listProfiles("codex").filter((p) => p?.installed !== false && !p.health?.disabled && p.health?.status !== "unavailable")
+      : [];
+    const target = (preferredProfileId && profiles.find((p) => p.id === preferredProfileId))
+      || profiles.find((p) => p.health?.status === "healthy")
+      || profiles[0]
+      || null;
+    if (typeof this.#hub?.listProfiles === "function" && !profiles.length) {
+      throw new Error("Codex 账号均不可用");
+    }
     const codexCmd = resolveProviderExecutables(this.#env)?.codex || this.#env.CODEX_BIN || "codex";
+    const codexEnv = target?.home ? { ...this.#env, CODEX_HOME: target.home } : this.#env;
     const prepared = prepareCrossPlatformSpawn(
       codexCmd,
-      ["exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "-m", model, "--json", prompt],
+      ["exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "-m", model, "-c", 'model_reasoning_effort="low"', "--json", prompt],
       {
         cwd: os.tmpdir(),
-        env: this.#env,
+        env: codexEnv,
         stdio: ["ignore", "pipe", "pipe"],
       },
       { platform: process.platform },
@@ -2868,13 +3289,30 @@ export class MissionOverviewService {
       const proc = spawn(prepared.command, prepared.args, prepared.options);
       let settled = false;
       let lastText = "";
+      let onAbort = null;
+      const cleanup = () => {
+        clearTimeout(timer);
+        if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      };
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
+        cleanup();
         killProcessTreeCrossPlatform(proc, { signal: "SIGTERM", platform: process.platform });
         rejectRun(new Error("Codex 汇总超时"));
       }, timeoutMs);
       timer.unref?.();
+      if (signal) {
+        onAbort = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          killProcessTreeCrossPlatform(proc, { signal: "SIGTERM", platform: process.platform });
+          rejectRun(new Error("请求已取消"));
+        };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
       const rl = createInterface({ input: proc.stdout, crlfDelay: Infinity });
       rl.on("line", (line) => {
         try {
@@ -2887,28 +3325,40 @@ export class MissionOverviewService {
       proc.once("error", (err) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        cleanup();
         rejectRun(err);
       });
       proc.once("close", (code) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        cleanup();
         if (code === 0 && lastText.trim()) resolveRun(lastText.trim());
         else rejectRun(new Error(`Codex 退出码 ${code}`));
       });
     });
   }
 
-  async #runAntigravityOnce(prompt, model = "gemini-3.8-flash", timeoutMs = 40_000) {
+  async #runAntigravityOnce(prompt, model = "gemini-3.8-flash", timeoutMs = 40_000, preferredProfileId = "", signal = null) {
+    if (signal?.aborted) throw new Error("请求已取消");
     if (typeof this.#hub?.startThread !== "function") {
       throw new Error("Antigravity 不可用");
     }
+    const profiles = typeof this.#hub?.listProfiles === "function"
+      ? this.#hub.listProfiles("antigravity").filter((p) => p?.installed !== false && !p.health?.disabled && p.health?.status !== "unavailable")
+      : [];
+    if (typeof this.#hub?.listProfiles === "function" && !profiles.length) {
+      throw new Error("Antigravity 账号均不可用");
+    }
+    const chosenProfile = (preferredProfileId && profiles.find((p) => p.id === preferredProfileId))
+      || profiles.find((p) => p.health?.status === "healthy")
+      || profiles[0]
+      || { id: "desktop" };
     const workerCwd = resolve(this.#dataDir, "overview-worker");
     await mkdir(workerCwd, { recursive: true }).catch(() => {});
+    if (signal?.aborted) throw new Error("请求已取消");
     const started = await this.#hub.startThread({
       provider: "antigravity",
-      profileId: "desktop",
+      profileId: chosenProfile.id || "desktop",
       cwd: workerCwd,
       model,
       effort: "low",
@@ -2923,7 +3373,9 @@ export class MissionOverviewService {
     try {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
+        if (signal?.aborted) throw new Error("请求已取消");
         await new Promise((r) => setTimeout(r, 900));
+        if (signal?.aborted) throw new Error("请求已取消");
         const res = await this.#hub.readThread(tid, { limit: 4 }).catch(() => null);
         const turns = res?.thread?.turns || [];
         const lastTurn = turns[turns.length - 1];
@@ -2969,8 +3421,10 @@ export class MissionOverviewService {
     name = "",
     description = "",
     primaryCwd = "",
+    cwdPrefixes = null,
     keywords = [],
     yieldType = "growth",
+    landmark = "",
     pinned = false,
   } = {}) {
     await this.#ensureLoaded();
@@ -2982,22 +3436,35 @@ export class MissionOverviewService {
     const existingIdx = this.#topics.findIndex((t) => t.id === topicId);
     const mappedDomain = LEGACY_DOMAIN_MAP[domainId] || domainId;
     const finalYield = YIELD_META[yieldType] ? yieldType : "growth";
+    const resolvedPrimaryCwd = normPath(primaryCwd || (existingIdx >= 0 ? this.#topics[existingIdx].primaryCwd : ""));
+    const rawPrefixes = Array.isArray(cwdPrefixes) && cwdPrefixes.length
+      ? cwdPrefixes
+      : (primaryCwd
+          ? [resolvedPrimaryCwd, ...(existingIdx >= 0 ? (this.#topics[existingIdx].cwdPrefixes || []) : [])]
+          : (existingIdx >= 0 ? (this.#topics[existingIdx].cwdPrefixes || []) : []));
+    const resolvedPrefixes = [...new Set(rawPrefixes.map((p) => normPath(p)).filter(Boolean))];
     const nextTopic = {
       id: topicId,
       domainId: this.#domains.some((d) => d.id === mappedDomain) ? mappedDomain : "indie-lab",
       name: cleanName,
       description: String(description || "").trim(),
-      primaryCwd: normPath(primaryCwd || (existingIdx >= 0 ? this.#topics[existingIdx].primaryCwd : "")),
-      cwdPrefixes: primaryCwd ? [normPath(primaryCwd)] : (existingIdx >= 0 ? this.#topics[existingIdx].cwdPrefixes : []),
+      primaryCwd: resolvedPrimaryCwd,
+      cwdPrefixes: resolvedPrefixes,
       keywords: Array.isArray(keywords) && keywords.length ? keywords : (existingIdx >= 0 ? this.#topics[existingIdx].keywords : [cleanName.toLowerCase()]),
       yieldType: finalYield,
       yieldLabel: YIELD_META[finalYield]?.label || "涨粉引流飞轮",
       pinned: Boolean(pinned),
       order: existingIdx >= 0 ? this.#topics[existingIdx].order : (this.#topics.length + 1),
     };
+    nextTopic.landmark = String(landmark || (existingIdx >= 0 ? this.#topics[existingIdx].landmark : "") || inferLandmarkForTopic(nextTopic, this.#topics.length));
     if (existingIdx >= 0) this.#topics[existingIdx] = nextTopic;
     else this.#topics.push(nextTopic);
+    const coveredCwds = [nextTopic.primaryCwd, ...(nextTopic.cwdPrefixes || [])].filter(Boolean);
+    if (coveredCwds.length && this.#ignoredCwds.length) {
+      this.#ignoredCwds = this.#ignoredCwds.filter((ign) => !coveredCwds.some((c) => pathMatchesPrefix(c, ign)));
+    }
     await this.#persistDomains();
+    this.#autoMetricsCache.at = 0;
     const overview = await this.getOverview({ trigger: "view", force: false });
     if (this.#broadcast) this.#broadcast("overview_updated", overview);
     return { ok: true, topic: nextTopic, overview };
@@ -3723,33 +4190,25 @@ export class MissionOverviewService {
       } else if (op.type === "remove") {
         const idx = this.#topics.findIndex((item) => item.id === op.topicId);
         if (idx >= 0) {
+          const removed = this.#topics[idx];
+          if (removed?.primaryCwd) {
+            const cleanRemoved = normPath(removed.primaryCwd);
+            if (cleanRemoved && !this.#ignoredCwds.some((p) => pathMatchesPrefix(cleanRemoved, p))) {
+              this.#ignoredCwds.push(cleanRemoved);
+            }
+          }
           this.#topics.splice(idx, 1);
           applied.push(op);
         }
       } else if (op.type === "rescan") {
-        const rawThreads = typeof this.#hub?.listThreads === "function" ? await this.#hub.listThreads().catch(() => []) : [];
-        if (op.clearExisting) {
-          this.#topics = [];
-          await this.#discoverTopicsFromThreads(rawThreads);
-        } else {
-          const prevTopics = [...this.#topics];
-          const existingCwds = new Set(prevTopics.flatMap((t) => [t.primaryCwd, ...(t.cwdPrefixes || [])].filter(Boolean).map((p) => normPath(p))));
-          this.#topics = [];
-          await this.#discoverTopicsFromThreads(rawThreads);
-          const newlyFound = this.#topics.filter((t) => t.primaryCwd && !existingCwds.has(normPath(t.primaryCwd)));
-          const existingIds = new Set(prevTopics.map((t) => t.id));
-          for (const item of newlyFound) {
-            let candidateId = item.id;
-            let n = 2;
-            while (existingIds.has(candidateId)) {
-              candidateId = `${item.id}-${n}`;
-              n += 1;
-            }
-            item.id = candidateId;
-            existingIds.add(candidateId);
-          }
-          this.#topics = [...prevTopics, ...newlyFound];
-        }
+        const listRes = typeof this.#hub?.listThreads === "function"
+          ? await this.#hub.listThreads({ includeArchived: false, limit: 500 }).catch(() => ({ threads: [] }))
+          : { threads: [] };
+        const rawThreads = Array.isArray(listRes) ? listRes : (Array.isArray(listRes?.threads) ? listRes.threads : []);
+        await this.#syncDiscoveredTopics(rawThreads, {
+          forceRescan: true,
+          clearExisting: Boolean(op.clearExisting),
+        });
         applied.push(op);
       }
     }

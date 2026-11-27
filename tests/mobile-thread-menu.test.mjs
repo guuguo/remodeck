@@ -30,6 +30,7 @@ test("点击省略号打开对应会话菜单，不切换会话；点击标题�
   vm.runInNewContext(source.slice(start, end), {
     $: () => ({ addEventListener: (_type, handler) => { clickHandler = handler; } }),
     state: { batchSelect: { active: false } },
+    exitSpriteOverlayForNavigation: () => {},
     openThreadContextMenu: (...args) => opened.push(args),
     selectThread: (id) => { selected.push(id); return Promise.resolve(); },
   });

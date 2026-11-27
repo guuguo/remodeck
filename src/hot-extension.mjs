@@ -534,6 +534,15 @@ export async function createHotExtensionServer({
         return;
       }
 
+      if (pathname === "/api/overview/sync" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.syncProjects({
+          clearExisting: Boolean(body.clearExisting),
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+
       if (pathname === "/api/overview/spark" && request.method === "POST") {
         const body = await readJsonBody(request);
         const result = await overviewService.handleSparkAction(body);
@@ -560,6 +569,7 @@ export async function createHotExtensionServer({
         const result = await overviewService.dispatchTask({
           text: body.text || "",
           topicId: body.topicId || "",
+          cwdOverride: body.cwdOverride || "",
           mode: body.mode || "auto",
           preferredProvider: body.preferredProvider || "auto",
           agentKey: body.agentKey || "auto",

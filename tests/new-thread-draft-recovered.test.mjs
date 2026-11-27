@@ -20,7 +20,7 @@ function harness(names) {
   };
   const ctx = vm.createContext({
     console, URL, Date, clearTimeout,
-    state: { activeThreadId: "", activeThread: null, newThreadCwd: null, boardOpen: true, images: [], defaultPermissionMode: "turbo", threads: [], modelsByProvider: {}, allModels: [] },
+    state: { activeThreadId: "", activeThread: null, newThreadCwd: null, newThreadTaskDraft: null, boardOpen: true, images: [], defaultPermissionMode: "turbo", threads: [], modelsByProvider: {}, allModels: [], dictation: { active: false, pointerDown: false }, chatTts: { enabled: false } },
     $: el,
     localStorage: { getItem: (key) => store.get(key) || null, setItem: (key, value) => store.set(key, value) },
     defaultProviderValue: () => "codex", defaultProfileForProvider: () => "default",
@@ -33,7 +33,7 @@ function harness(names) {
     activeEditingQueueItem: () => null, isActiveThreadRunning: () => false,
     history: { replaceState() {} }, location: { href: "http://localhost/?thread=old" },
   });
-  for (const name of ["syncCfgFieldVisibility", "renderComposerConfigChip", "syncAllCustomSelects", "setTopbarMenuOpen", "setComposerConfigOpen", "renderComposerImages", "renderTopbarAndControls", "setSidebarOpen", "syncComposerProfileSelect", "closeCustomSelectMenu", "clearComposerStatus", "closeSlashCommandMenu", "syncProfileSelectors", "renderThreadList", "renderAgentTelemetryBar", "renderActiveMessages", "renderPendingRequests", "renderQueuedTurns", "setComposerStatus", "renderComposerControls", "refreshThreads", "saveLocalThreadPrefs"]) ctx[name] = () => {};
+  for (const name of ["syncCfgFieldVisibility", "renderComposerConfigChip", "syncAllCustomSelects", "setTopbarMenuOpen", "setComposerConfigOpen", "renderComposerImages", "renderTopbarAndControls", "setSidebarOpen", "syncComposerProfileSelect", "closeCustomSelectMenu", "clearComposerStatus", "closeSlashCommandMenu", "syncProfileSelectors", "renderThreadList", "renderAgentTelemetryBar", "renderActiveMessages", "renderPendingRequests", "renderQueuedTurns", "setComposerStatus", "renderComposerControls", "refreshThreads", "saveLocalThreadPrefs", "stopChatReplySpeech", "exitSpriteOverlayForNavigation", "unlockChatReplySpeechAudio", "stopComposerDictation", "refreshTasks"]) ctx[name] = () => {};
   vm.runInContext(`const NEW_THREAD_PREFS_KEY = "test.newThreadPrefs"; let activeThreadReloadTimer = null; let lastActiveThreadReloadDoneAt = 0;\n${names.map(fn).join("\n")}`, ctx);
   return { ctx, el, store };
 }

@@ -180,8 +180,8 @@ export function buildLocalProgressBriefing({
 
 export function base64ToUint8Array(base64) {
   const clean = String(base64 || "").replace(/\s+/g, "");
-  if (typeof Buffer !== "undefined") {
-    return new Uint8Array(Buffer.from(clean, "base64"));
+  if (typeof globalThis.Buffer === "function") {
+    return new Uint8Array(globalThis.Buffer.from(clean, "base64"));
   }
   const binary = atob(clean);
   const bytes = new Uint8Array(binary.length);
@@ -193,8 +193,8 @@ export function base64ToUint8Array(base64) {
 
 export function uint8ArrayToBase64(bytes) {
   const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(arr).toString("base64");
+  if (typeof globalThis.Buffer === "function") {
+    return globalThis.Buffer.from(arr).toString("base64");
   }
   let binary = "";
   const chunkSize = 0x8000;

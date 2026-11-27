@@ -1265,3 +1265,310 @@ test("HUD assistant badges render counts and dim zero badges while preserving or
   assert.match(html, /is-ruin is-empty/);
   for (const selector of ["tycoon-lv-crest", "data-tycoon-fly-harvest", "data-tycoon-fly-live", "data-tycoon-open-incubator", "data-tycoon-toggle-vis", "tycoonHudMore"]) assert.ok(html.includes(selector), selector);
 });
+
+test("MissionOverviewService continuously discovers uncovered repos, ignores noise/removed cwds, reloads edited config, and supports rescan/sync", async () => {
+  const dir = await mkdtemp(join(os.tmpdir(), "ac-mo-sync-"));
+  const repoA = "/Users/alice/dev/alpha-app";
+  const repoB = "/Users/alice/dev/radar-site";
+  const repoBSub = "/Users/alice/dev/radar-site/packages/web";
+  const repoC = "/Users/alice/dev/vault-proj";
+  const vaultDir = join(dir, "vault");
+  try {
+    await mkdir(join(vaultDir, "项目", "vault-proj"), { recursive: true });
+    await writeFile(join(dir, "memory.json"), JSON.stringify({ vaultPath: vaultDir }), "utf8");
+    await writeFile(join(vaultDir, "项目", "vault-proj", "vault-proj.md"), [
+      "---",
+      "kind: project",
+      "topic: vault-proj",
+      "name: 记忆库测试项目",
+      "domain: 软件产品研发室",
+      `cwd: [${repoC}]`,
+      "keywords: [vault-proj, 雷达站]",
+      "---",
+      "",
+      "# 记忆库测试项目",
+      "",
+      "通过记忆库卡片自动同步的独立雷达项目",
+    ].join("\n"), "utf8");
+
+    await writeFile(join(dir, "mission-domains.json"), JSON.stringify({
+      version: 3,
+      domains: [
+        { id: "indie-lab", code: "LAB 01", name: "软件研发室", shortName: "软件研发", order: 1 },
+        { id: "drama-studio", code: "STUDIO 02", name: "内容工坊", shortName: "内容工坊", order: 2 },
+        { id: "global-pub", code: "GLOBAL 03", name: "发布增长部", shortName: "发布部", order: 3 },
+        { id: "bounty-guild", code: "GUILD 04", name: "专项运维所", shortName: "专项所", order: 4 },
+      ],
+      topics: [
+        {
+          id: "alpha-app",
+          domainId: "indie-lab",
+          name: "Alpha 主力",
+          primaryCwd: repoA,
+          cwdPrefixes: [repoA],
+          keywords: ["alpha"],
+          order: 1,
+        },
+      ],
+    }), "utf8");
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const threads = [
+      { id: "codex:default:a1", provider: "codex", cwd: repoA, title: "Alpha 开发", updatedAt: nowSec - 60 },
+      { id: "codex:default:b1", provider: "codex", cwd: repoB, title: "radar-site SEO 构建", updatedAt: nowSec - 120 },
+      { id: "codex:default:b-sub", provider: "codex", cwd: repoBSub, title: "子目录不应拆成第二个项目", updatedAt: nowSec - 150 },
+      { id: "codex:default:noise-tmp", provider: "codex", cwd: "/tmp/scratch-check", title: "临时脚本", updatedAt: nowSec - 30 },
+      { id: "codex:default:noise-home", provider: "codex", cwd: "/Users/alice", title: "家目录闲聊", updatedAt: nowSec - 30 },
+    ];
+    const hub = createMockHub(threads);
+    const service = new MissionOverviewService({
+      hub,
+      dataDir: dir,
+      projectValuePath: join(dir, "none.json"),
+      collectGitImpl: async () => null,
+      runAiImpl: async () => null,
+    });
+
+    const ov1 = await service.getOverview({ trigger: "view" });
+    const topics1 = ov1.domains.flatMap((d) => d.topics);
+    assert.equal(topics1.some((t) => t.id === "alpha-app" && t.name === "Alpha 主力"), true);
+    assert.equal(topics1.some((t) => t.primaryCwd === repoB), true, "uncovered active repo must be discovered automatically");
+    assert.equal(topics1.some((t) => t.id === "vault-proj" && t.name === "记忆库测试项目"), true, "vault project card must be inducted");
+    assert.equal(topics1.some((t) => t.primaryCwd === "/tmp/scratch-check"), false);
+    assert.equal(topics1.some((t) => t.primaryCwd === "/Users/alice"), false);
+    assert.equal(topics1.some((t) => t.primaryCwd === repoBSub), false, "child dir must merge into uncovered parent repo");
+
+    // Removing a topic persists its primaryCwd into ignoredCwds so refresh does not revive it
+    const radarTopic = topics1.find((t) => t.primaryCwd === repoB);
+    await service.planAndApplyBlueprintEdit({
+      operations: [{ type: "remove", topicId: radarTopic.id }],
+      confirmOnly: false,
+    });
+    const ovAfterRemove = await service.getOverview({ trigger: "view" });
+    assert.equal(ovAfterRemove.domains.flatMap((d) => d.topics).some((t) => t.primaryCwd === repoB), false);
+
+    // Rescan with clearExisting=true brings everything back (tests { threads } hub shape too)
+    await service.planAndApplyBlueprintEdit({
+      operations: [{ type: "rescan", clearExisting: true }],
+      confirmOnly: false,
+    });
+    const ovAfterRescan = await service.getOverview({ trigger: "view" });
+    assert.equal(ovAfterRescan.domains.flatMap((d) => d.topics).some((t) => t.primaryCwd === repoB), true);
+
+    // External edit to mission-domains.json hot-reloads on next getOverview
+    await new Promise((r) => setTimeout(r, 20));
+    const externalRepo = "/Users/alice/dev/external-added";
+    await writeFile(join(dir, "mission-domains.json"), JSON.stringify({
+      version: 3,
+      domains: [{ id: "indie-lab", code: "LAB 01", name: "软件研发室", shortName: "软件研发", order: 1 }],
+      topics: [
+        { id: "alpha-app", domainId: "indie-lab", name: "Alpha 外部改名", primaryCwd: repoA, cwdPrefixes: [repoA], order: 1 },
+        { id: "ext-app", domainId: "indie-lab", name: "外部新增项目", primaryCwd: externalRepo, cwdPrefixes: [externalRepo], order: 2 },
+      ],
+    }), "utf8");
+    const ovReloaded = await service.getOverview({ trigger: "view" });
+    const reloadedTopics = ovReloaded.domains.flatMap((d) => d.topics);
+    assert.equal(reloadedTopics.some((t) => t.id === "alpha-app" && t.name === "Alpha 外部改名"), true);
+    assert.equal(reloadedTopics.some((t) => t.id === "ext-app" && t.name === "外部新增项目"), true);
+
+    // syncProjects returns structured summary
+    const syncRes = await service.syncProjects({ clearExisting: false });
+    assert.equal(syncRes.ok, true);
+    assert.ok(Array.isArray(syncRes.addedTopics));
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
+  }
+});
+
+test("Multi-repo topic exposes subProjects breakdown, cwdOverride dispatch, and zero-emoji room/directory HUD drawers", async () => {
+  const dir = await mkdtemp(join(os.tmpdir(), "ac-mo-subproj-"));
+  try {
+    const repoMain = "/Users/alice/dev/tools-main";
+    const repoExt = "/Users/alice/dev/tools-ext";
+    await mkdir(join(dir), { recursive: true });
+    await writeFile(join(dir, "mission-domains.json"), JSON.stringify({
+      version: 3,
+      domains: [
+        { id: "indie-lab", code: "LAB 01", name: "软件研发室", shortName: "软件研发", order: 1 },
+        { id: "drama-studio", code: "STUDIO 02", name: "内容工坊", shortName: "内容工坊", order: 2 },
+        { id: "global-pub", code: "GLOBAL 03", name: "发布增长部", shortName: "发布部", order: 3 },
+        { id: "bounty-guild", code: "GUILD 04", name: "专项运维所", shortName: "专项所", order: 4 },
+      ],
+      topics: [
+        {
+          id: "tools-cluster",
+          domainId: "indie-lab",
+          name: "效率工具簇",
+          primaryCwd: repoMain,
+          cwdPrefixes: [repoMain, repoExt],
+          keywords: ["工具簇"],
+          order: 1,
+        },
+        ...Array.from({ length: 6 }, (_, i) => ({
+          id: `extra-${i + 1}`,
+          domainId: "indie-lab",
+          name: `扩展项目${i + 1}`,
+          primaryCwd: `/Users/alice/dev/extra-${i + 1}`,
+          cwdPrefixes: [`/Users/alice/dev/extra-${i + 1}`],
+          order: i + 2,
+        })),
+      ],
+    }), "utf8");
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const hub = createMockHub([
+      { id: "codex:default:m1", provider: "codex", profileId: "default", cwd: repoMain, title: "主工具修复", updatedAt: nowSec - 60, live: false },
+      { id: "codex:default:e1", provider: "codex", profileId: "default", cwd: repoExt, title: "扩展工具上线", updatedAt: nowSec - 90, live: true },
+      { id: "codex:default:un1", provider: "codex", profileId: "default", cwd: "/Users/alice", title: "零散对话", updatedAt: nowSec - 100, live: false },
+    ]);
+    const service = new MissionOverviewService({
+      hub,
+      dataDir: dir,
+      projectValuePath: join(dir, "none.json"),
+      collectGitImpl: async () => null,
+      runAiImpl: async () => null,
+    });
+
+    const ov = await service.getOverview({ trigger: "view" });
+    const clusterTopic = ov.domains[0].topics.find((t) => t.id === "tools-cluster");
+    assert.equal(clusterTopic.subProjects.length, 2);
+    assert.equal(clusterTopic.subProjects.some((sp) => sp.cwd === repoExt && sp.liveCount === 1), true);
+
+    const subDispatch = await service.dispatchTask({
+      text: "优化扩展工具构建脚本",
+      topicId: "tools-cluster",
+      cwdOverride: repoExt,
+      confirmOnly: false,
+    });
+    assert.equal(subDispatch.dispatched[0].cwd, repoExt);
+    assert.equal(hub.startedThreads[0].cwd, repoExt);
+
+    const topicCardHtml = renderTycoonHudHtml(ov, {
+      selectedTopicId: "tools-cluster",
+      inspectorMode: "topic",
+      inspectorBack: { mode: "room", roomId: "indie-lab", clusterOnly: false },
+      selectedSubProjectByTopic: { "tools-cluster": repoExt },
+    });
+    assert.match(topicCardHtml, /mo-subprojects-bar/);
+    assert.match(topicCardHtml, /data-tycoon-inspector-back="1"/);
+    const threadListIdx = topicCardHtml.indexOf('<div class="mo-thread-list">');
+    assert.notEqual(threadListIdx, -1, "topic card should render thread list");
+    const threadListHtml = topicCardHtml.slice(threadListIdx);
+    assert.match(threadListHtml, /扩展工具上线/);
+    assert.doesNotMatch(threadListHtml, /主工具修复/, "selecting a subproject filters threads to that subproject");
+    assert.equal(/\p{Extended_Pictographic}/u.test(topicCardHtml.replaceAll("🚧", "")), false);
+
+    const roomHtml = renderTycoonHudHtml(ov, {
+      inspectorMode: "cluster",
+      inspectorRoomId: "indie-lab",
+      inspectorClusterOnly: true,
+    });
+    assert.match(roomHtml, /tycoon-room-list/);
+    assert.match(roomHtml, /data-tycoon-toggle-cluster-scope="1"/);
+    assert.equal(/\p{Extended_Pictographic}/u.test(roomHtml.replaceAll("🚧", "")), false);
+
+    const dirHtml = renderTycoonHudHtml(ov, { inspectorMode: "directory" });
+    assert.match(dirHtml, /全园区项目目录/);
+    assert.match(dirHtml, /data-mo-action="sync-projects"/);
+    assert.equal(/\p{Extended_Pictographic}/u.test(dirHtml.replaceAll("🚧", "")), false);
+
+    const overview2dHtml = renderMissionOverviewHtml(ov, {});
+    assert.match(overview2dHtml, /data-mo-action="sync-projects"/);
+    assert.match(overview2dHtml, /data-mo-induct-cwd/);
+    assert.equal(/\p{Extended_Pictographic}/u.test(overview2dHtml), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
+  }
+});
+
+test("dispatchTask resolves bare provider names and prefers healthy profiles over unavailable ones", async () => {
+  const dir = await mkdtemp(join(os.tmpdir(), "ac-mo-bare-provider-"));
+  try {
+    await seedGenericTestDomains(dir);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const threads = [
+      {
+        id: "codex:personal:c1",
+        provider: "codex",
+        profileId: "personal",
+        cwd: "/Users/demo/workspace/control-panel",
+        title: "修复按钮阴影",
+        preview: "微调样式",
+        updatedAt: nowSec - 120,
+      },
+    ];
+    const profiles = [
+      { provider: "codex", id: "personal", label: "Codex 自用", installed: true, health: { status: "healthy" }, account: { signedIn: true, email: "me@example.com" } },
+      { provider: "claude", id: "default", label: "Claude 默认", installed: true, health: { status: "healthy" }, account: { signedIn: true, email: "claude@example.com" } },
+      { provider: "antigravity", id: "cli", label: "Antigravity CLI", installed: true, health: { status: "unavailable" }, account: { signedIn: true } },
+      { provider: "antigravity", id: "desktop", label: "Antigravity Desktop", installed: true, health: { status: "healthy" }, account: { signedIn: true } },
+      { provider: "grok", id: "default", label: "Grok 默认", installed: true, health: {}, account: { signedIn: false } },
+    ];
+    const hub = createMockHub(threads, profiles);
+    const service = new MissionOverviewService({
+      hub,
+      dataDir: dir,
+      projectValuePath: join(dir, "none.json"),
+      collectGitImpl: async () => null,
+      runAiImpl: async () => null,
+    });
+
+    // Remember codex:personal for control-panel first.
+    await service.dispatchTask({
+      text: "优化控制台样式",
+      topicId: "control-panel",
+      agentKey: "codex:personal",
+    });
+
+    const byBareCodex = await service.dispatchTask({
+      text: "继续检查语音链路",
+      topicId: "control-panel",
+      agentKey: "codex",
+      confirmOnly: true,
+    });
+    assert.equal(byBareCodex.routes[0].agentKey, "codex:personal");
+    assert.equal(byBareCodex.routes[0].agentSource, "manual");
+
+    const byBareClaude = await service.dispatchTask({
+      text: "排查语音播放问题",
+      topicId: "control-panel",
+      agentKey: "Claude",
+    });
+    assert.equal(byBareClaude.dispatched[0].agentKey, "claude:default");
+    assert.equal(hub.startedThreads.at(-1).provider, "claude");
+
+    const byPreferredClaude = await service.dispatchTask({
+      text: "再次检查",
+      topicId: "control-panel",
+      preferredProvider: "claude",
+      confirmOnly: true,
+    });
+    assert.equal(byPreferredClaude.routes[0].agentKey, "claude:default");
+
+    const byAgyAlias = await service.dispatchTask({
+      text: "设计新界面",
+      topicId: "control-panel",
+      agentKey: "agy",
+      confirmOnly: true,
+    });
+    assert.equal(byAgyAlias.routes[0].agentKey, "antigravity:desktop");
+    assert.equal(byAgyAlias.routes[0].agentSource, "manual");
+
+    // Excluded channels still succeed when explicitly requested by bare provider name.
+    await service.updateDispatchPrefs({ excludedAgentKeys: ["claude:default"] });
+    const excludedButExplicit = await service.dispatchTask({
+      text: "仍然用 Claude 排查",
+      topicId: "control-panel",
+      agentKey: "claude",
+      confirmOnly: true,
+    });
+    assert.equal(excludedButExplicit.routes[0].agentKey, "claude:default");
+
+    await assert.rejects(
+      service.dispatchTask({ text: "测试未登录渠道", topicId: "control-panel", agentKey: "grok", confirmOnly: true }),
+      /不可用/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
+  }
+});

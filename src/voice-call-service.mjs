@@ -261,6 +261,20 @@ function formatVoiceModelShortName(provider, model) {
   return raw.replace(/^gemini-\d+(?:\.\d+)?-/i, "");
 }
 
+function parseVoiceSelectionKey(selectionKey = "auto") {
+  const key = String(selectionKey || "").trim();
+  if (!key || ["auto", "local", "local:local-rules"].includes(key)) {
+    return { voiceProvider: "", voiceProfileId: "", voiceModel: "" };
+  }
+  const firstColon = key.indexOf(":");
+  if (firstColon < 0) return { voiceProvider: key, voiceProfileId: "", voiceModel: "" };
+  const voiceProvider = key.slice(0, firstColon).trim();
+  const rest = key.slice(firstColon + 1);
+  const secondColon = rest.indexOf(":");
+  if (secondColon < 0) return { voiceProvider, voiceProfileId: "", voiceModel: rest.trim() };
+  return { voiceProvider, voiceProfileId: rest.slice(0, secondColon).trim(), voiceModel: rest.slice(secondColon + 1).trim() };
+}
+
 function extensionForAudioMime(mimeType = "") {
   const low = String(mimeType || "").toLowerCase();
   if (low.includes("mpeg") || low.includes("mp3")) return "mp3";
@@ -1391,7 +1405,10 @@ export class VoiceCallService {
         if (update.sessionUpdate === "agent_message_chunk") {
           const text = update.content?.text || "";
           const buf = this.#activeSessionTurn.get(sessionId);
-          if (buf && text) buf.text += text;
+          if (buf && text) {
+            buf.text += text;
+            try { buf.onDelta?.(text, buf.text); } catch {}
+          }
           const sub = this.#activeSubagentSessions.get(sessionId);
           if (sub && text) sub.text += text;
           return;
@@ -1766,6 +1783,10 @@ export class VoiceCallService {
     return entry;
   }
 
+  /**
+   * @deprecated 旧通话协调者仅作兼容冻结；新单入口语音通话统一由
+   * `POST /api/assistant/voice-turn` + `AssistantService` 承担，禁止继续新增功能。
+   */
   async startCall({
     callId = "",
     callScope = "",
@@ -2408,11 +2429,17 @@ export class VoiceCallService {
     };
   }
 
-  async #runVoiceCoordinator({ callId, target, promptText }) {
+  async #runVoiceCoordinator({ callId, target, promptText, timeoutMs = VOICE_PROMPT_TIMEOUT_MS, signal = null, onDelta = null }) {
+    if (signal?.aborted) {
+      throw Object.assign(new Error("请求已取消"), { name: "AbortError", aborted: true });
+    }
     if (target.provider !== "antigravity") {
       return this.#runHubVoicePrompt({ target, text: promptText });
     }
     const client = await this.#ensureClient();
+    if (signal?.aborted) {
+      throw Object.assign(new Error("请求已取消"), { name: "AbortError", aborted: true });
+    }
     let entry = this.#calls.get(callId);
     if (!entry || entry.model !== target.model) {
       const created = await client.newSession({ cwd: this.#workspaceDir });
@@ -2425,7 +2452,50 @@ export class VoiceCallService {
       this.#trimCallCache();
     }
     entry.lastUsedAt = Date.now();
-    return this.#runSerializedPrompt(entry.sessionId, promptText);
+    return this.#runSerializedPrompt(entry.sessionId, promptText, { timeoutMs, signal, callId, onDelta });
+  }
+
+  // Reuses a warm Antigravity ACP session for the sprite assistant when healthy;
+  // other providers fall through to ephemeral CLI execution in MissionOverviewService.
+  async completeAssistantChat({ sessionId = "", system = "", prompt = "", modelKey = "auto", timeoutMs = 25_000, signal = null, onDelta = null } = {}) {
+    if (signal?.aborted) return null;
+    const sel = parseVoiceSelectionKey(modelKey);
+    const target = await this.resolveVoiceTarget(sel).catch(() => null);
+    if (!target || target.provider !== "antigravity" || signal?.aborted) return null;
+    const agyBinName = basename(agyExecutable(this.#env) || "");
+    if (!agyBinName || agyBinName.includes("mock-agy")) return null;
+    const promptText = system ? `${system}\n\n${prompt}` : prompt;
+    const callId = `assistant:${String(sessionId || "default").trim().slice(0, 48)}`;
+    return this.#runVoiceCoordinator({ callId, target, promptText, timeoutMs, signal, onDelta });
+  }
+
+  async warmAssistantCall() {
+    const canWhisper = this.#hasLocalWhisperRuntime();
+    if (canWhisper) {
+      void this.#ensureAsrWorker().catch(() => {});
+    }
+    const ttsBin = resolveEdgeTtsExecutable(this.#env);
+    if (ttsBin && this.#resolveEdgeTtsPython(ttsBin)) {
+      void this.#ensureEdgeTtsWorker(ttsBin).catch(() => {});
+    }
+    if (this.#hasLocalKokoroRuntime()) {
+      void this.#ensureKokoroWorker().catch(() => {});
+    }
+    const [catalog] = await Promise.all([
+      Promise.race([
+        this.listVoiceModelOptions().catch(() => null),
+        new Promise((r) => setTimeout(() => r(null), 2000)),
+      ]),
+      this.getAsrPromptHints().catch(() => ""),
+    ]);
+    const sayBin = resolveMacSayExecutable(this.#env);
+    return {
+      ok: true,
+      asrAvailable: canWhisper,
+      ttsEngine: ttsBin ? "edge-tts" : (sayBin ? "macos-say" : "none"),
+      options: catalog?.options || [],
+      resolved: catalog?.resolved || null,
+    };
   }
 
   #buildSpeechTimingLines(speechTiming = null, transcriptText = "") {
@@ -2489,6 +2559,9 @@ export class VoiceCallService {
     return lines.join("\n");
   }
 
+  /**
+   * @deprecated 旧通话协调者提示词构造，已冻结；新对话逻辑请维护 `src/assistant-llm.mjs`。
+   */
   #buildCoordinatorPrompt({
     snapshot,
     transcriptText = "",
@@ -4267,6 +4340,10 @@ export class VoiceCallService {
     }
   }
 
+  /**
+   * @deprecated 旧通话协调者回合入口，已冻结不再扩展；请统一使用
+   * `POST /api/assistant/voice-turn` + `AssistantService`。
+   */
   async handleTurn({
     callId = "",
     callScope = "",
@@ -4713,28 +4790,75 @@ export class VoiceCallService {
     };
   }
 
-  #runSerializedPrompt(sessionId, promptText) {
+  #runSerializedPrompt(sessionId, promptText, { timeoutMs = VOICE_PROMPT_TIMEOUT_MS, signal = null, callId = "", onDelta = null } = {}) {
+    if (signal?.aborted) {
+      return Promise.reject(Object.assign(new Error("请求已取消"), { name: "AbortError", aborted: true }));
+    }
+    const effectiveTimeoutMs = Math.max(1_000, Number(timeoutMs) || VOICE_PROMPT_TIMEOUT_MS);
     const exec = async () => {
+      if (signal?.aborted) {
+        throw Object.assign(new Error("请求已取消"), { name: "AbortError", aborted: true });
+      }
       const client = await this.#ensureClient();
-      const buffer = { text: "" };
+      const buffer = { text: "", onDelta: typeof onDelta === "function" ? onDelta : null };
       this.#activeSessionTurn.set(sessionId, buffer);
       let timer;
+      let onAbort = null;
+      let timedOutOrAborted = false;
       try {
         await Promise.race([
           client.sendPrompt(sessionId, [{ type: "text", text: promptText }]),
           new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error("Hydrogen 语音协调超时")), VOICE_PROMPT_TIMEOUT_MS);
+            timer = setTimeout(() => {
+              timedOutOrAborted = true;
+              reject(new Error("Hydrogen 语音协调超时"));
+            }, effectiveTimeoutMs);
+            timer.unref?.();
+            if (signal) {
+              onAbort = () => {
+                timedOutOrAborted = true;
+                reject(Object.assign(new Error("请求已取消"), { name: "AbortError", aborted: true }));
+              };
+              if (signal.aborted) onAbort();
+              else signal.addEventListener("abort", onAbort, { once: true });
+            }
           }),
         ]);
         return buffer.text;
+      } catch (err) {
+        if (timedOutOrAborted) {
+          void client.cancel(sessionId).catch(() => {});
+          client.abortSessionPrompt(sessionId, err?.message || "Hydrogen 会话超时或已取消");
+          if (callId) this.#calls.delete(callId);
+        }
+        throw err;
       } finally {
         clearTimeout(timer);
+        if (signal && onAbort) signal.removeEventListener("abort", onAbort);
         this.#activeSessionTurn.delete(sessionId);
       }
     };
     const next = this.#turnQueue.then(exec, exec);
     this.#turnQueue = next.catch(() => {});
-    return next;
+    if (!signal) return next;
+    return new Promise((resolve, reject) => {
+      const abortEarly = () => reject(Object.assign(new Error("请求已取消"), { name: "AbortError", aborted: true }));
+      if (signal.aborted) {
+        abortEarly();
+        return;
+      }
+      signal.addEventListener("abort", abortEarly, { once: true });
+      next.then(
+        (val) => {
+          signal.removeEventListener("abort", abortEarly);
+          resolve(val);
+        },
+        (err) => {
+          signal.removeEventListener("abort", abortEarly);
+          reject(err);
+        },
+      );
+    });
   }
 
   async close() {

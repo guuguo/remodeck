@@ -55,6 +55,7 @@ import {
 } from "../src/provider-hub.mjs";
 import {
   buildSelectableTelemetryItems,
+  CLIENT_FALLBACK_MODELS,
   compactEffortBadgeLabel,
   compactModelBadgeLabel,
   compactProfileChipText,
@@ -5700,6 +5701,32 @@ test("compactModelBadgeLabel automatically formats future Orchestrator and Gemin
     formatTurnModelBadge({ model: "gpt-6.2-astra", effort: "high" }),
     { label: "GPT-6.2-ASTRA · H", title: "gpt-6.2-astra (high)" },
   );
+  assert.equal(compactModelBadgeLabel("gemini-flash-worker-agy"), "Flash Worker");
+  assert.equal(compactModelBadgeLabel("GPT-OSS 120B"), "GPT-OSS 120B");
+  assert.equal(compactModelBadgeLabel("gpt-oss-120b"), "GPT-OSS 120B");
+  assert.deepEqual(
+    formatTurnModelBadge({ models: ["gemini-pro-orchestrator-neon", "gemini-flash-worker-agy"] }),
+    { label: "Neon → Flash Worker", title: "gemini-pro-orchestrator-neon → gemini-flash-worker-agy" },
+  );
+
+  const agyClientModels = CLIENT_FALLBACK_MODELS.antigravity;
+  assert.equal(agyClientModels.find((m) => m.isDefault)?.id, "gemini-pro-orchestrator");
+  for (const id of ["gemini-pro-orchestrator-neon", "gemini-4-neon", "claude-sonnet-5-5", "gemini-3.8-flash", "gpt-oss-120b"]) {
+    assert.ok(agyClientModels.some((m) => m.id === id), `missing fallback model ${id}`);
+  }
+
+  const ignoredWorker = ensurePreferredModelInList(agyClientModels, "antigravity", "gemini-flash-worker-agy");
+  assert.equal(ignoredWorker.some((m) => m.id === "gemini-flash-worker-agy"), false);
+  const keptGptOss = ensurePreferredModelInList(
+    agyClientModels.filter((m) => m.id !== "gpt-oss-120b"),
+    "antigravity",
+    "gpt-oss-120b",
+  );
+  assert.equal(keptGptOss[0]?.id, "gpt-oss-120b");
+  const synthOrch = ensurePreferredModelInList(agyClientModels, "antigravity", "gemini-pro-orchestrator-cobalt");
+  assert.equal(synthOrch[0]?.id, "gemini-pro-orchestrator-cobalt");
+  assert.equal(synthOrch[0]?.displayName, "Orchestrator (Cobalt)");
+  assert.deepEqual(synthOrch[0]?.supportedReasoningEfforts, []);
 });
 
 test("renderMarkdown and mermaid-renderer render Mermaid diagrams with streaming safety, caching, theme sync, and error fallback", async () => {

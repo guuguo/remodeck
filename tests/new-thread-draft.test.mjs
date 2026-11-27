@@ -18,7 +18,7 @@ function harness() {
   };
   const ctx = vm.createContext({
     console, URL, Date, clearTimeout,
-    state: { activeThreadId: "", activeThread: null, newThreadCwd: null, boardOpen: true, images: [], defaultPermissionMode: "turbo", threads: [], modelsByProvider: {}, allModels: [] },
+    state: { activeThreadId: "", activeThread: null, newThreadCwd: null, newThreadTaskDraft: null, boardOpen: true, images: [], defaultPermissionMode: "turbo", threads: [], modelsByProvider: {}, allModels: [], dictation: { active: false, pointerDown: false }, chatTts: { enabled: false } },
     $: el,
     localStorage: { getItem: (key) => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     defaultProviderValue: () => "codex", defaultNewThreadProvider: () => "codex", defaultProfileForProvider: () => "default",
@@ -31,7 +31,7 @@ function harness() {
     history: { replaceState() {} }, location: { href: "http://localhost/?thread=old" },
     apiPost: async (path, payload) => { requests.push({ path, payload }); return {}; },
   });
-  for (const name of ["syncCfgFieldVisibility", "renderComposerConfigChip", "syncAllCustomSelects", "setTopbarMenuOpen", "setComposerConfigOpen", "renderComposerImages", "renderTopbarAndControls", "setSidebarOpen", "syncComposerProfileSelect", "closeCustomSelectMenu", "closeSlashCommandMenu", "clearComposerStatus", "syncProfileSelectors", "renderThreadList", "renderAgentTelemetryBar", "renderActiveMessages", "renderPendingRequests", "renderQueuedTurns", "setComposerStatus", "renderComposerControls", "refreshThreads", "saveLocalThreadPrefs"]) ctx[name] = () => {};
+  for (const name of ["syncCfgFieldVisibility", "renderComposerConfigChip", "syncAllCustomSelects", "setTopbarMenuOpen", "setComposerConfigOpen", "renderComposerImages", "renderTopbarAndControls", "setSidebarOpen", "syncComposerProfileSelect", "closeCustomSelectMenu", "closeSlashCommandMenu", "clearComposerStatus", "syncProfileSelectors", "renderThreadList", "renderAgentTelemetryBar", "renderActiveMessages", "renderPendingRequests", "renderQueuedTurns", "setComposerStatus", "renderComposerControls", "refreshThreads", "saveLocalThreadPrefs", "stopChatReplySpeech", "exitSpriteOverlayForNavigation", "unlockChatReplySpeechAudio", "stopComposerDictation", "refreshTasks"]) ctx[name] = () => {};
   const names = ["getNewThreadPrefs", "saveNewThreadPrefs", "currentComposerProvider", "currentComposerProfileId", "syncModelAndEffortSelectors", "syncEffortSelectForModel", "normalizeEffortOptionValue", "selectThread", "openNewThreadModal", "isBoardViewActive", "handleSend"];
   vm.runInContext(`const NEW_THREAD_PREFS_KEY = "test.newThreadPrefs"; let activeThreadReloadTimer = null; let lastActiveThreadReloadDoneAt = 0;\n${names.map(fn).join("\n")}`, ctx);
   ctx.state.modelsByProvider = {

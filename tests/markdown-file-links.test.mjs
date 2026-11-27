@@ -35,7 +35,7 @@ test("预览使用服务端解析出的实际目录，二次点击沿用新文�
   const bodyFunction = source.slice(source.indexOf("function renderFilePreviewBody("), source.indexOf("\nasync function openFilePreviewModal("));
   const bodyEl = { innerHTML: "" };
   const meta = { kind: "markdown", content: "[正文](正文/025.md)", displayPath: basePath, requestPath: "目录.md" };
-  const context = { $: () => bodyEl, renderMarkdown };
+  const context = { $: () => bodyEl, renderMarkdown, scheduleMermaidHydration: () => {} };
   vm.runInNewContext(bodyFunction + '\nrenderFilePreviewBody(meta, { threadId });', { ...context, meta, threadId });
   assert.match(bodyEl.innerHTML, /data-local-file-path="story-demo\/小说\/正文\/025.md"/);
   const chapterMeta = { kind: "markdown", content: "[下章](026.md)", displayPath: "story-demo/小说/正文/025.md" };
