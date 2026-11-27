@@ -23,7 +23,6 @@ import { createThreadMetaStore } from "../src/thread-meta-store.mjs";
 import { createAgentControlServer } from "../src/server.mjs";
 import {
   DEFAULT_VOICE_HYDROGEN_MODEL,
-  resolveVoicePlanTarget,
 } from "../src/voice-call-service.mjs";
 import { createHotExtensionServer, mergeUpstreamLiveThreadState } from "../src/hot-extension.mjs";
 import { apiGet, apiUrl, clearApiEtagCache, isHostOfflineError } from "../public/api-client.js";
@@ -131,8 +130,6 @@ import {
   resolveReleaseNotesBucket,
 } from "../public/release-notes.js";
 import {
-  buildLocalProgressBriefing,
-  buildVoiceLiveProgressItems,
   createVadTurnDetector,
   downsampleFloat32ToInt16,
   encodePcm16SamplesToWav,
@@ -140,8 +137,6 @@ import {
   extractReplyClosingSummaryForSpeech,
   loadChatReplyTtsPref,
   pcm16Base64ToWavBytes,
-  renderVoiceCallTranscriptHtml,
-  renderVoiceLiveProgressHtml,
   resolveHoldTalkGestureState,
   saveChatReplyTtsPref,
   stripMarkdownForSpeech,
@@ -317,7 +312,8 @@ test("relay mobile send flow delivers Antigravity turns, returns explicit errors
   assert.match(html, /id="sendBtn"/);
   assert.match(html, /id="projectBoard"/);
   assert.match(html, /id="projectTaskStrip"/);
-  assert.match(html, /id="voiceCopilotModal"/);
+  assert.match(html, /id="voiceModeBtn"/);
+  assert.match(html, /id="spriteFullscreenMount"/);
   assert.match(html, /id="newModelSelect"/);
 
   const provRes = await fetch(apiUrl("api/providers", basePrefix), { headers: { Cookie: cookieHeader } });
@@ -520,14 +516,11 @@ test("project-board and voice-copilot modules prioritize pinned projects, match 
   });
   assert.match(idleStripHtml, /strip-status-dot is-antigravity is-done/);
 
-  // Speech sanitization and briefing.
+  // Speech sanitization.
   assert.equal(
     stripMarkdownForSpeech("请查看 [server.mjs](file:///a/b/c) ```js\nconst x=1;\n``` <!-- GOAL_COMPLETE -->"),
     "请查看 server.mjs ，代码部分已省略，",
   );
-  const briefing = buildLocalProgressBriefing({ groups, pendingRequests });
-  assert.match(briefing, /等待你确认/);
-  assert.match(briefing, /示例小屋/);
 
   // PCM16 -> WAV encapsulation & VAD turn detection.
   const pcmSample = Buffer.from([0x00, 0x10, 0x00, 0x20, 0x00, 0x30, 0x00, 0x40]).toString("base64");
@@ -560,46 +553,6 @@ test("project-board and voice-copilot modules prioritize pinned projects, match 
   const utteredWav = encodePcm16SamplesToWav(uttered.samples, 16000);
   assert.equal(Buffer.from(utteredWav.slice(0, 4)).toString("ascii"), "RIFF");
   assert.equal(Buffer.from(utteredWav.slice(8, 12)).toString("ascii"), "WAVE");
-
-  // Voice live progress items use goalState.turnCount correctly and sort pending items first.
-  const liveProgressItems = buildVoiceLiveProgressItems({
-    groups,
-    threads: threads.map((t) => (
-      t.id === "antigravity:cli:t-demo-1"
-        ? { ...t, goalState: { active: true, turnCount: 3, maxTurns: 20 } }
-        : t
-    )),
-    pendingRequests: [
-      { id: "req-1", threadId: "claude:default:t-demo-2", title: "确认写入家具目录" },
-    ],
-  });
-  const demoLiveItem = liveProgressItems.find((it) => it.threadId === "antigravity:cli:t-demo-1");
-  assert.equal(demoLiveItem?.goalBadge, "3/20");
-  assert.equal(liveProgressItems[0].status, "pending");
-  const liveProgressHtml = renderVoiceLiveProgressHtml(liveProgressItems);
-  assert.match(liveProgressHtml, /ac-icon-target[^>]*>[\s\S]*?<\/svg>\s*3\/20/);
-  assert.match(liveProgressHtml, /data-voice-approve="req-1"/);
-
-  // Server-side fuzzy voice target fallback matches short alias / project basename / thread title.
-  const voiceSnapshot = {
-    projects: groups.map((g) => ({
-      cwd: g.cwd,
-      name: g.name,
-      alias: g.alias,
-      pinned: g.pinned,
-      liveCount: g.liveCount,
-      pendingCount: g.pendingCount,
-      threads: g.threads.map((t) => ({ id: t.id, title: t.title, provider: t.provider })),
-    })),
-  };
-  const exactTarget = resolveVoicePlanTarget({
-    intent: "open_thread",
-    targetProjectCwd: "/workspace/demo/demo-app",
-    targetThreadId: "antigravity:cli:t-demo-1",
-    heardText: "打开示例小屋透视检查对话",
-  }, voiceSnapshot);
-  assert.equal(exactTarget.cwd, "/workspace/demo/demo-app");
-  assert.equal(exactTarget.threadId, "antigravity:cli:t-demo-1");
 });
 
 test("model fallback selector and turbo permission helpers never leave UI selectors empty or locked", () => {
@@ -761,20 +714,17 @@ test("UI noise reduction collapses process items, filters legacy agy-gen echoes,
     { phase: "正在检索代码…", text: "tool_use" },
   );
 
-  // Voice briefing skips legacy agy-gen-* raw tool output.
-  const briefing = buildLocalProgressBriefing({
-    activeThread: {
-      title: "手机端精简",
-      turns: [{
-        items: [
-          { type: "agentMessage", id: "agy-msg-ok", phase: "final_answer", text: "已收敛工具输出" },
-          { type: "agentMessage", id: "agy-gen-99", phase: "commentary", text: "Created At: 2026-11-14 Showing lines 1-800" },
-        ],
-      }],
+  // Speech reply extraction skips legacy agy-gen-* raw tool output.
+  const finalMsg = extractFinalAssistantMessageFromTurns([
+    {
+      items: [
+        { type: "agentMessage", id: "agy-msg-ok", phase: "final_answer", text: "已收敛工具输出" },
+        { type: "agentMessage", id: "agy-gen-99", phase: "commentary", text: "Created At: 2026-11-14 Showing lines 1-800" },
+      ],
     },
-  });
-  assert.match(briefing, /已收敛工具输出/);
-  assert.doesNotMatch(briefing, /Showing lines/);
+  ]);
+  assert.match(finalMsg.text, /已收敛工具输出/);
+  assert.doesNotMatch(finalMsg.text, /Showing lines/);
 });
 
 test("formatTokensPerSec and renderAgentTelemetryBarHtml render 4-agent HUD, 5h/weekly windows, deduped accounts, and drawer jump pills", () => {
@@ -1307,10 +1257,6 @@ test("compact mobile visual helpers and index.html preserve all existing IDs and
     "boardToggleBtn",
     "boardAttentionDot",
     "voiceModeBtn",
-    "voiceMinimizeBtn",
-    "voiceOrbBtn",
-    "voiceLiveProgressList",
-    "voiceCallTranscript",
     "interruptBtn",
     "topbarMoreBtn",
     "topbarMoreMenu",
@@ -1908,7 +1854,7 @@ test("multi-instance public endpoint extraction, manual /api/profile/probe, and 
   );
 });
 
-test("Mac multimodal Hydrogen voice call and hot-extension proxy work end-to-end with zero tokens", async (t) => {
+test("hot-extension proxy routes (/api/voice/tts, /api/profile/probe, /api/thread, /api/models) work end-to-end with zero tokens", async (t) => {
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-voice-e2e-"));
   const dataDir = resolve(root, "data");
   const appsDir = resolve(root, "apps");
@@ -1982,37 +1928,27 @@ test("Mac multimodal Hydrogen voice call and hot-extension proxy work end-to-end
   });
   assert.equal(createdRes.status, 200);
 
-  // 2. Start & warm up Mac Hydrogen voice call channel.
-  const startRes = await fetch(`${srv.url}/api/voice/call/start`, {
+  // 2. Warm up assistant voice call channel and synthesize TTS via hot-extension proxy.
+  const warmRes = await fetch(`${srv.url}/api/assistant/call/warm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ callId: "call-test-1" }),
+    body: JSON.stringify({ modelKey: "auto" }),
   });
-  assert.equal(startRes.status, 200);
-  const startJson = await startRes.json();
-  assert.equal(startJson.warmed, true);
-  assert.equal(startJson.model, "gemini-4-hydrogen-low");
-  assert.equal(startJson.ttsEngine, "edge-tts");
+  assert.equal(warmRes.status, 200);
+  const warmJson = await warmRes.json();
+  assert.equal(warmJson.ok, true);
+  assert.equal(warmJson.resolved?.model, "gemini-4-hydrogen-low");
 
-  // 3. Upload real WAV audio through hot-extension proxy (/apps/ac-hot/api/voice/call), verify dispatch & Edge TTS MP3.
-  const wavBase64 = uint8ArrayToBase64(encodePcm16SamplesToWav(new Int16Array(1600), 16000));
-  const callRes = await fetch(`${srv.url}/apps/ac-hot/api/voice/call`, {
+  // 3. Synthesize Edge TTS MP3 through hot-extension proxy (/apps/ac-hot/api/voice/tts).
+  const ttsRes = await fetch(`${srv.url}/apps/ac-hot/api/voice/tts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      callId: "call-test-1",
-      audioBase64: wavBase64,
-      audioMimeType: "audio/wav",
-      autoExecute: true,
-      tts: true,
-    }),
+    body: JSON.stringify({ text: "测试通过，热更新语音合成正常。" }),
   });
-  assert.equal(callRes.status, 200);
-  const callJson = await callRes.json();
-  assert.equal(callJson.usedFallback, false);
-  assert.equal(callJson.executed?.action, "send_turn");
-  assert.equal(callJson.tts?.provider, "edge-tts");
-  const mp3Header = Buffer.from(callJson.tts.audioBase64, "base64").subarray(0, 3).toString("ascii");
+  assert.equal(ttsRes.status, 200);
+  const ttsJson = await ttsRes.json();
+  assert.equal(ttsJson.provider, "edge-tts");
+  const mp3Header = Buffer.from(ttsJson.audioBase64, "base64").subarray(0, 3).toString("ascii");
   assert.equal(mp3Header, "ID3");
 
   // 4. Probe profiles through /apps/ac-hot/api/profile/probe and confirm health persistence.
@@ -3600,18 +3536,6 @@ test("zero pictographic UI emojis, hidden redundant topbar chrome, and overflow 
     compactBarHtml,
     renderQuotaOverviewHtml(profiles, { expanded: true, nowSec }),
     renderQueuedTurnsPanelHtml([{ id: "q1", position: 1, text: "跑单测", source: "control", imageCount: 1, goalMode: true }]),
-    renderVoiceLiveProgressHtml([{
-      threadId: "antigravity:desktop:t1",
-      projectCwd: "/tmp/p1",
-      projectName: "测试项目",
-      title: "修复音频",
-      provider: "antigravity",
-      status: "pending",
-      phaseText: "等待确认",
-      goalBadge: "2/20",
-      pendingRequest: { id: "req-1" },
-    }]),
-    renderVoiceCallTranscriptHtml([{ heardText: "示例商城什么进度", spokenReply: "当前有 1 项待确认", actionTag: "已派发" }]),
   ];
   for (const chunk of renderedChunks) {
     assert.equal(/\p{Extended_Pictographic}/u.test(chunk), false, `rendered UI contains emoji: ${chunk.slice(0, 120)}`);
@@ -3646,7 +3570,7 @@ test("adaptive VAD adapts threshold in quiet environment", () => {
 
 });
 
-test("local Whisper ASR worker endpoint /api/voice/transcribe and fast voice/call dispatch execute without tokens", async (t) => {
+test("local Whisper ASR worker endpoint /api/voice/transcribe executes without tokens", async (t) => {
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-local-voice-"));
   let srv = null;
   t.after(async () => {
@@ -3685,30 +3609,6 @@ test("local Whisper ASR worker endpoint /api/voice/transcribe and fast voice/cal
   });
   await srv.start();
 
-  const projCwd = resolve(root, "demo-shop");
-  await mkdir(projCwd, { recursive: true });
-  await fetch(`${srv.url}/api/project/meta`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cwd: projCwd, alias: "示例商城后台", pinned: true }),
-  });
-
-  const createdRes = await fetch(`${srv.url}/api/thread/new`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      provider: "antigravity",
-      profileId: "cli",
-      cwd: projCwd,
-      text: "初始化会话 [COMPLETE_NOW]",
-      permissionMode: "turbo",
-    }),
-  });
-  assert.equal(createdRes.status, 200);
-  const createdJson = await createdRes.json();
-  const threadId = createdJson.thread?.id;
-  assert.ok(threadId);
-
   const wavBase64 = uint8ArrayToBase64(encodePcm16SamplesToWav(new Int16Array(1600), 16000));
 
   // Missing audio returns 400.
@@ -3730,43 +3630,6 @@ test("local Whisper ASR worker endpoint /api/voice/transcribe and fast voice/cal
   assert.equal(asrJson.ok, true);
   assert.equal(asrJson.text, "让 示例商城后台 跑一下检查");
   assert.equal(asrJson.engine, "mock-whisper");
-
-  // /api/voice/call/start warms mock-whisper instead of ACP.
-  const startRes = await fetch(`${srv.url}/api/voice/call/start`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ callId: "call-local-1" }),
-  });
-  assert.equal(startRes.status, 200);
-  const startJson = await startRes.json();
-  assert.equal(startJson.warmed, true);
-  assert.equal(startJson.model, "mock-whisper");
-
-  // /api/voice/call with audioBase64 + tts:false transcribes and dispatches send_turn cleanly.
-  const callRes = await fetch(`${srv.url}/api/voice/call`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      callId: "call-local-1",
-      audioBase64: wavBase64,
-      audioMimeType: "audio/wav",
-      autoExecute: true,
-      tts: false,
-    }),
-  });
-  assert.equal(callRes.status, 200);
-  const callJson = await callRes.json();
-  assert.equal(callJson.ok, true);
-  assert.equal(callJson.usedFallback, false);
-  assert.equal(callJson.model, DEFAULT_VOICE_HYDROGEN_MODEL);
-  assert.equal(callJson.asrEngine, "mock-whisper");
-  assert.equal(callJson.heardText, "让 示例商城后台 跑一下检查");
-  assert.equal(callJson.plan?.intent, "send_turn");
-  assert.equal(callJson.executed?.ok, true);
-  assert.equal(callJson.executed?.action, "send_turn");
-  assert.equal(callJson.executed?.focusThreadId, threadId);
-  assert.equal(callJson.tts?.provider, "none");
-  assert.equal(callJson.tts?.audioBase64, "");
 });
 
 test("telemetry toggle stops propagation across re-render and places desktop compact slot inside topbar-actions", async () => {

@@ -85,9 +85,8 @@ test("renderMessageCopyButton renders pin-plan button only when allowPinPlan=tru
 });
 
 test("modal dialog architecture sizes shell to card without left clipping across all modals", async () => {
-  const [appCss, workspaceCss, html] = await Promise.all([
+  const [appCss, html] = await Promise.all([
     readFile(new URL("../public/app.css", import.meta.url), "utf8"),
-    readFile(new URL("../public/project-workspace.css", import.meta.url), "utf8"),
     readFile(new URL("../public/index.html", import.meta.url), "utf8"),
   ]);
 
@@ -107,7 +106,6 @@ test("modal dialog architecture sizes shell to card without left clipping across
     [appCss, "#updateModal.modal-dialog", 640],
     [appCss, "#automationsModal.modal-dialog", 680],
     [appCss, ".modal-dialog.instance-manager-modal", 640],
-    [workspaceCss, ".voice-modal.voice-call-dialog", 560],
   ];
   for (const [cssText, selector, expectedPx] of wideModalSelectors) {
     const rule = extractTopLevelCssRule(cssText, selector);
@@ -125,7 +123,7 @@ test("modal dialog architecture sizes shell to card without left clipping across
   const dialogOpenMatches = [...html.matchAll(/<dialog\b([^>]*)>/g)];
   const dialogCloseMatches = [...html.matchAll(/<\/dialog>/g)];
   assert.equal(dialogOpenMatches.length, dialogCloseMatches.length, "All <dialog> tags in index.html must be closed");
-  assert.ok(dialogOpenMatches.length >= 10);
+  assert.ok(dialogOpenMatches.length >= 9);
   for (const m of dialogOpenMatches) {
     assert.match(m[1], /\bclass="[^"]*\bmodal-dialog\b/, `<dialog ${m[1]}> must carry modal-dialog class`);
   }

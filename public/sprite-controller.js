@@ -638,7 +638,6 @@ export function createSpriteController({
     void releaseVoiceWakeLock();
     if (oldCallId) {
       logSpritePhoneEvent("call_end", { callId: oldCallId, fromPhase: prevPhase, toPhase: "idle" });
-      void apiPostWithHotFallback("api/voice/call/end", { callId: oldCallId }).catch(() => {});
     }
     setSpriteViewMode(state.sprite.viewMode === "phone" ? "popover" : state.sprite.viewMode);
   }

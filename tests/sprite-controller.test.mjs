@@ -40,8 +40,8 @@ function createTestHarness({
       } catch {}
       return Response.json({ ok: true });
     }
-    if (u.includes("api/assistant/call/warm") || u.includes("api/voice/call/end")) {
-      return Response.json(u.includes("warm") && warmResponse ? warmResponse : { ok: true, options: [] });
+    if (u.includes("api/assistant/call/warm")) {
+      return Response.json(warmResponse || { ok: true, options: [] });
     }
     if (fetchImpl) {
       return fetchImpl(url, opts);

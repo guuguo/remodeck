@@ -173,7 +173,6 @@
             <span class="btn-icon-glyph" data-icon="mic" data-icon-size="14" aria-hidden="true"></span>
             <span class="btn-label-desktop">小精灵</span>
             <span id="voiceLiveCallBadge" class="voice-live-call-badge" hidden></span>
-            <span id="voiceAttentionDot" class="btn-attention-dot" hidden aria-hidden="true"></span>
           </button>
           <button type="button" id="interruptBtn" class="btn-danger btn-sm topbar-icon-action" hidden title="中断当前执行">
             <span class="btn-icon-glyph" data-icon="stop" data-icon-size="13" aria-hidden="true"></span>
@@ -586,88 +585,6 @@
             </form>
           </div>
         </details>
-      </div>
-    </div>
-  </dialog>
-
-  <dialog id="voiceCopilotModal" class="modal-dialog voice-modal voice-call-dialog">
-    <div class="modal-card voice-modal-card voice-call-sheet">
-      <div class="voice-call-topbar">
-        <div class="voice-call-identity">
-          <span id="voiceCallDot" class="voice-call-dot is-connecting" aria-hidden="true"></span>
-          <div class="voice-call-title-wrap">
-            <div class="voice-call-title-row">
-              <strong>轻量总控助手</strong>
-              <span id="voiceCallTimer" class="voice-call-timer">00:00</span>
-            </div>
-            <div class="voice-model-row">
-              <select id="voiceModelSelect" class="voice-model-select" aria-label="选择轻量助手模型" title="选择轻量助手使用的轻量模型（不限于 Gemini，也可选 Claude Haiku / Codex Mini / 本机规则）">
-                <option value="auto">自动优选轻量模型</option>
-                <option value="local:local-rules">仅本机规则（零模型）</option>
-              </select>
-              <span id="voiceModelBadge" class="voice-model-badge">键盘对话</span>
-            </div>
-          </div>
-        </div>
-        <div class="voice-head-actions">
-          <button type="button" id="voiceMinimizeBtn" class="btn-secondary btn-xs" title="收起助手窗口，后台保持连接"><span class="btn-icon-glyph" data-icon="chat" data-icon-size="12" aria-hidden="true"></span><span>看对话</span></button>
-          <button type="button" id="voiceAutoAnnounceBtn" class="btn-secondary btn-xs is-on" title="开启语音时，后台任务完成或新审批自动语音播报"><span class="btn-icon-glyph" data-icon="bell" data-icon-size="12" aria-hidden="true"></span><span>进展播报</span></button>
-          <button type="button" id="voiceKeyboardToggleBtn" class="btn-secondary btn-xs" title="显示或隐藏文字输入框" aria-label="切换文字输入"><span class="btn-icon-glyph" data-icon="keyboard" data-icon-size="13" aria-hidden="true"></span></button>
-          <button type="button" id="voiceCloseHangupBtn" class="icon-btn" data-close-modal="voiceCopilotModal" aria-label="关闭轻量助手"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
-        </div>
-      </div>
-
-      <div class="voice-call-body">
-        <div class="voice-call-stage">
-          <div class="voice-orb-wrap">
-            <button type="button" id="voiceOrbBtn" class="voice-orb" aria-label="语音控制球">
-              <span class="voice-orb-ring is-outer" aria-hidden="true"></span>
-              <span class="voice-orb-ring is-inner" aria-hidden="true"></span>
-              <span class="voice-orb-core" data-icon="mic" data-icon-size="28" aria-hidden="true"></span>
-            </button>
-          </div>
-          <div id="voiceStateText" class="voice-state-text">轻量对话就绪（全局视角）</div>
-          <div id="voiceSubHintText" class="voice-sub-hint">直接输入文字咨询、找项目或派发任务；需要免提时点击「开启语音」</div>
-          <div id="voiceUnheardBanner" class="voice-unheard-banner" hidden></div>
-          <div id="voiceCallTranscript" class="voice-call-transcript"></div>
-        </div>
-
-        <section id="voiceLiveProgressSection" class="voice-progress-section" aria-label="实时任务动态">
-          <div class="voice-progress-head">
-            <span class="voice-progress-heading"><span class="btn-icon-glyph" data-icon="radio" data-icon-size="13" aria-hidden="true"></span> <span id="voiceProgressHeadingText">实时任务动态</span></span>
-            <span id="voiceLiveSummaryBadge" class="voice-live-summary-badge">实时同步</span>
-          </div>
-          <div id="voiceLiveProgressList" class="voice-live-progress-list"></div>
-        </section>
-
-        <form id="voiceTextForm" class="voice-text-row">
-          <input
-            id="voiceTextInput"
-            type="text"
-            class="voice-text-input"
-            placeholder="输入问题或指令：找项目、查进展、派发任务…（也可开启语音）"
-          />
-          <button type="submit" id="voiceTextSubmitBtn" class="btn-primary btn-sm">发送</button>
-        </form>
-      </div>
-
-      <div class="voice-call-dock">
-        <button type="button" id="voiceMuteBtn" class="voice-dock-btn">
-          <span class="voice-dock-icon" data-icon="mic" data-icon-size="18" aria-hidden="true"></span>
-          <span id="voiceMuteLabel" class="voice-dock-label">开启语音</span>
-        </button>
-        <button type="button" id="voiceReadProgressBtn" class="voice-dock-btn is-read">
-          <span class="voice-dock-icon" data-icon="speaker" data-icon-size="18" aria-hidden="true"></span>
-          <span id="voiceReadLabel" class="voice-dock-label">总结进度</span>
-        </button>
-        <button type="button" id="voiceTalkBtn" class="voice-dock-btn is-primary">
-          <span class="voice-dock-icon" data-icon="bolt" data-icon-size="18" aria-hidden="true"></span>
-          <span id="voiceTalkBtnTitle" class="voice-dock-label">开启语音</span>
-        </button>
-        <button type="button" id="voiceHangupBtn" class="voice-dock-btn is-hangup" aria-label="关闭轻量助手">
-          <span class="voice-dock-icon" data-icon="offline" data-icon-size="18" aria-hidden="true"></span>
-          <span id="voiceHangupLabel" class="voice-dock-label">关闭</span>
-        </button>
       </div>
     </div>
   </dialog>

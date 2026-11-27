@@ -1235,12 +1235,6 @@ body.is-resizing-sidebar * {
   gap: 4px;
 }
 
-.topbar-icon-action.is-active-voice {
-  background: rgba(76, 141, 255, 0.24);
-  border-color: rgba(76, 141, 255, 0.72);
-  color: #cbe0ff;
-}
-
 .btn-attention-dot,
 .btn-state-dot {
   position: absolute;
@@ -6790,7 +6784,6 @@ select.ctrl-select.is-custom-enhanced {
 
   .prompt-input,
   .board-search-input,
-  .voice-text-input,
   .field input,
   .field select,
   .field textarea,
@@ -6967,8 +6960,7 @@ select.ctrl-select.is-custom-enhanced {
 .telemetry-provider-glyph,
 .cfg-chip-perm,
 .cfg-chip-goal,
-.cfg-chip-caret,
-.voice-dock-icon {
+.cfg-chip-caret {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -9672,53 +9664,6 @@ details.task-notif-card[open] .task-notif-chevron {
   background: rgba(15, 23, 42, 0.06);
 }
 
-.voice-scope-bar {
-  display: flex;
-  gap: 6px;
-  padding: 6px 14px 4px;
-  align-items: center;
-}
-
-.voice-scope-pill {
-  flex: 1 1 0;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-secondary, #9aa4bf);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-}
-
-.voice-scope-pill > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.voice-scope-pill:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-primary, #eef2ff);
-}
-
-.voice-scope-pill.is-active {
-  background: rgba(99, 102, 241, 0.22);
-  border-color: rgba(129, 140, 248, 0.48);
-  color: #e0e7ff;
-}
-
-.voice-scope-pill:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
 .locale-select-row {
   display: flex;
   align-items: center;
@@ -10033,23 +9978,6 @@ details.task-notif-card[open] .task-notif-chevron {
   background: rgba(37, 99, 235, 0.16);
   border-color: rgba(37, 99, 235, 0.55);
   color: #1e40af;
-}
-
-:root[data-theme="light"] .voice-scope-pill {
-  background: rgba(15, 23, 42, 0.04);
-  border-color: rgba(15, 23, 42, 0.12);
-  color: var(--text);
-}
-
-:root[data-theme="light"] .voice-scope-pill:hover:not(:disabled) {
-  background: rgba(15, 23, 42, 0.08);
-  color: var(--text);
-}
-
-:root[data-theme="light"] .voice-scope-pill.is-active {
-  background: rgba(37, 99, 235, 0.12);
-  border-color: rgba(37, 99, 235, 0.35);
-  color: var(--accent-strong);
 }
 
 :root[data-theme="light"] .locale-select {
@@ -10473,7 +10401,6 @@ details.task-notif-card[open] .task-notif-chevron {
 }
 
 :root[data-theme="light"] .batch-mode-toggle-btn.is-active,
-:root[data-theme="light"] .topbar-icon-action.is-active-voice,
 :root[data-theme="light"] .md-code-file:hover,
 :root[data-theme="light"] .md-body .md-checkbox.is-checked,
 :root[data-theme="light"] .md-body .md-alert-title,

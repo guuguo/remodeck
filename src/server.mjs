@@ -212,7 +212,6 @@ export async function createAgentControlServer({
     hub,
     env,
     dataDir,
-    onEvent: (eventName, payload) => broadcastSse(eventName, payload),
   });
 
   const overviewService = new MissionOverviewService({
@@ -226,7 +225,6 @@ export async function createAgentControlServer({
 
   const unsubscribeHub = hub.subscribe((eventName, payload) => {
     broadcastSse(eventName, payload);
-    void voiceService.handleHubEvent?.(eventName, payload);
     void overviewService.assistant?.handleHubEvent?.(eventName, payload);
   });
 
@@ -281,8 +279,6 @@ export async function createAgentControlServer({
       if (typeof updateServiceOptions?.canAutoUpdateIdle === "function") {
         return updateServiceOptions.canAutoUpdateIdle();
       }
-      const voiceStatus = voiceService.getCallDeliveryStatus?.({ callId: "" });
-      if (voiceStatus?.activeCount > 0) return false;
       const tel = await hub.getTelemetry().catch(() => null);
       if (Number(tel?.totals?.runningCount || 0) > 0) return false;
       return (hub.allQueuedTurns()?.length || 0) === 0;
@@ -1992,91 +1988,6 @@ export async function createAgentControlServer({
       if ((pathname === "/api/approval" || pathname === "/api/server-request") && request.method === "POST") {
         const body = await readJsonBody(request);
         const result = await hub.respondToRequest(body.requestId, body);
-        sendJson(response, 200, result, { requestId });
-        return;
-      }
-
-      if (pathname === "/api/voice/call/models" && request.method === "GET") {
-        const result = await voiceService.listVoiceModelOptions();
-        sendJson(response, 200, result, { requestId });
-        return;
-      }
-
-      if (pathname === "/api/voice/call/start" && request.method === "POST") {
-        const body = await readJsonBody(request);
-        const result = await voiceService.startCall({
-          callId: body.callId || "",
-          callScope: body.callScope || "",
-          activeThreadId: body.activeThreadId || "",
-          voiceProvider: body.voiceProvider || "",
-          voiceModel: body.voiceModel || "",
-          voiceProfileId: body.voiceProfileId || "",
-        });
-        sendJson(response, 200, result, { requestId });
-        return;
-      }
-
-      if (pathname === "/api/voice/call" && request.method === "POST") {
-        const body = await readJsonBody(request);
-        const mode = String(body.mode || "turn").trim();
-        const hasInput = Boolean(body.audioBase64 || String(body.transcriptText || "").trim() || mode === "briefing");
-        if (!hasInput) {
-          sendJson(response, 400, { error: { message: "未收到语音音频或文本指令" } }, { requestId });
-          return;
-        }
-        const result = await voiceService.handleTurn({
-          callId: body.callId || "",
-          callScope: body.callScope || "",
-          audioBase64: body.audioBase64 || "",
-          audioMimeType: body.audioMimeType || "audio/wav",
-          transcriptText: body.transcriptText || "",
-          activeThreadId: body.activeThreadId || "",
-          voiceProvider: body.voiceProvider || "",
-          voiceModel: body.voiceModel || "",
-          voiceProfileId: body.voiceProfileId || "",
-          mode,
-          autoExecute: body.autoExecute !== false,
-          asyncDispatch: Boolean(body.asyncDispatch),
-          tts: body.tts !== false,
-          overlapDurationMs: Number(body.overlapDurationMs) || 0,
-          overlapBotText: body.overlapBotText || "",
-        });
-        sendJson(response, 200, result, { requestId });
-        return;
-      }
-
-      if (pathname === "/api/voice/call/end" && request.method === "POST") {
-        const body = await readJsonBody(request);
-        const result = voiceService.endCall({ callId: body.callId || "" });
-        sendJson(response, 200, result, { requestId });
-        return;
-      }
-
-      if (pathname === "/api/voice/call/ack" && request.method === "POST") {
-        const body = await readJsonBody(request);
-        if (!String(body.callId || "").trim() && !String(body.utteranceId || "").trim()) {
-          sendJson(response, 400, { error: { message: "缺少通话 ID 或播报 ID" } }, { requestId });
-          return;
-        }
-        const result = voiceService.recordPlaybackFeedback({
-          callId: body.callId || "",
-          utteranceId: body.utteranceId || "",
-          status: body.status || "",
-          reason: body.reason || "",
-          provider: body.provider || "",
-          playedMs: Number(body.playedMs) || 0,
-          expectedMs: Number(body.expectedMs) || 0,
-          spokenText: body.spokenText || body.text || "",
-          source: body.source || "notice",
-          priority: body.priority || "normal",
-        });
-        sendJson(response, 200, result, { requestId });
-        return;
-      }
-
-      if (pathname === "/api/voice/call/status" && request.method === "GET") {
-        const callId = url.searchParams.get("callId") || "";
-        const result = voiceService.getCallDeliveryStatus({ callId });
         sendJson(response, 200, result, { requestId });
         return;
       }

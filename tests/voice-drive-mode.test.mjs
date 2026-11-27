@@ -7,9 +7,6 @@ import test from "node:test";
 import {
   VoiceCallService,
   buildVoiceAsrPrompt,
-  buildVoiceClarifyQuestion,
-  clampVoiceSpokenReply,
-  suggestVoiceTargetCandidates,
 } from "../src/voice-call-service.mjs";
 import { createVadTurnDetector, encodePcm16SamplesToWav } from "../public/voice-copilot.js";
 
@@ -121,32 +118,6 @@ test("ASR prompt carries project hotwords and stays within whisper's prompt budg
   assert.match(prompt, /Codex/);
   const many = buildVoiceAsrPrompt(Array.from({ length: 80 }, (_, i) => `project-${i}`));
   assert.ok(many.length <= 180, `prompt too long: ${many.length}`);
-});
-
-test("spoken replies are clamped to about two short sentences", () => {
-  const long = "已经派给示例商城后台了，它正在跑测试。目前有三个任务在运行，其中两个已经完成，还有一个等你确认。另外昨天的部署也结束了。";
-  const out = clampVoiceSpokenReply(long, { maxChars: 40 });
-  assert.equal(out, "已经派给示例商城后台了，它正在跑测试。");
-  assert.equal(clampVoiceSpokenReply("好的。"), "好的。");
-  const noPunct = clampVoiceSpokenReply("一".repeat(90), { maxChars: 60 });
-  assert.equal(noPunct.length, 60);
-  assert.ok(noPunct.endsWith("…"));
-});
-
-test("target candidates only auto-resolve on an exact model-chosen name", () => {
-  const snapshot = { projects: [
-    { cwd: "/dev/agent-control", name: "agent-control" },
-    { cwd: "/dev/fans-site", name: "fans-site", alias: "示例商城后台" },
-    { cwd: "/dev/blog", name: "blog" },
-  ] };
-  assert.equal(suggestVoiceTargetCandidates({ targetProjectCwd: "agent-control" }, snapshot).unique.cwd, "/dev/agent-control");
-  const spoken = suggestVoiceTargetCandidates({ heardText: "让示例商城后台跑测试" }, snapshot);
-  assert.equal(spoken.unique, null);
-  assert.equal(spoken.candidates[0].cwd, "/dev/fans-site");
-  assert.equal(buildVoiceClarifyQuestion(spoken.candidates), "是交给示例商城后台吗？");
-  const none = suggestVoiceTargetCandidates({ heardText: "跑一下" }, snapshot);
-  assert.equal(none.candidates.length, 3);
-  assert.equal(buildVoiceClarifyQuestion(none.candidates), "是agent-control、示例商城后台，还是blog？");
 });
 
 test("transcription sends project hotwords to the ASR worker", async (t) => {
