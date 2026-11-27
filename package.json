@@ -1,6 +1,6 @@
 {
   "name": "agent-control",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Self-hosted remote control console for local Codex, Claude Code, and Antigravity sessions.",
   "private": true,
   "license": "MIT",

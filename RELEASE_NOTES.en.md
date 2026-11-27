@@ -2,7 +2,7 @@
 
 > Plain-language English release notes for end users covering key additions, improvements, and fixes in each version. Keep this file in sync with `RELEASE_NOTES.md` whenever user-visible changes ship; the in-app "Version & Updates" modal loads it automatically for non-Chinese UI locales.
 
-## v0.2.7 (2026-11-26) — Sprite Upgrade: Real AI Assistant, Fullscreen Chat, and Live Voice Call
+## v0.2.7 (2026-11-27) — Sprite Upgrade: Real AI Assistant, Fullscreen Chat, and Live Voice Call
 
 Summary: The sprite is no longer limited to rigid progress templates—chat freely, brainstorm plans with full awareness of your park, tickets, and memories, open fullscreen from any screen, or switch to a live full-screen voice call that can execute approvals, continuations, and dispatches.
 

@@ -1,5 +1,15 @@
 # 更新日志 (CHANGELOG)
 
+## v0.2.7 (2026-11-27)
+
+UI 资源版本：`20261127a`
+
+- feat(assistant): real AI personal assistant, fullscreen chat, live voice call, butler sprite, pinned tickets, and server-side confirmation flow
+- feat(tasks,memory): tree-structured tasks, cross-session links, built-in shared memory vault, and skill sync
+- feat(desktop): cross-platform macOS/Windows/Linux launchers, unified RemoDeck branding, and legacy shortcut migration
+- feat(ui,dispatch): browser paste/drop file upload, Gemini 3.8 Flash smart-dispatch planner, and healthy-provider fallback
+- fix(providers,voice,check): Antigravity ACP hardening, shared NdjsonWorkerClient, AST syntax checks, and upload/relay limit alignment
+
 ## v0.2.6 (2026-11-25)
 
 UI 资源版本：`20261125a`

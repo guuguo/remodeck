@@ -87,7 +87,7 @@ import {
   resolveVisibleTelemetryKeys,
   sortProfilesByAvailability,
   summarizeTelemetryMobileBadge,
-} from "./instance-switcher.js?v=20261127remodeck1";
+} from "./instance-switcher.js?v=20261127a";
 import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity, summarizeToolUseActivity } from "./live-state.js?v=20261120claude";
 import {
   cleanStreamingAgentText,
@@ -105,7 +105,7 @@ import {
   renderMessageCopyButton,
   renderTurnHtml,
   turnEndsWithProcessGroup,
-} from "./markdown.js?v=20261127remodeck1";
+} from "./markdown.js?v=20261127a";
 import {
   SIDEBAR_MANUAL_HOLD_MS,
   THREAD_EXPAND_STEP,
@@ -130,8 +130,8 @@ import {
   normalizeDraftCwdInput,
   renderNewThreadCwdListHtml,
 } from "./new-thread-cwd.js?v=20261125cwd1";
-import { renderMissionOverviewHtml, renderTycoonHudHtml } from "./mission-overview.js?v=20261127remodeck1";
-import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261127remodeck1";
+import { renderMissionOverviewHtml, renderTycoonHudHtml } from "./mission-overview.js?v=20261127a";
+import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261127a";
 import {
   createInitialSpriteState,
   createSpriteController,
