@@ -1,0 +1,22 @@
+{
+  "name": "RemoteDeck",
+  "short_name": "RemoteDeck",
+  "description": "Self-hosted remote control console for local Codex, Claude Code, and Antigravity sessions.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0a0e16",
+  "theme_color": "#0d121a",
+  "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

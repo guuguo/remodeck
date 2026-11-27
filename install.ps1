@@ -220,9 +220,17 @@ try {
 
   $desktopDir = [Environment]::GetFolderPath("Desktop")
   if ($desktopDir -and (Test-Path -LiteralPath $desktopDir)) {
-    $shortcutPath = Join-Path $desktopDir "Agent Control.url"
-    $urlContent = "[InternetShortcut]`r`nURL=http://127.0.0.1:$Port/`r`n"
-    Set-Content -LiteralPath $shortcutPath -Value $urlContent -Encoding ASCII
+    $legacyUrl = Join-Path $desktopDir "Agent Control.url"
+    if (Test-Path -LiteralPath $legacyUrl) { Remove-Item -LiteralPath $legacyUrl -Force -ErrorAction SilentlyContinue }
+    $shortcutPath = Join-Path $desktopDir "RemoteDeck.url"
+    $iconCandidate = Join-Path $appDir "desktop\windows\remodeck.ico"
+    $urlLines = @("[InternetShortcut]", "URL=http://127.0.0.1:$Port/")
+    if (Test-Path -LiteralPath $iconCandidate) {
+      $urlLines += "IconFile=$iconCandidate"
+      $urlLines += "IconIndex=0"
+    }
+    $urlContent = ($urlLines -join "`r`n") + "`r`n"
+    Set-Content -LiteralPath $shortcutPath -Value $urlContent -Encoding Default
   }
 
   $healthy = $false
@@ -264,7 +272,7 @@ try {
   if ($relayNote) {
     Write-Host "  中继状态: $relayNote"
   }
-  Write-Host "  桌面快捷方式: $desktopDir\Agent Control.url"
+  Write-Host "  桌面快捷方式: $desktopDir\RemoteDeck.url"
   if ($healthy) {
     Write-Host "  服务状态: 运行中"
   }

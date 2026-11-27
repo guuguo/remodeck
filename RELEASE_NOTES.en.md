@@ -2,11 +2,16 @@
 
 > Plain-language English release notes for end users covering key additions, improvements, and fixes in each version. Keep this file in sync with `RELEASE_NOTES.md` whenever user-visible changes ship; the in-app "Version & Updates" modal loads it automatically for non-Chinese UI locales.
 
-## v0.2.7 (2026-11-25) — The Sprite Becomes Your Park Butler: Ask for Progress, Catch Stalled Work, Resume in One Tap
+## v0.2.7 (2026-11-26) — Sprite Upgrade: Real AI Assistant, Fullscreen Chat, and Live Voice Call
 
-Summary: The sprite in the 3D park is now a patrolling butler robot that answers "how far along is X", proactively flags work waiting on you, ready to harvest, or going stale, so you no longer have to dig through threads one by one.
+Summary: The sprite is no longer limited to rigid progress templates—chat freely, brainstorm plans with full awareness of your park, tickets, and memories, open fullscreen from any screen, or switch to a live full-screen voice call that can execute approvals, continuations, and dispatches.
 
 ### Added
+
+- **Tree-structured Tasks & Cross-Session Linking**: Keep multi-session work organized in parent/child task trees instead of flat threads—pin any reply as a planning anchor (`Pin plan`) for one-click jump-back, spawn sibling or subtask sessions while the original session keeps running (with lazy draft creation and same-directory sibling warnings), attach external sessions, and track append-only progress timelines.
+- **Built-in Shared Memory & `remodeck-memory` Skill**: Out-of-the-box shared memory and task CLI (`remodeck task`, `remodeck memory`, `remodeck skill`) with optional custom Obsidian vault path and one-click skill sync for Claude Code, Codex, and Antigravity.
+- **Fullscreen AI assistant**: Tap "Sprite" in the top bar from any page (or the expand icon in 3D) for a clean full-screen chat with Markdown replies, live model switching, and confirmation cards before write actions; pauses background 3D rendering to save battery.
+- **Full-screen live voice call**: Tap "Voice Call" for a glowing orb call screen with continuous listening, single-round-trip ASR + LLM + TTS, barge-in without clipping first words, mute/keyboard controls, call minimization without disconnecting, and a toggle between auto-run and ask-first for actions.
 
 - **Butler robot look**: A larger butler robot replaces the old sprite. Its face screen changes with its state (patrol, thinking, good news, worry, listening, and more), it patrols buildings that need attention, and tapping its speech bubble takes you straight there.
 - **Ask for progress in plain words**: Ask things like "how is the demo shop going" or "where is it stuck" in the sprite panel. It shows which threads, commits, and task cards it is checking, answers with where things stand first, then lists sources you can tap to open the thread or fly to the building. When a name is ambiguous it offers two candidates and remembers your pick.

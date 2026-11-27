@@ -132,7 +132,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
       backing: .buffered,
       defer: false
     )
-    window.title = "Agent Control"
+    window.title = "RemoteDeck"
     window.minSize = NSSize(width: 760, height: 520)
     window.backgroundColor = windowBgColor
     window.titlebarAppearsTransparent = true
@@ -206,7 +206,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     stack.spacing = 12
     stack.translatesAutoresizingMaskIntoConstraints = false
 
-    let titleLabel = NSTextField(labelWithString: "Agent Control")
+    let titleLabel = NSTextField(labelWithString: "RemoteDeck")
     titleLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
     titleLabel.textColor = NSColor(srgbRed: 232 / 255.0, green: 238 / 255.0, blue: 247 / 255.0, alpha: 1.0)
 
@@ -242,14 +242,14 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     mainMenu.addItem(appMenuItem)
     let appMenu = NSMenu()
     appMenuItem.submenu = appMenu
-    appMenu.addItem(withTitle: "关于 Agent Control", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+    appMenu.addItem(withTitle: "关于 RemoteDeck", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
     appMenu.addItem(.separator())
-    appMenu.addItem(withTitle: "隐藏 Agent Control", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+    appMenu.addItem(withTitle: "隐藏 RemoteDeck", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
     let hideOthers = appMenu.addItem(withTitle: "隐藏其他", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
     hideOthers.keyEquivalentModifierMask = [.command, .option]
     appMenu.addItem(withTitle: "显示全部", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
     appMenu.addItem(.separator())
-    appMenu.addItem(withTitle: "退出 Agent Control", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    appMenu.addItem(withTitle: "退出 RemoteDeck", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
     // Edit menu (required for Cmd+C / Cmd+V / Cmd+X / Cmd+A / Cmd+Z in WKWebView)
     let editMenuItem = NSMenuItem()
@@ -302,7 +302,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     isBootstrapping = true
     retryButton.isHidden = true
     statusOverlay.isHidden = false
-    statusLabel.stringValue = "正在检查 Agent Control 服务 (\(targetURL.absoluteString))…"
+    statusLabel.stringValue = "正在检查 RemoteDeck 服务 (\(targetURL.absoluteString))…"
 
     probeHealth { [weak self] healthy in
       guard let self else { return }
@@ -311,7 +311,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
         self.loadTargetURL()
         return
       }
-      self.statusLabel.stringValue = "正在自动拉起本地 Agent Control 服务…"
+      self.statusLabel.stringValue = "正在自动拉起本地 RemoteDeck 服务…"
       self.startLocalServiceIfNeeded()
       self.pollUntilHealthy(attemptsRemaining: 30)
     }
@@ -449,7 +449,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     hasLoadedApp = false
     statusOverlay.isHidden = false
     retryButton.isHidden = true
-    statusLabel.stringValue = "正在重启本地 Agent Control 服务…"
+    statusLabel.stringValue = "正在重启本地 RemoteDeck 服务…"
     DispatchQueue.global(qos: .userInitiated).async { [weak self, repoRoot] in
       guard let self else { return }
       let localScript = (repoRoot as NSString).appendingPathComponent("scripts/local-control.sh")
@@ -535,15 +535,15 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
 
   private func defaultChildWindowTitle(for url: URL) -> String {
     if isLocalPluginAppURL(url) {
-      return "Agent Control 插件"
+      return "RemoteDeck 插件"
     }
     if let projectCwd = URLComponents(url: url, resolvingAgainstBaseURL: false)?
       .queryItems?.first(where: { $0.name == "project" })?.value,
       !projectCwd.isEmpty {
       let leaf = URL(fileURLWithPath: projectCwd).lastPathComponent
-      return leaf.isEmpty ? "Agent Control" : "\(leaf) · Agent Control"
+      return leaf.isEmpty ? "RemoteDeck" : "\(leaf) · RemoteDeck"
     }
-    return "Agent Control"
+    return "RemoteDeck"
   }
 
   private func activeWebView() -> WKWebView {
@@ -803,7 +803,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     completionHandler: @escaping () -> Void
   ) {
     let alert = NSAlert()
-    alert.messageText = "Agent Control"
+    alert.messageText = "RemoteDeck"
     alert.informativeText = message
     alert.addButton(withTitle: "确定")
     alert.beginSheetModal(for: hostWindow(for: webView)) { _ in

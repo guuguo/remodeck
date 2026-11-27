@@ -5,7 +5,7 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>zh_CN</string>
   <key>CFBundleDisplayName</key>
-  <string>Agent Control</string>
+  <string>RemoteDeck</string>
   <key>CFBundleExecutable</key>
   <string>AgentControl</string>
   <key>CFBundleIconFile</key>
@@ -15,7 +15,7 @@
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Agent Control</string>
+  <string>RemoteDeck</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -31,7 +31,7 @@
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>用于在 Agent Control 控制台中使用语音对话与语音输入。</string>
+  <string>用于在 RemoteDeck 控制台中使用语音对话与语音输入。</string>
   <key>NSAppTransportSecurity</key>
   <dict>
     <key>NSAllowsLocalNetworking</key>

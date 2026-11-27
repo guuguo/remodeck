@@ -15,6 +15,7 @@ RELAY_LABEL="${AGENT_CONTROL_HOST_LABEL:-}"
 INSTALL_SERVICE="true"
 INSTALL_APP="true"
 OPEN_AFTER="true"
+INSTALL_SKILL="ask"
 
 usage() {
   cat <<'EOF'
@@ -34,6 +35,8 @@ RemoDeck (原 Agent Control) 一键安装脚本 (macOS / Linux)
   --no-service      仅拉取依赖，不注册开机后台服务
   --no-app          不安装原生桌面窗口与应用菜单入口
   --no-open         安装完成后不自动打开界面
+  --install-skill   安装后同步内置共享记忆与任务技能到 Claude/Codex/Antigravity
+  --no-skill        跳过同步内置技能提示
   -h, --help        显示帮助信息
 EOF
 }
@@ -74,6 +77,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-open)
       OPEN_AFTER="false"
+      shift
+      ;;
+    --install-skill)
+      INSTALL_SKILL="true"
+      shift
+      ;;
+    --no-skill)
+      INSTALL_SKILL="false"
       shift
       ;;
     -h|--help)
@@ -326,6 +337,9 @@ Agent Control 命令行工具
                          unpair              解除固定中继配对
                          stop                停止当前 Cloudflare 临时隧道
   update               从 GitHub 拉取最新版本并重启服务
+  task <子命令>        管理树状任务 (list / show / new / log / done)
+  memory <子命令>      读写共享记忆库 (brief / search / get / fact / decide / note)
+  skill <子命令>       同步内置记忆与任务技能 (status / install / uninstall)
   uninstall            卸载 Agent Control
 HELP
 }
@@ -489,6 +503,15 @@ case "\$cmd" in
   uninstall)
     exec bash "\$APP_DIR/uninstall.sh" "\$@"
     ;;
+  task)
+    PORT="\$PORT" "\$NODE_BIN" "\$APP_DIR/scripts/ac-task.mjs" "\$@"
+    ;;
+  memory)
+    "\$NODE_BIN" "\$APP_DIR/scripts/ac-memory.mjs" "\$@"
+    ;;
+  skill)
+    "\$NODE_BIN" "\$APP_DIR/scripts/ac-skill.mjs" "\$@"
+    ;;
   -h|--help|help)
     usage
     ;;
@@ -558,6 +581,22 @@ if [[ "$REMOTE_MODE" == "relay" && -n "$RELAY_URL" && -n "$RELAY_INVITE" && "$HE
   fi
 elif [[ "$REMOTE_MODE" == "relay" ]]; then
   RELAY_PAIR_NOTE="待配对（可在界面「手机远程 -> 自托管固定中继」或执行 agent-control remote relay 完成绑定）"
+fi
+
+if [[ "$INSTALL_SKILL" == "true" ]]; then
+  echo "正在同步内置共享记忆与任务技能到本机 Agent 客户端..."
+  "$NODE_BIN" "$APP_DIR/scripts/ac-skill.mjs" install || true
+elif [[ "$INSTALL_SKILL" == "ask" && -r /dev/tty && -w /dev/tty && "${AGENT_CONTROL_NONINTERACTIVE:-0}" != "1" ]]; then
+  printf "是否同步内置共享记忆与任务技能 (remodeck-memory) 到 Claude/Codex/Antigravity？[Y/n]: " > /dev/tty
+  IFS= read -r skill_choice < /dev/tty || skill_choice=""
+  case "${skill_choice:-Y}" in
+    n|N|no|NO)
+      echo "已跳过技能同步，稍后可在控制台「版本与更新 -> 设置」或执行 remodeck skill install 随时开启。"
+      ;;
+    *)
+      "$NODE_BIN" "$APP_DIR/scripts/ac-skill.mjs" install || true
+      ;;
+  esac
 fi
 
 echo ""

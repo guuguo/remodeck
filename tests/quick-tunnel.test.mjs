@@ -214,7 +214,7 @@ test("Quick Tunnel end-to-end: gateway auth, DNS-rebinding block, /health redact
   // 5. Authenticated tunnel access succeeds, but remote management & secrets stay blocked.
   const authedHome = await fetch(`${tunnelUrl}/`, { headers: { Cookie: cookieHeader } });
   assert.equal(authedHome.status, 200);
-  assert.match(await authedHome.text(), /Agent Control/);
+  assert.match(await authedHome.text(), /RemoteDeck/);
 
   const authedThreads = await fetch(`${tunnelUrl}/api/threads`, { headers: { Cookie: cookieHeader } });
   assert.equal(authedThreads.status, 200);
@@ -228,11 +228,17 @@ test("Quick Tunnel end-to-end: gateway auth, DNS-rebinding block, /health redact
   });
   assert.equal(sseRes.status, 200);
   const sseReader = sseRes.body.getReader();
-  const firstChunk = await sseReader.read();
-  const sseText = new TextDecoder().decode(firstChunk.value);
+  const sseDecoder = new TextDecoder();
+  let sseText = "";
+  let readyMatch = null;
+  while (!(readyMatch = sseText.match(/event: ready\r?\ndata: ([^\r\n]+)\r?\n\r?\n/))) {
+    const chunk = await sseReader.read();
+    if (chunk.done) break;
+    sseText += sseDecoder.decode(chunk.value, { stream: true });
+  }
   assert.match(sseText, /event: ready/);
-  const dataLine = sseText.split("\n").find((line) => line.startsWith("data:")) || "";
-  const readyPayload = JSON.parse(dataLine.slice(5).trim());
+  assert.ok(readyMatch, "expected complete SSE ready event frame");
+  const readyPayload = JSON.parse(readyMatch[1].trim());
   assert.equal(readyPayload.tunnel.pairUrl, "");
   assert.equal(readyPayload.remote.pairUrl, "");
   sseAbort.abort();

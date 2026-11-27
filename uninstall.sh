@@ -41,6 +41,9 @@ done
 OS_NAME="$(uname -s)"
 
 echo "[1/3] 正在停止并移除后台服务..."
+if [[ -f "$INSTALL_DIR/scripts/ac-skill.mjs" ]] && command -v node >/dev/null 2>&1; then
+  node "$INSTALL_DIR/scripts/ac-skill.mjs" uninstall >/dev/null 2>&1 || true
+fi
 if [[ -f "$INSTALL_DIR/scripts/service.mjs" ]] && command -v node >/dev/null 2>&1; then
   node "$INSTALL_DIR/scripts/service.mjs" uninstall || true
 elif [[ "$OS_NAME" == "Darwin" ]]; then

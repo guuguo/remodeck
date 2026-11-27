@@ -27,8 +27,11 @@ export const DESKTOP_SOURCE_FILES = [
   "desktop/macos/build-app.sh",
   "desktop/macos/render-icon.swift",
   "desktop/linux/agent-control.py",
+  "desktop/linux/agent-control.svg",
   "desktop/linux/install-app.sh",
   "desktop/windows/install-app.ps1",
+  "desktop/windows/RemoteDeckLauncher.cs",
+  "desktop/windows/remodeck.ico",
 ];
 export const DEFAULT_CHECK_INTERVAL_HOURS = 6;
 const MIN_CHECK_INTERVAL_HOURS = 1;
@@ -564,7 +567,7 @@ export async function computeDesktopSourceHash(rootDir = DEFAULT_APP_ROOT, packa
   for (const rel of sorted) {
     hash.update(`-- ${rel} --\n`);
     try {
-      const content = await readFile(resolve(rootDir, rel), "utf8");
+      const content = await readFile(resolve(rootDir, rel));
       hash.update(content);
     } catch {
       // Missing source file contributes empty body while preserving deterministic hash.
@@ -596,7 +599,7 @@ export async function readInstalledDesktopAppInfo({
   const normPlatform = normalizePlatform(platform);
 
   if (normPlatform === "linux") {
-    const homeDir = resolveUserHome({ env, platform: normPlatform });
+    const homeDir = resolveUserHome(env, normPlatform);
     const xdgData = env?.XDG_DATA_HOME ? resolve(env.XDG_DATA_HOME) : resolve(homeDir, ".local", "share");
     const metaDir = resolve(installDir || env?.AGENT_CONTROL_APP_INSTALL_DIR || resolve(xdgData, "agent-control"));
     const metaPath = resolve(metaDir, "desktop-meta.json");
@@ -607,12 +610,13 @@ export async function readInstalledDesktopAppInfo({
     let meta = null;
     if (existsSync(metaPath)) {
       try {
-        meta = JSON.parse(await readFile(metaPath, "utf8"));
+        meta = JSON.parse((await readFile(metaPath, "utf8")).replace(/^\uFEFF/, ""));
       } catch {
         meta = null;
       }
     }
     const appPath = String(meta?.appPath || desktopFile);
+    const launcherPath = String(meta?.launcherPath || "").trim();
     const installed = Boolean(meta || existsSync(desktopFile));
     if (!installed) {
       return {
@@ -654,6 +658,7 @@ export async function readInstalledDesktopAppInfo({
       supported: true,
       installed: true,
       appPath,
+      launcherPath,
       installedVersion,
       installedBuildNumber: "",
       installedHash,
@@ -668,29 +673,34 @@ export async function readInstalledDesktopAppInfo({
   }
 
   if (normPlatform === "win32") {
-    const homeDir = resolveUserHome({ env, platform: normPlatform });
+    const homeDir = resolveUserHome(env, normPlatform);
     const localBase = resolve(
       installDir
         || env?.AGENT_CONTROL_APP_INSTALL_DIR
         || (env?.LOCALAPPDATA ? resolve(env.LOCALAPPDATA, "AgentControl") : resolve(homeDir, "AppData", "Local", "AgentControl")),
     );
     const metaPath = resolve(localBase, "desktop-meta.json");
-    const startMenuShortcut = env?.APPDATA
-      ? resolve(env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs", "Agent Control.lnk")
-      : resolve(homeDir, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Agent Control.lnk");
+    const startMenuDir = env?.APPDATA
+      ? resolve(env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs")
+      : resolve(homeDir, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs");
+    const startMenuShortcut = resolve(startMenuDir, "RemoteDeck.lnk");
+    const legacyStartMenuShortcut = resolve(startMenuDir, "Agent Control.lnk");
     const expectedHash = await computeDesktopSourceHash(rootDir, expectedVersion);
     const hasInstallScript = existsSync(resolve(rootDir, "desktop", "windows", "install-app.ps1"));
     const canBuild = hasInstallScript;
     let meta = null;
     if (existsSync(metaPath)) {
       try {
-        meta = JSON.parse(await readFile(metaPath, "utf8"));
+        meta = JSON.parse((await readFile(metaPath, "utf8")).replace(/^\uFEFF/, ""));
       } catch {
         meta = null;
       }
     }
-    const appPath = String(meta?.appPath || startMenuShortcut);
-    const installed = Boolean(meta || existsSync(startMenuShortcut));
+    const appPath = String(
+      meta?.appPath
+      || (existsSync(startMenuShortcut) ? startMenuShortcut : (existsSync(legacyStartMenuShortcut) ? legacyStartMenuShortcut : startMenuShortcut)),
+    );
+    const installed = Boolean(meta || existsSync(startMenuShortcut) || existsSync(legacyStartMenuShortcut));
     if (!installed) {
       return {
         supported: true,
@@ -711,6 +721,13 @@ export async function readInstalledDesktopAppInfo({
     const installedVersion = String(meta?.version || "").trim();
     const installedHash = String(meta?.buildHash || "").trim();
     const repoRoot = String(meta?.repoRoot || "").trim();
+    const desktopPath = String(meta?.desktopPath || "").trim();
+    const startMenuPath = String(meta?.startMenuPath || (existsSync(startMenuShortcut) ? startMenuShortcut : "")).trim();
+    const iconPath = String(meta?.iconPath || "").trim();
+    const launcherExePath = String(meta?.launcherExePath || "").trim();
+    const launcherPath = String(meta?.launcherPath || "").trim();
+    const browserPath = String(meta?.browserPath || "").trim();
+    const browserArgs = Array.isArray(meta?.browserArgs) ? meta.browserArgs.map((arg) => String(arg)) : [];
     const repoRootMismatch = Boolean(repoRoot && resolve(repoRoot) !== resolve(rootDir));
     let reason = "";
     let needsUpdate = false;
@@ -731,6 +748,13 @@ export async function readInstalledDesktopAppInfo({
       supported: true,
       installed: true,
       appPath,
+      desktopPath,
+      startMenuPath,
+      iconPath,
+      launcherExePath,
+      launcherPath,
+      browserPath,
+      browserArgs,
       installedVersion,
       installedBuildNumber: "",
       installedHash,
@@ -832,6 +856,74 @@ export async function readInstalledDesktopAppInfo({
     canBuild,
     reason,
   };
+}
+
+export function resolveDesktopLaunchSpec({
+  platform = process.platform,
+  desktopApp = null,
+  appPath = "",
+  reason = "manual",
+  existsSyncImpl = existsSync,
+} = {}) {
+  const norm = normalizePlatform(platform);
+  if (norm === "win32") {
+    if (reason !== "manual") return null;
+    const lnkCandidates = [appPath, desktopApp?.appPath, desktopApp?.startMenuPath, desktopApp?.desktopPath]
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+    const seen = new Set();
+    for (const candidate of lnkCandidates) {
+      if (seen.has(candidate)) continue;
+      seen.add(candidate);
+      if (/\.lnk$/i.test(candidate) && existsSyncImpl(candidate)) {
+        return {
+          command: "explorer.exe",
+          args: [candidate],
+          windowsHide: true,
+        };
+      }
+    }
+    const launcherExePath = String(desktopApp?.launcherExePath || "").trim();
+    if (launcherExePath && existsSyncImpl(launcherExePath)) {
+      return {
+        command: launcherExePath,
+        args: [],
+        windowsHide: false,
+      };
+    }
+    const browserPath = String(desktopApp?.browserPath || "").trim();
+    if (browserPath && existsSyncImpl(browserPath)) {
+      return {
+        command: browserPath,
+        args: Array.isArray(desktopApp?.browserArgs) ? desktopApp.browserArgs.map((arg) => String(arg)) : [],
+        windowsHide: false,
+      };
+    }
+    const launcherPath = String(desktopApp?.launcherPath || "").trim();
+    if (launcherPath && existsSyncImpl(launcherPath)) {
+      return {
+        command: "cmd.exe",
+        args: ["/d", "/c", "start", "", launcherPath],
+        windowsHide: true,
+      };
+    }
+    return null;
+  }
+
+  if (norm === "linux") {
+    if (reason !== "manual") return null;
+    const launcherPath = String(desktopApp?.launcherPath || "").trim();
+    if (launcherPath && existsSyncImpl(launcherPath)) {
+      return {
+        command: launcherPath,
+        args: [],
+        windowsHide: false,
+      };
+    }
+    return null;
+  }
+
+  return null;
 }
 
 async function readLocalMeta(rootDir, platform, { desktopInstallDir = "", env = process.env } = {}) {
@@ -1579,12 +1671,15 @@ export class UpdateService {
     }
     if (normPlatform === "win32") {
       const psScript = resolve(this.#rootDir, "desktop", "windows", "install-app.ps1");
+      const port = String(this.#env?.PORT || "43310").trim() || "43310";
       const psArgs = [
         "-NoProfile",
         "-ExecutionPolicy",
         "Bypass",
         "-File",
         psScript,
+        "-Port",
+        port,
         "-AppVersion",
         expectedVersion,
         "-BuildHash",
@@ -1611,8 +1706,35 @@ export class UpdateService {
     return execFileAsync(prepared.command, prepared.args, prepared.options);
   }
 
-  async #defaultRelaunchDesktopApp({ appPath = "" } = {}) {
-    if (normalizePlatform(this.#platform) !== "darwin" || !appPath || !existsSync(appPath)) {
+  async #defaultRelaunchDesktopApp({ appPath = "", desktopApp = null, reason = "manual" } = {}) {
+    const norm = normalizePlatform(this.#platform);
+    if (norm === "win32" || norm === "linux") {
+      const launchSpec = resolveDesktopLaunchSpec({
+        platform: norm,
+        desktopApp,
+        appPath,
+        reason,
+      });
+      if (!launchSpec) {
+        return { relaunched: false, reason: reason === "manual" ? "launcher_not_found" : "auto_sync_skipped" };
+      }
+      try {
+        const prepared = prepareCrossPlatformSpawn(launchSpec.command, launchSpec.args, {
+          cwd: this.#rootDir,
+          env: this.#env,
+          detached: true,
+          stdio: "ignore",
+          windowsHide: launchSpec.windowsHide,
+        }, { platform: this.#platform });
+        const child = spawn(prepared.command, prepared.args, prepared.options);
+        child.unref?.();
+        return { relaunched: true };
+      } catch {
+        return { relaunched: false };
+      }
+    }
+
+    if (norm !== "darwin" || !appPath || !existsSync(appPath)) {
       return { relaunched: false };
     }
     try {
@@ -1623,21 +1745,23 @@ export class UpdateService {
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter((line) => /^\d+$/.test(line));
-      if (!pids.length) {
+      if (!pids.length && reason !== "manual") {
         return { relaunched: false, reason: "not_running" };
       }
-      await execFileAsync("osascript", ["-e", 'tell application id "com.guuguo.agent-control.desktop" to quit'], {
-        timeout: 4_000,
-      }).catch(() => {});
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
-      const stillRunning = await execFileAsync("pgrep", ["-f", "Agent Control.app/Contents/MacOS/AgentControl"], {
-        timeout: 3_000,
-      }).catch(() => null);
-      if (String(stillRunning?.stdout || "").trim()) {
-        await execFileAsync("pkill", ["-f", "Agent Control.app/Contents/MacOS/AgentControl"], {
-          timeout: 3_000,
+      if (pids.length) {
+        await execFileAsync("osascript", ["-e", 'tell application id "com.guuguo.agent-control.desktop" to quit'], {
+          timeout: 4_000,
         }).catch(() => {});
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, 300));
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
+        const stillRunning = await execFileAsync("pgrep", ["-f", "Agent Control.app/Contents/MacOS/AgentControl"], {
+          timeout: 3_000,
+        }).catch(() => null);
+        if (String(stillRunning?.stdout || "").trim()) {
+          await execFileAsync("pkill", ["-f", "Agent Control.app/Contents/MacOS/AgentControl"], {
+            timeout: 3_000,
+          }).catch(() => {});
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 300));
+        }
       }
       const prepared = prepareCrossPlatformSpawn("open", ["-a", appPath], {
         cwd: this.#rootDir,
@@ -1654,9 +1778,12 @@ export class UpdateService {
   }
 
   async #runDesktopBuildAndInstall({ reason = "manual", relaunchIfRunning = true } = {}) {
+    const normPlatform = normalizePlatform(this.#platform);
     this.#desktopUpdating = true;
     this.#desktopPhase = "building";
-    this.#desktopMessage = "正在编译并安装最新 macOS 桌面 App…";
+    this.#desktopMessage = normPlatform === "win32"
+      ? "正在构建并安装最新 Windows 桌面 App…"
+      : (normPlatform === "linux" ? "正在安装最新 Linux 桌面 App…" : "正在编译并安装最新 macOS 桌面 App…");
     this.#emitStatus();
 
     try {
@@ -1668,13 +1795,27 @@ export class UpdateService {
       await this.#inspectRepo();
       this.#desktopRebuildSuggested = false;
       this.#desktopPhase = "done";
-      this.#desktopMessage = `桌面 App 已更新至 v${this.#repoInfo.desktopApp?.installedVersion || this.#repoInfo.packageVersion}`;
+      const installedVer = this.#repoInfo.desktopApp?.installedVersion || this.#repoInfo.packageVersion;
+      if (normPlatform === "win32") {
+        if (reason === "manual") {
+          this.#desktopMessage = relaunchIfRunning
+            ? `桌面 App 已更新至 v${installedVer}，已创建桌面与开始菜单快捷方式并正在打开`
+            : `桌面 App 已更新至 v${installedVer}，已创建桌面与开始菜单快捷方式（未自动打开）`;
+        } else {
+          this.#desktopMessage = `桌面 App 已更新至 v${installedVer}，已同步桌面与开始菜单快捷方式`;
+        }
+      } else {
+        this.#desktopMessage = reason === "manual" && !relaunchIfRunning
+          ? `桌面 App 已更新至 v${installedVer}（未自动打开）`
+          : `桌面 App 已更新至 v${installedVer}`;
+      }
       this.#emitStatus();
 
       if (relaunchIfRunning) {
         const timer = setTimeout(() => {
           void Promise.resolve(this.#relaunchDesktopApp({
             appPath: this.#repoInfo.desktopApp?.appPath,
+            desktopApp: this.#repoInfo.desktopApp,
             reason,
           })).catch(() => {});
         }, Math.min(400, this.#restartDelayMs || 350));
@@ -1698,7 +1839,7 @@ export class UpdateService {
     }
   }
 
-  async applyDesktopUpdate({ reason = "manual", relaunchIfRunning = true } = {}) {
+  async applyDesktopUpdate({ reason = "manual", relaunchIfRunning = true, openAfterBuild } = {}) {
     if (this.#updating || this.#desktopUpdating) {
       throw Object.assign(new Error("正在执行更新，请稍候完成"), { status: 409 });
     }
@@ -1716,7 +1857,8 @@ export class UpdateService {
         status: 400,
       });
     }
-    const res = await this.#runDesktopBuildAndInstall({ reason, relaunchIfRunning });
+    const shouldOpen = typeof openAfterBuild === "boolean" ? openAfterBuild : Boolean(relaunchIfRunning);
+    const res = await this.#runDesktopBuildAndInstall({ reason, relaunchIfRunning: shouldOpen });
     return {
       ...res,
       status: this.statusSnapshot(),
@@ -1793,10 +1935,14 @@ export class UpdateService {
       await this.#readRemoteComparison().catch(() => {});
 
       const toSha = this.#repoInfo.localSha;
+      const normPlatform = normalizePlatform(this.#platform);
+      const desktopDirPrefix = normPlatform === "win32"
+        ? "desktop/windows/"
+        : (normPlatform === "linux" ? "desktop/linux/" : "desktop/macos/");
       let desktopChanged = false;
       if (fromSha && toSha && fromSha !== toSha && this.#repoInfo.hasDesktopApp) {
         const diffRes = await this.#git(["diff", "--name-only", fromSha, toSha], { timeoutMs: 5_000 }).catch(() => ({ stdout: "" }));
-        desktopChanged = diffRes.stdout.split(/\r?\n/).some((line) => line.startsWith("desktop/macos/"));
+        desktopChanged = diffRes.stdout.split(/\r?\n/).some((line) => line.startsWith(desktopDirPrefix));
       }
 
       let desktopRebuilt = false;
