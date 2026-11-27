@@ -30,7 +30,7 @@ export const DESKTOP_SOURCE_FILES = [
   "desktop/linux/agent-control.svg",
   "desktop/linux/install-app.sh",
   "desktop/windows/install-app.ps1",
-  "desktop/windows/RemoteDeckLauncher.cs",
+  "desktop/windows/RemoDeckLauncher.cs",
   "desktop/windows/remodeck.ico",
 ];
 export const DEFAULT_CHECK_INTERVAL_HOURS = 6;
@@ -683,8 +683,11 @@ export async function readInstalledDesktopAppInfo({
     const startMenuDir = env?.APPDATA
       ? resolve(env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs")
       : resolve(homeDir, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs");
-    const startMenuShortcut = resolve(startMenuDir, "RemoteDeck.lnk");
-    const legacyStartMenuShortcut = resolve(startMenuDir, "Agent Control.lnk");
+    const startMenuShortcut = resolve(startMenuDir, "RemoDeck.lnk");
+    const legacyStartMenuShortcuts = [
+      resolve(startMenuDir, "RemoteDeck.lnk"),
+      resolve(startMenuDir, "Agent Control.lnk"),
+    ];
     const expectedHash = await computeDesktopSourceHash(rootDir, expectedVersion);
     const hasInstallScript = existsSync(resolve(rootDir, "desktop", "windows", "install-app.ps1"));
     const canBuild = hasInstallScript;
@@ -696,11 +699,12 @@ export async function readInstalledDesktopAppInfo({
         meta = null;
       }
     }
+    const existingLegacyShortcut = legacyStartMenuShortcuts.find((candidate) => existsSync(candidate)) || "";
     const appPath = String(
       meta?.appPath
-      || (existsSync(startMenuShortcut) ? startMenuShortcut : (existsSync(legacyStartMenuShortcut) ? legacyStartMenuShortcut : startMenuShortcut)),
+      || (existsSync(startMenuShortcut) ? startMenuShortcut : (existingLegacyShortcut || startMenuShortcut)),
     );
-    const installed = Boolean(meta || existsSync(startMenuShortcut) || existsSync(legacyStartMenuShortcut));
+    const installed = Boolean(meta || existsSync(startMenuShortcut) || existingLegacyShortcut);
     if (!installed) {
       return {
         supported: true,

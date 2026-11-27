@@ -125,9 +125,9 @@ test("粘贴图片时同步清理剪贴板附带的本地路径与裸文件名�
   const appSource = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   const pasteIdx = appSource.indexOf('$("promptInput").addEventListener("paste"');
   assert.ok(pasteIdx >= 0);
-  const pasteBlock = appSource.slice(pasteIdx, pasteIdx + 1200);
+  const pasteBlock = appSource.slice(pasteIdx, pasteIdx + 1400);
   assert.match(pasteBlock, /cleanClipboardTextForPastedImages\(/);
-  assert.match(pasteBlock, /if\s*\(!cleanedText\s*\|\|\s*cleanedText\s*!==\s*plainText\)\s*\{\s*e\.preventDefault\(\);/);
+  assert.match(pasteBlock, /if\s*\(!cleanedText\s*\|\|\s*cleanedText\s*!==\s*plainText\b[^)]*\)\s*\{\s*e\.preventDefault\(\);/);
 });
 
 test("自动预览观察可见附件卡，隐藏的图片节点不会阻断加载", async () => {

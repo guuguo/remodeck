@@ -6204,3 +6204,60 @@ test("sidebar, project board, and task strip highlight failed threads with red e
   assert.match(stripHtml, /strip-status-dot[^"]*is-error/);
   assert.match(stripHtml, /thread-error-pill"[^>]*>报错<\/span>/);
 });
+
+test("partitionDataTransferFiles and filterFilesNeedingUpload handle browser-pasted files without local paths", async () => {
+  const {
+    partitionDataTransferFiles,
+    filterFilesNeedingUpload,
+    stripCoveredFileNamesFromText,
+  } = await import("../public/image-attachment.js");
+  const { formatPastedFileMarkdownLink } = await import("../public/markdown.js");
+
+  const imgFile = { name: "shot.png", type: "image/png", size: 1200 };
+  const pdfFile = { name: "report.pdf", type: "application/pdf", size: 4096 };
+  const localNotes = { name: "notes.md", type: "text/markdown", path: "/Users/alice/notes.md", size: 512 };
+
+  const partitioned = partitionDataTransferFiles({
+    items: [
+      { kind: "string", type: "text/plain", getAsFile: () => null },
+      { kind: "file", type: "image/png", getAsFile: () => imgFile, webkitGetAsEntry: () => ({ isDirectory: false }) },
+      { kind: "file", type: "application/pdf", getAsFile: () => pdfFile, webkitGetAsEntry: () => ({ isDirectory: false }) },
+      { kind: "file", type: "", getAsFile: () => ({ name: "folder", size: 0 }), webkitGetAsEntry: () => ({ isDirectory: true }) },
+    ],
+  });
+  assert.deepEqual(partitioned.imageFiles, [imgFile]);
+  assert.deepEqual(partitioned.nonImageFiles, [pdfFile]);
+  assert.equal(partitioned.hasDirectory, true);
+
+  assert.deepEqual(
+    filterFilesNeedingUpload({ nonImageFiles: [pdfFile, localNotes], uriList: "" }),
+    [pdfFile],
+  );
+  assert.deepEqual(
+    filterFilesNeedingUpload({
+      nonImageFiles: [pdfFile],
+      uriList: "file:///Users/alice/Documents/report.pdf\n",
+    }),
+    [],
+  );
+  assert.deepEqual(
+    filterFilesNeedingUpload({
+      nonImageFiles: [pdfFile],
+      plainText: "/Users/alice/Documents/report.pdf",
+      linkText: "[report.pdf](file:///Users/alice/Documents/report.pdf)",
+    }),
+    [],
+  );
+  assert.equal(
+    stripCoveredFileNamesFromText("请看说明\nreport.pdf", [pdfFile]),
+    "请看说明",
+  );
+  assert.equal(
+    formatPastedFileMarkdownLink("/root/.local/share/agent-control/uploads/1/a.pdf", { trustedLocalPath: true }),
+    "[a.pdf](file:///root/.local/share/agent-control/uploads/1/a.pdf)",
+  );
+  assert.equal(
+    formatPastedFileMarkdownLink("/Users/alice/issue#42.md"),
+    "[issue#42.md](file:///Users/alice/issue%2342.md)",
+  );
+});

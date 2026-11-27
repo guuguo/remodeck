@@ -36,7 +36,7 @@ for char in ('\\', '"', '`', '$'):
     executable = executable.replace(char, "\\" + char)
 executable = executable.replace('\\', '\\\\')
 desktop = applications / "com.guuguo.AgentControl.desktop"
-desktop.write_text('[Desktop Entry]\nType=Application\nName=RemoteDeck\nGenericName=AI Agent Console\nComment=本机与远程多智能体控制台\nKeywords=RemoteDeck;RemoDeck;Agent Control;Codex;Claude;Antigravity;\nExec="' + executable + '"\nIcon=agent-control\nTerminal=false\nCategories=Development;Utility;\nStartupWMClass=com.guuguo.AgentControl\n')
+desktop.write_text('[Desktop Entry]\nType=Application\nName=RemoDeck\nGenericName=AI Agent Console\nComment=本机与远程多智能体控制台\nKeywords=RemoDeck;Agent Control;Codex;Claude;Antigravity;\nExec="' + executable + '"\nIcon=agent-control\nTerminal=false\nCategories=Development;Utility;\nStartupWMClass=com.guuguo.AgentControl\n')
 desktop.chmod(0o755)
 import json
 meta_dir = Path(os.environ.get("AGENT_CONTROL_APP_INSTALL_DIR") or (data / "agent-control"))
@@ -51,7 +51,7 @@ meta_path.write_text(json.dumps({
     "platform": "linux",
 }, ensure_ascii=False, indent=2) + "\n")
 print("已安装桌面入口：" + str(desktop))
-print("启动：agent-control open（或在应用菜单搜索 RemoteDeck）")
+print("启动：agent-control open（或在应用菜单搜索 RemoDeck）")
 PY
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "${XDG_DATA_HOME:-$HOME/.local/share}/applications" || true

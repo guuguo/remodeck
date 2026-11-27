@@ -1874,7 +1874,7 @@ export function renderProfilePillsHtml(profiles = [], {
               data-login-profile="${escapeAttrHtml(p.id)}"
               data-login-provider="${escapeAttrHtml(p.provider || "")}"
               data-login-mode="${p.provider === "codex" ? "oauth" : "terminal"}"
-              title="登录此独立实例并交给 RemoteDeck 后台控制"
+              title="登录此独立实例并交给 RemoDeck 后台控制"
             >去登录</button>
           ` : ""}
           ${copyLoginCmd ? `
@@ -1945,7 +1945,7 @@ export function renderInstanceManagerListHtml(profiles = [], {
           data-login-profile="${escapeAttrHtml(p.id)}"
           data-login-provider="codex"
           data-login-mode="oauth"
-          title="拉起独立浏览器 OAuth 登录，完成后自动由 RemoteDeck 接管"
+          title="拉起独立浏览器 OAuth 登录，完成后自动由 RemoDeck 接管"
         >${p.needsLogin ? "浏览器登录" : "换绑账号"}</button>
         <button
           type="button"

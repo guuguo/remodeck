@@ -12,6 +12,7 @@ Summary: The sprite is no longer limited to rigid progress templates—chat free
 - **Built-in Shared Memory & `remodeck-memory` Skill**: Out-of-the-box shared memory and task CLI (`remodeck task`, `remodeck memory`, `remodeck skill`) with optional custom Obsidian vault path and one-click skill sync for Claude Code, Codex, and Antigravity.
 - **Fullscreen AI assistant**: Tap "Sprite" in the top bar from any page (or the expand icon in 3D) for a clean full-screen chat with Markdown replies, live model switching, and confirmation cards before write actions; pauses background 3D rendering to save battery.
 - **Full-screen live voice call**: Tap "Voice Call" for a glowing orb call screen with continuous listening, single-round-trip ASR + LLM + TTS, barge-in without clipping first words, mute/keyboard controls, call minimization without disconnecting, and a toggle between auto-run and ask-first for actions.
+- **Browser paste & drop upload for any file**: Pasting or dropping non-image files (PDFs, docs, code) in the composer automatically uploads them locally and inserts clickable file links.
 
 - **Butler robot look**: A larger butler robot replaces the old sprite. Its face screen changes with its state (patrol, thinking, good news, worry, listening, and more), it patrols buildings that need attention, and tapping its speech bubble takes you straight there.
 - **Ask for progress in plain words**: Ask things like "how is the demo shop going" or "where is it stuck" in the sprite panel. It shows which threads, commits, and task cards it is checking, answers with where things stand first, then lists sources you can tap to open the thread or fly to the building. When a name is ambiguous it offers two candidates and remembers your pick.
@@ -24,6 +25,8 @@ Summary: The sprite is no longer limited to rigid progress templates—chat free
 
 ### Improved
 
+- **Unified RemoDeck branding**: Web UI, relay pages, and macOS / Windows / Linux desktop shells now consistently display **RemoDeck** and clean up legacy shortcuts during install/upgrade.
+- **Faster smart-dispatch planning & tier routing**: Smart dispatch defaults to lightweight planning with automatic fallback across healthy providers, and keeps metrics/collection jobs on fast models.
 - **Confirm-before-dispatch**: When you say "dispatch …", the sprite first restates who will do what on which line and only sends after you confirm; ordinary questions are no longer mistaken for dispatches.
 - **Harvest is judged by a model**: After each round in a thread, the sprite asks a model (through the Gemini / Codex / Claude CLIs you are already signed in to) whether the work was delivered and actually verified. Gold "harvest" lights up only with hard evidence, and the card shows that evidence; claims without proof stay dark. Stage-based guesses still show "likely harvest", and the old wording rules are the fallback when no model is available.
 - **Follow-ups keep their context**: When you follow up with "what about it" or "then what", the sprite passes the previous few turns to the model so it understands what you mean. The old "car mode" is now hands-free mode: the sprite panel header has a visible "Hands-free" button that listens, speaks replies, and lets you interrupt by talking.

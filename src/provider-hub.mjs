@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { open, realpath, stat } from "node:fs/promises";
+import { mkdir, open, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { MemoryVault, defaultVaultPath, formatMemoryBriefForPrompt, resolveVaultPath } from "./memory-vault.mjs";
 import { TaskStore } from "./task-store.mjs";
 import os from "node:os";
@@ -63,6 +64,82 @@ import { QuotaService } from "./quota-service.mjs";
 import { AgentTelemetryService } from "./telemetry-service.mjs";
 import { isRecoverableToolExecutionError } from "./tool-errors.mjs";
 import { isInternalAssistantThread } from "./assistant-signals.mjs";
+
+function sanitizeUploadedFilename(rawName = "") {
+  const baseOnly = String(rawName || "").trim().split(/[\\/]/).pop() || "";
+  const sanitized = baseOnly
+    .replace(/[\x00-\x1f\x7f<>:"/\\|?*#%]/g, "_")
+    .replace(/^\.+/, (dots) => dots.replace(/\./g, "_"))
+    .trim()
+    .replace(/[.\s]+$/g, "");
+  let ext = extname(sanitized);
+  let stem = ext ? sanitized.slice(0, -ext.length) : sanitized;
+  if (Buffer.byteLength(ext, "utf8") > 24) {
+    stem = sanitized;
+    ext = "";
+  }
+  let safeStem = stem.replace(/[.\s]+$/g, "").trim() || "pasted-file";
+  if (/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(safeStem)) {
+    safeStem = `_${safeStem}`;
+  }
+  const maxStemBytes = Math.max(16, 180 - Buffer.byteLength(ext, "utf8"));
+  if (Buffer.byteLength(safeStem, "utf8") > maxStemBytes) {
+    let acc = "";
+    let bytes = 0;
+    for (const ch of safeStem) {
+      const chBytes = Buffer.byteLength(ch, "utf8");
+      if (bytes + chBytes > maxStemBytes) break;
+      acc += ch;
+      bytes += chBytes;
+    }
+    safeStem = acc.replace(/[.\s]+$/g, "") || "pasted-file";
+  }
+  return `${safeStem}${ext}`;
+}
+
+async function pruneUploadsDir(uploadsRoot, {
+  maxBatches = 40,
+  maxTotalBytes = 200 * 1024 * 1024,
+  maxAgeMs = 14 * 24 * 3600 * 1000,
+  keepBatchName = "",
+} = {}) {
+  const entries = await readdir(uploadsRoot, { withFileTypes: true }).catch(() => []);
+  const batches = [];
+  const now = Date.now();
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dirPath = resolve(uploadsRoot, entry.name);
+    const dirStat = await stat(dirPath).catch(() => null);
+    if (!dirStat) continue;
+    let sizeBytes = 0;
+    const files = await readdir(dirPath, { withFileTypes: true }).catch(() => []);
+    for (const f of files) {
+      if (!f.isFile()) continue;
+      const fst = await stat(resolve(dirPath, f.name)).catch(() => null);
+      if (fst?.isFile()) sizeBytes += fst.size;
+    }
+    batches.push({ name: entry.name, dirPath, mtimeMs: dirStat.mtimeMs, sizeBytes });
+  }
+  const survivors = [];
+  let totalBytes = 0;
+  for (const batch of batches) {
+    if (batch.name !== keepBatchName && now - batch.mtimeMs > maxAgeMs) {
+      await rm(batch.dirPath, { recursive: true, force: true }).catch(() => {});
+      continue;
+    }
+    survivors.push(batch);
+    totalBytes += batch.sizeBytes;
+  }
+  survivors.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  let remainingCount = survivors.length;
+  for (const batch of survivors) {
+    if (remainingCount <= maxBatches && totalBytes <= maxTotalBytes) break;
+    if (batch.name === keepBatchName) continue;
+    await rm(batch.dirPath, { recursive: true, force: true }).catch(() => {});
+    remainingCount -= 1;
+    totalBytes = Math.max(0, totalBytes - batch.sizeBytes);
+  }
+}
 
 function extractLastAgentMessageFromCodexParams(params) {
   if (typeof params?.turn?.lastAgentMessage === "string") return params.turn.lastAgentMessage;
@@ -2365,6 +2442,8 @@ export class ProviderHub {
     const realTmpDir = await realpath(tmpDir).catch(() => tmpDir);
     const agyBrainDir = homeDir ? resolve(homeDir, ".gemini", "antigravity", "brain") : "";
     const realAgyBrainDir = agyBrainDir ? await realpath(agyBrainDir).catch(() => agyBrainDir) : "";
+    const uploadsDir = resolve(this.#dataDir, "uploads");
+    const realUploadsDir = await realpath(uploadsDir).catch(() => uploadsDir);
 
     const inWorkspaceLogical = cwdAllowedBase && isSubpathOrEqual(threadCwd, targetPath);
     const isCodexTempClip = imagesOnly && /^codex-clipboard-/i.test(basename(targetPath));
@@ -2374,12 +2453,15 @@ export class ProviderHub {
     const inAgyBrainLogical = Boolean(isAbsInput && agyBrainDir && (
       isSubpathOrEqual(agyBrainDir, targetPath) || isSubpathOrEqual(realAgyBrainDir, targetPath)
     ));
+    const inUploadsLogical = Boolean(isAbsInput && (
+      isSubpathOrEqual(uploadsDir, targetPath) || isSubpathOrEqual(realUploadsDir, targetPath)
+    ));
 
     let explicitlyAttached = false;
     if (!isAbsInput && !inWorkspaceLogical) {
       throw Object.assign(new Error(imagesOnly ? "禁止通过相对路径越界访问工作区外图片" : "禁止通过相对路径越界访问工作区外文件"), { status: 403 });
     }
-    if (!inWorkspaceLogical && !inTempLogical && !inAgyBrainLogical) {
+    if (!inWorkspaceLogical && !inTempLogical && !inAgyBrainLogical && !inUploadsLogical) {
       const explicitSet = await this.#listExplicitThreadFilePaths(cleanId, threadCwd, readResult);
       explicitlyAttached = explicitSet.has(targetPath);
       if (!explicitlyAttached) {
@@ -2418,10 +2500,11 @@ export class ProviderHub {
           throw Object.assign(new Error("禁止通过越界符号链接访问工作区外文件"), { status: 403 });
         }
       }
-    } else if ((inTempLogical || inAgyBrainLogical) && !inWorkspaceLogical && !explicitlyAttached) {
+    } else if ((inTempLogical || inAgyBrainLogical || inUploadsLogical) && !inWorkspaceLogical && !explicitlyAttached) {
       const inRealTemp = isSubpathOrEqual(realTmpDir, realTarget);
       const inRealAgy = Boolean(realAgyBrainDir && isSubpathOrEqual(realAgyBrainDir, realTarget));
-      if (!inRealTemp && !inRealAgy) {
+      const inRealUploads = isSubpathOrEqual(realUploadsDir, realTarget);
+      if (!inRealTemp && !inRealAgy && !inRealUploads) {
         throw Object.assign(new Error("禁止访问目录外符号链接文件"), { status: 403 });
       }
     }
@@ -2473,6 +2556,87 @@ export class ProviderHub {
       maxBytes: isRaster ? MAX_PREVIEW_IMAGE_BYTES : MAX_PREVIEW_OUTPUT_FILE_BYTES,
       allowEmpty: !isRaster,
     });
+  }
+
+  /**
+   * Persist pasted or dropped non-image files into `<dataDir>/uploads/<batch>` so agents
+   * and the file preview endpoint can reference them by absolute local path.
+   */
+  async saveUploadedFiles({ threadId = "", files = [] } = {}) {
+    if (this.#closed) {
+      throw Object.assign(new Error("会话中心已关闭"), { status: 409 });
+    }
+    const list = Array.isArray(files) ? files : [];
+    if (!list.length) {
+      throw Object.assign(new Error("未收到任何文件"), { status: 400 });
+    }
+    const MAX_FILES = 10;
+    const MAX_SINGLE_BYTES = 15 * 1024 * 1024;
+    const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+    if (list.length > MAX_FILES) {
+      throw Object.assign(new Error(`单次最多上传 ${MAX_FILES} 个文件`), { status: 400 });
+    }
+
+    const decodedItems = [];
+    let totalBytes = 0;
+    for (const item of list) {
+      const safeName = sanitizeUploadedFilename(item?.name);
+      if (typeof item?.dataBase64 !== "string") {
+        throw Object.assign(new Error(`文件 ${safeName} 缺少内容数据`), { status: 400 });
+      }
+      const rawBase64 = item.dataBase64.trim();
+      const buf = rawBase64 ? Buffer.from(rawBase64, "base64") : Buffer.alloc(0);
+      if (buf.length > MAX_SINGLE_BYTES) {
+        throw Object.assign(new Error(`文件 ${safeName} 超过 15 MB 上限`), { status: 413 });
+      }
+      totalBytes += buf.length;
+      if (totalBytes > MAX_TOTAL_BYTES) {
+        throw Object.assign(new Error("单次上传文件总大小超过 20 MB 上限"), { status: 413 });
+      }
+      decodedItems.push({
+        name: safeName,
+        mimeType: String(item?.type || "").trim() || "application/octet-stream",
+        buffer: buf,
+      });
+    }
+
+    const uploadsRoot = resolve(this.#dataDir, "uploads");
+    const batchId = `${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const batchDir = resolve(uploadsRoot, batchId);
+    await mkdir(batchDir, { recursive: true });
+
+    const usedNames = new Set();
+    const savedFiles = [];
+    for (const entry of decodedItems) {
+      let candidateName = entry.name;
+      if (usedNames.has(candidateName.toLowerCase())) {
+        const ext = extname(candidateName);
+        const stem = ext ? candidateName.slice(0, -ext.length) : candidateName;
+        let idx = 1;
+        while (usedNames.has(`${stem}-${idx}${ext}`.toLowerCase())) idx += 1;
+        candidateName = `${stem}-${idx}${ext}`;
+      }
+      usedNames.add(candidateName.toLowerCase());
+      const targetPath = resolve(batchDir, candidateName);
+      if (!isSubpathOrEqual(batchDir, targetPath)) {
+        throw Object.assign(new Error("非法文件名"), { status: 400 });
+      }
+      await writeFile(targetPath, entry.buffer);
+      savedFiles.push({
+        name: candidateName,
+        path: targetPath,
+        size: entry.buffer.length,
+        mimeType: entry.mimeType,
+      });
+    }
+
+    await pruneUploadsDir(uploadsRoot, { keepBatchName: batchId }).catch(() => {});
+
+    return {
+      ok: true,
+      threadId: String(threadId || "").trim(),
+      files: savedFiles,
+    };
   }
 
   async readThread(compositeId, { cursor = null, detail = "auto", limit = 20 } = {}) {

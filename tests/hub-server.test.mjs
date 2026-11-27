@@ -722,3 +722,121 @@ test("GET /api/thread/image returns cacheable 404 without throwing server errors
   assert.match(missRes.body.toString("utf8"), /图片文件不存在/);
   assert.equal(errorLogs.length, 0);
 });
+
+test("POST /api/thread/upload persists pasted files safely and allows thread file preview", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-upload-test-"));
+  const dataDir = resolve(root, "data");
+  const codexHome = resolve(root, "codex");
+  await Promise.all([mkdir(dataDir, { recursive: true }), mkdir(codexHome, { recursive: true })]);
+
+  const srv = await createAgentControlServer({
+    port: 0,
+    disableRelay: true,
+    dataDir,
+    env: {
+      ...process.env,
+      CODEX_BIN: MOCK_CODEX_BIN,
+      AGENT_CONTROL_CODEX_HOMES: JSON.stringify([{ id: "default", label: "Codex 默认", home: codexHome }]),
+      AGENT_CONTROL_CLAUDE_CONFIG_DIRS: "[]",
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: "[]",
+      AGENT_CONTROL_GROK_HOMES: "[]",
+    },
+  });
+  await srv.start();
+  t.after(async () => {
+    await srv.close().catch(() => {});
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const created = await jsonReq(srv.url, "/api/thread/new", {
+    method: "POST",
+    body: { provider: "codex", profileId: "default", cwd: root, text: "文件粘贴上传测试" },
+  });
+  assert.equal(created.status, 200);
+  const threadId = created.data.thread.id;
+
+  const contentText = "hello pasted file content\n第二行";
+  const uploadRes = await jsonReq(srv.url, "/api/thread/upload", {
+    method: "POST",
+    body: {
+      threadId,
+      files: [
+        { name: "../../需求文档.md", type: "text/markdown", dataBase64: Buffer.from(contentText, "utf8").toString("base64") },
+        { name: "需求文档.md", type: "text/markdown", dataBase64: Buffer.from("second", "utf8").toString("base64") },
+      ],
+    },
+  });
+  assert.equal(uploadRes.status, 200);
+  assert.equal(uploadRes.data.ok, true);
+  assert.equal(uploadRes.data.files.length, 2);
+  assert.equal(uploadRes.data.files[0].name, "需求文档.md");
+  assert.equal(uploadRes.data.files[1].name, "需求文档-1.md");
+  assert.ok(uploadRes.data.files[0].path.startsWith(resolve(dataDir, "uploads")));
+  assert.equal(await readFile(uploadRes.data.files[0].path, "utf8"), contentText);
+
+  const previewRes = await jsonReq(
+    srv.url,
+    `/api/thread/file?threadId=${encodeURIComponent(threadId)}&path=${encodeURIComponent(uploadRes.data.files[0].path)}&mode=meta`,
+  );
+  assert.equal(previewRes.status, 200);
+  assert.match(previewRes.data.content, /hello pasted file content/);
+
+  // Long CJK filename, Windows reserved device name, and `#` URL-breaking filename
+  const longCjkName = `${"测".repeat(120)}.md`;
+  const edgeUploadRes = await jsonReq(srv.url, "/api/thread/upload", {
+    method: "POST",
+    body: {
+      threadId,
+      files: [
+        { name: longCjkName, type: "text/markdown", dataBase64: Buffer.from("long cjk", "utf8").toString("base64") },
+        { name: "CON.txt", type: "text/plain", dataBase64: Buffer.from("reserved", "utf8").toString("base64") },
+        { name: "issue#42.md", type: "text/markdown", dataBase64: Buffer.from("hash name", "utf8").toString("base64") },
+      ],
+    },
+  });
+  assert.equal(edgeUploadRes.status, 200);
+  assert.equal(edgeUploadRes.data.files.length, 3);
+  assert.ok(Buffer.byteLength(edgeUploadRes.data.files[0].name, "utf8") <= 200);
+  assert.equal(edgeUploadRes.data.files[1].name, "_CON.txt");
+  assert.equal(edgeUploadRes.data.files[2].name, "issue_42.md");
+
+  const hashPreviewRes = await jsonReq(
+    srv.url,
+    `/api/thread/file?threadId=${encodeURIComponent(threadId)}&path=${encodeURIComponent(edgeUploadRes.data.files[2].path)}&mode=meta`,
+  );
+  assert.equal(hashPreviewRes.status, 200);
+  assert.match(hashPreviewRes.data.content, /hash name/);
+
+  // Validation and size limit negative paths
+  const emptyRes = await jsonReq(srv.url, "/api/thread/upload", {
+    method: "POST",
+    body: { threadId, files: [] },
+  });
+  assert.equal(emptyRes.status, 400);
+
+  const missingDataRes = await jsonReq(srv.url, "/api/thread/upload", {
+    method: "POST",
+    body: { threadId, files: [{ name: "broken.txt" }] },
+  });
+  assert.equal(missingDataRes.status, 400);
+
+  const tooManyFiles = Array.from({ length: 11 }, (_, idx) => ({
+    name: `f-${idx}.txt`,
+    type: "text/plain",
+    dataBase64: Buffer.from("x", "utf8").toString("base64"),
+  }));
+  const tooManyRes = await jsonReq(srv.url, "/api/thread/upload", {
+    method: "POST",
+    body: { threadId, files: tooManyFiles },
+  });
+  assert.equal(tooManyRes.status, 400);
+
+  const overSingleRes = await jsonReq(srv.url, "/api/thread/upload", {
+    method: "POST",
+    body: {
+      threadId,
+      files: [{ name: "big.bin", type: "application/octet-stream", dataBase64: Buffer.alloc(15 * 1024 * 1024 + 1).toString("base64") }],
+    },
+  });
+  assert.equal(overSingleRes.status, 413);
+});

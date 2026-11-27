@@ -868,8 +868,8 @@ test("Windows desktop info strips UTF-8 BOM, resolves USERPROFILE, and exposes l
   await writeFile(resolve(rootDir, "desktop", "windows", "remodeck.ico"), Buffer.from([0, 0, 1, 0]));
 
   const expectedHash = await computeDesktopSourceHash(rootDir, "0.2.6");
-  const startMenuPath = resolve(startMenuPrograms, "RemoteDeck.lnk");
-  const desktopPath = resolve(desktopDir, "RemoteDeck.lnk");
+  const startMenuPath = resolve(startMenuPrograms, "RemoDeck.lnk");
+  const desktopPath = resolve(desktopDir, "RemoDeck.lnk");
   const iconPath = resolve(localBase, `remodeck-${expectedHash}.ico`);
   const browserPath = resolve(baseDir, "Edge", "msedge.exe");
   const browserArgs = ["--app=http://127.0.0.1:43310", `--user-data-dir=${resolve(localBase, "app-profile")}`];
@@ -905,6 +905,20 @@ test("Windows desktop info strips UTF-8 BOM, resolves USERPROFILE, and exposes l
   assert.equal(info.iconPath, iconPath);
   assert.equal(info.browserPath, browserPath);
   assert.deepEqual(info.browserArgs, browserArgs);
+
+  // Legacy RemoteDeck.lnk detection when RemoDeck.lnk & desktop-meta.json are absent
+  await rm(resolve(localBase, "desktop-meta.json"), { force: true });
+  const legacyRemoteLnk = resolve(startMenuPrograms, "RemoteDeck.lnk");
+  await writeFile(legacyRemoteLnk, "legacy-lnk", "utf8");
+  const legacyInfo = await readInstalledDesktopAppInfo({
+    rootDir,
+    packageVersion: "0.2.6",
+    platform: "win32",
+    env: { USERPROFILE: userProfile },
+  });
+  assert.equal(legacyInfo.installed, true);
+  assert.equal(legacyInfo.appPath, legacyRemoteLnk);
+  assert.equal(legacyInfo.needsUpdate, true);
 });
 
 test("resolveDesktopLaunchSpec selects Windows shortcut, browser fallback, and respects auto sync", async (t) => {
@@ -913,7 +927,7 @@ test("resolveDesktopLaunchSpec selects Windows shortcut, browser fallback, and r
     await rm(baseDir, { recursive: true, force: true });
   });
 
-  const startMenuLnk = resolve(baseDir, "RemoteDeck.lnk");
+  const startMenuLnk = resolve(baseDir, "RemoDeck.lnk");
   const browserExe = resolve(baseDir, "msedge.exe");
   const launcherCmd = resolve(baseDir, "agent-control-desktop.cmd");
   await writeFile(startMenuLnk, "lnk", "utf8");
@@ -924,7 +938,7 @@ test("resolveDesktopLaunchSpec selects Windows shortcut, browser fallback, and r
   const desktopApp = {
     appPath: startMenuLnk,
     startMenuPath: startMenuLnk,
-    desktopPath: resolve(baseDir, "Desktop", "RemoteDeck.lnk"),
+    desktopPath: resolve(baseDir, "Desktop", "RemoDeck.lnk"),
     browserPath: browserExe,
     browserArgs,
     launcherPath: launcherCmd,
@@ -965,11 +979,15 @@ test("Windows desktop installer script and icon/manifest assets satisfy invarian
   assert.equal(psBytes[2], 0xbf);
 
   const psText = psBytes.subarray(3).toString("utf8");
-  assert.match(psText, /RemoteDeck\.lnk/);
+  assert.match(psText, /RemoDeck\.lnk/);
   assert.match(psText, /ApplyAppUserModel/);
   assert.match(psText, /9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3/);
   assert.match(psText, /UTF8Encoding\]::new\(\$false\)/);
   assert.doesNotMatch(psText, /\$EdgeIcon\s*=|\$Shortcut\.IconLocation\s*=\s*\$EdgeIcon/);
+
+  const rootPsText = (await readFile(resolve(repoRoot, "install.ps1"), "utf8")).replace(/^\uFEFF/, "");
+  assert.match(rootPsText, /foreach\s*\(\$legacyName\s+in\s+@\("Agent Control\.url",\s*"RemoteDeck\.url"\)\)/);
+  assert.match(rootPsText, /Join-Path\s+\$desktopDir\s+"RemoDeck\.url"/);
 
   const winIco = await readFile(resolve(repoRoot, "desktop", "windows", "remodeck.ico"));
   const pubIco = await readFile(resolve(repoRoot, "public", "favicon.ico"));
@@ -986,7 +1004,7 @@ test("Windows desktop installer script and icon/manifest assets satisfy invarian
   assert.match(iconSvg, /<svg\b/);
 
   const manifest = JSON.parse(await readFile(resolve(repoRoot, "public", "manifest.webmanifest"), "utf8"));
-  assert.equal(manifest.name, "RemoteDeck");
+  assert.equal(manifest.name, "RemoDeck");
   assert.equal(manifest.start_url, "./");
   assert.ok(manifest.icons.some((item) => item.src === "./icon-192.png"));
   assert.ok(manifest.icons.some((item) => item.src === "./icon.svg"));
@@ -1038,7 +1056,7 @@ test("POST /api/update/desktop honors explicit openAfterBuild flag for remote vs
           version: pkg.version,
           buildHash: hash,
           repoRoot: appDir,
-          appPath: resolve(winInstallDir, "RemoteDeck.lnk"),
+          appPath: resolve(winInstallDir, "RemoDeck.lnk"),
           platform: "win32",
         }), "utf8");
       },
@@ -1083,7 +1101,7 @@ test("Windows native launcher and Linux/cross-platform desktop shells maintain f
   // 1. resolveDesktopLaunchSpec prefers launcherExePath before direct browserPath when .lnk is absent.
   const tmpDir = await mkdtemp(resolve(os.tmpdir(), "ac-win-exe-launch-"));
   t.after(() => rm(tmpDir, { recursive: true, force: true }));
-  const exePath = resolve(tmpDir, "RemoteDeck.exe");
+  const exePath = resolve(tmpDir, "RemoDeck.exe");
   const browserPath = resolve(tmpDir, "msedge.exe");
   await writeFile(exePath, "mz", "utf8");
   await writeFile(browserPath, "mz", "utf8");
@@ -1101,8 +1119,8 @@ test("Windows native launcher and Linux/cross-platform desktop shells maintain f
     { command: exePath, args: [], windowsHide: false },
   );
 
-  // 2. Windows RemoteDeckLauncher.cs stays strict C# 5.0 and implements health probe + service bootstrap.
-  const csText = await readFile(resolve(repoRoot, "desktop", "windows", "RemoteDeckLauncher.cs"), "utf8");
+  // 2. Windows RemoDeckLauncher.cs stays strict C# 5.0 and implements health probe + service bootstrap.
+  const csText = await readFile(resolve(repoRoot, "desktop", "windows", "RemoDeckLauncher.cs"), "utf8");
   assert.doesNotMatch(csText, /\$"/);
   assert.doesNotMatch(csText, /\?\./);
   assert.doesNotMatch(csText, /\bout\s+var\b/);
@@ -1113,7 +1131,7 @@ test("Windows native launcher and Linux/cross-platform desktop shells maintain f
   assert.match(csText, /launcher\.cfg/);
   assert.match(csText, /service\.mjs/);
 
-  // 3. Windows install-app.ps1 compiles RemoteDeckLauncher.cs with csc.exe when available and writes launcher.cfg.
+  // 3. Windows install-app.ps1 compiles RemoDeckLauncher.cs with csc.exe when available and writes launcher.cfg.
   const psBytes = await readFile(resolve(repoRoot, "desktop", "windows", "install-app.ps1"));
   assert.equal(psBytes[0], 0xef);
   assert.equal(psBytes[1], 0xbb);
@@ -1122,17 +1140,17 @@ test("Windows native launcher and Linux/cross-platform desktop shells maintain f
   assert.match(psText, /csc\.exe/);
   assert.match(psText, /\/target:winexe/);
   assert.match(psText, /\/win32icon:/);
-  assert.match(psText, /RemoteDeckLauncher\.cs/);
+  assert.match(psText, /RemoDeckLauncher\.cs/);
   assert.match(psText, /launcher\.cfg/);
   assert.match(psText, /launcherExePath/);
 
-  // 4. Linux desktop shell has updated RemoteDeck icon, desktop Name=RemoteDeck, zoom/hard-reload/restart/plugin windows.
+  // 4. Linux desktop shell has updated RemoDeck icon, desktop Name=RemoDeck, zoom/hard-reload/restart/plugin windows.
   const publicIconSvg = await readFile(resolve(repoRoot, "public", "icon.svg"), "utf8");
   const linuxIconSvg = await readFile(resolve(repoRoot, "desktop", "linux", "agent-control.svg"), "utf8");
   assert.equal(linuxIconSvg, publicIconSvg);
 
   const linuxInstaller = await readFile(resolve(repoRoot, "desktop", "linux", "install-app.sh"), "utf8");
-  assert.match(linuxInstaller, /Name=RemoteDeck\\n/);
+  assert.match(linuxInstaller, /Name=RemoDeck\\n/);
 
   const linuxPy = await readFile(resolve(repoRoot, "desktop", "linux", "agent-control.py"), "utf8");
   assert.match(linuxPy, /def open_plugin_window/);

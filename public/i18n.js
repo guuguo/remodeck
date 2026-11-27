@@ -169,11 +169,11 @@ const DICTIONARY = {
   "执行中…": { en: "Running…" },
   "自动优选模型": { en: "Auto Best Model" },
 
-  "RemoteDeck · 多智能体远程控制台": {
-    en: "RemoteDeck · Multi-Agent Remote Console",
-    "zh-TW": "RemoteDeck · 多智慧體遠端控制台",
-    ja: "RemoteDeck · マルチエージェント・リモートコンソール",
-    ko: "RemoteDeck · 멀티 에이전트 원격 콘솔",
+  "RemoDeck · 多智能体远程控制台": {
+    en: "RemoDeck · Multi-Agent Remote Console",
+    "zh-TW": "RemoDeck · 多智慧體遠端控制台",
+    ja: "RemoDeck · マルチエージェント・リモートコンソール",
+    ko: "RemoDeck · 멀티 에이전트 원격 콘솔",
   },
   "本机": { en: "Local", "zh-TW": "本機", ja: "ローカル", ko: "로컬" },
   "+ 新建会话": { en: "+ New Session", "zh-TW": "+ 新增會話", ja: "+ 新規セッション", ko: "+ 새 세션" },

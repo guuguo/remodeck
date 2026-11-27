@@ -10,11 +10,11 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("RemoteDeck")]
-[assembly: AssemblyProduct("RemoteDeck")]
-[assembly: AssemblyDescription("RemoteDeck Desktop Console Launcher")]
+[assembly: AssemblyTitle("RemoDeck")]
+[assembly: AssemblyProduct("RemoDeck")]
+[assembly: AssemblyDescription("RemoDeck Desktop Console Launcher")]
 
-namespace RemoteDeckLauncher
+namespace RemoDeckLauncher
 {
   internal static class NativeMethods
   {
@@ -49,7 +49,7 @@ namespace RemoteDeckLauncher
       _config = config;
       _initialRestart = initialRestart;
 
-      Text = "RemoteDeck";
+      Text = "RemoDeck";
       StartPosition = FormStartPosition.CenterScreen;
       FormBorderStyle = FormBorderStyle.FixedDialog;
       MaximizeBox = false;
@@ -72,7 +72,7 @@ namespace RemoteDeckLauncher
       }
 
       Label titleLabel = new Label();
-      titleLabel.Text = "RemoteDeck";
+      titleLabel.Text = "RemoDeck";
       titleLabel.Font = new Font("Segoe UI", 16f, FontStyle.Bold);
       titleLabel.ForeColor = Color.FromArgb(232, 238, 247);
       titleLabel.AutoSize = false;
@@ -82,8 +82,8 @@ namespace RemoteDeckLauncher
 
       _statusLabel = new Label();
       _statusLabel.Text = initialRestart
-        ? "正在重启本地 RemoteDeck 服务..."
-        : string.Format("正在检查 RemoteDeck 服务 ({0})...", _config.Url);
+        ? "正在重启本地 RemoDeck 服务..."
+        : string.Format("正在检查 RemoDeck 服务 ({0})...", _config.Url);
       _statusLabel.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
       _statusLabel.ForeColor = Color.FromArgb(147, 161, 181);
       _statusLabel.AutoSize = false;
@@ -154,8 +154,8 @@ namespace RemoteDeckLauncher
       _busy = true;
       _actionsPanel.Visible = false;
       _statusLabel.Text = forceRestart
-        ? "正在重启本地 RemoteDeck 服务..."
-        : "正在自动拉起本地 RemoteDeck 服务...";
+        ? "正在重启本地 RemoDeck 服务..."
+        : "正在自动拉起本地 RemoDeck 服务...";
 
       Thread worker = new Thread(delegate()
       {

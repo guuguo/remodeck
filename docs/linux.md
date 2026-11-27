@@ -21,7 +21,7 @@ agent-control desktop
 agent-control open
 ```
 
-应用菜单中可搜索 **RemoteDeck**。独立窗口支持返回（Alt+←）、首页、刷新（Ctrl+R）、强制刷新（Ctrl+Shift+R）、页面缩放（Ctrl+=/−/0）、插件/项目多窗口、重启后台服务、浏览器打开与下载保存；站外链接交给系统浏览器。关闭窗口或 Ctrl+Q 只退出桌面壳，后台任务继续运行。本机服务未启动时，壳会尝试启动已安装的 systemd 用户服务并等待就绪，不会重启运行中的服务。
+应用菜单中可搜索 **RemoDeck**。独立窗口支持返回（Alt+←）、首页、刷新（Ctrl+R）、强制刷新（Ctrl+Shift+R）、页面缩放（Ctrl+=/−/0）、插件/项目多窗口、重启后台服务、浏览器打开与下载保存；站外链接交给系统浏览器。关闭窗口或 Ctrl+Q 只退出桌面壳，后台任务继续运行。本机服务未启动时，壳会尝试启动已安装的 systemd 用户服务并等待就绪，不会重启运行中的服务。
 
 桌面入口安装在 `${XDG_DATA_HOME:-~/.local/share}/applications/com.guuguo.AgentControl.desktop`，启动器在 `~/.local/bin/agent-control-desktop`。默认连接 `http://127.0.0.1:43310`；可通过 `PORT` 或 `AGENT_CONTROL_URL` 指定地址。网页存储和缓存位于控制台数据目录的 `desktop/` 下。
 

@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { defaultDataDir } from "./instance-identity.mjs";
 import { MemoryVault, getSection, parseTable, resolveVaultPath, today as vaultToday } from "./memory-vault.mjs";
@@ -62,6 +62,62 @@ export const OVERVIEW_MODEL_OPTIONS = Object.freeze([
   { key: "codex:gpt-6.1-terra", label: "GPT-6.1 Terra", provider: "codex", model: "gpt-6.1-terra" },
   { key: "claude:claude-sonnet-5-5", label: "Claude Sonnet 5.5", provider: "claude", model: "claude-sonnet-5-5" },
 ]);
+
+export const DEFAULT_DISPATCH_PLANNER_MODEL = "antigravity:gemini-3.8-flash";
+
+/**
+ * Resolve ordered lightweight model candidates with optional provider filtering,
+ * single-shot-per-provider deduplication, and attempt cap.
+ */
+export function selectLightweightModelCandidates({
+  preferredModel = "auto",
+  fallbackToAuto = false,
+  availableProviders = null,
+  dedupeByProvider = false,
+  maxAttempts = 0,
+} = {}) {
+  const autoCandidates = [
+    OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "antigravity:gemini-3.8-flash"),
+    OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "antigravity:gemini-4-hydrogen"),
+    OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "codex:gpt-6.1-terra"),
+    OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "claude:claude-sonnet-5-5"),
+  ].filter(Boolean);
+
+  let candidates = preferredModel && preferredModel !== "auto"
+    ? [OVERVIEW_MODEL_OPTIONS.find((o) => o.key === preferredModel)].filter(Boolean)
+    : autoCandidates;
+
+  if (fallbackToAuto && preferredModel && preferredModel !== "auto") {
+    const seenKeys = new Set(candidates.map((c) => c.key));
+    candidates = [...candidates, ...autoCandidates.filter((c) => !seenKeys.has(c.key))];
+  }
+
+  if (availableProviders) {
+    const allowed = availableProviders instanceof Set
+      ? availableProviders
+      : new Set(Array.isArray(availableProviders) ? availableProviders : []);
+    if (allowed.size > 0) {
+      const filtered = candidates.filter((c) => allowed.has(c.provider));
+      if (filtered.length > 0) {
+        candidates = filtered;
+      }
+    }
+  }
+
+  if (dedupeByProvider) {
+    const seenProviders = new Set();
+    candidates = candidates.filter((c) => {
+      if (seenProviders.has(c.provider)) return false;
+      seenProviders.add(c.provider);
+      return true;
+    });
+  }
+
+  if (maxAttempts > 0) {
+    candidates = candidates.slice(0, Math.max(1, maxAttempts));
+  }
+  return candidates;
+}
 
 export const PIPELINE_STAGES = Object.freeze([
   { index: 1, key: "init", label: "立项" },
@@ -151,7 +207,7 @@ export function isNonProjectDiscoveryCwd(cwd = "", existingTopics = []) {
   if (
     /^\/(?:private\/)?tmp(?:\/|$)/i.test(slash)
     || /^\/var\/tmp(?:\/|$)/i.test(slash)
-    || /^\/var\/folders\/[^/]+\/[^/]+\/T(?:\/|$)/i.test(slash)
+    || /^\/(?:private\/)?var\/folders\/[^/]+\/[^/]+\/T(?:\/|$)/i.test(slash)
     || /(?:^|[\\/])AppData[\\/]Local[\\/]Temp(?:[\\/]|$)/i.test(clean)
     || /^[a-z]:\\Temp(?:\\|$)/i.test(clean)
   ) {
@@ -169,6 +225,524 @@ export function isNonProjectDiscoveryCwd(cwd = "", existingTopics = []) {
     }
   }
   return false;
+}
+
+const FOLDER_ACRONYM_MAP = Object.freeze({
+  ai: "AI",
+  api: "API",
+  cli: "CLI",
+  ui: "UI",
+  ux: "UX",
+  mcp: "MCP",
+  sdk: "SDK",
+  seo: "SEO",
+  saas: "SaaS",
+  ios: "iOS",
+  macos: "macOS",
+  llm: "LLM",
+  rag: "RAG",
+  "3d": "3D",
+  "2d": "2D",
+  ci: "CI",
+  cd: "CD",
+  e2e: "E2E",
+  pwa: "PWA",
+  crm: "CRM",
+  tts: "TTS",
+  asr: "ASR",
+  ocr: "OCR",
+  sql: "SQL",
+  url: "URL",
+  dns: "DNS",
+  ssh: "SSH",
+  hls: "HLS",
+  cdn: "CDN",
+});
+
+const GENERIC_TITLE_PLACEHOLDERS = new Set([
+  "agents", "agents.md", "claude", "claude.md", "readme", "readme.md",
+  "untitled", "document", "vite + react", "vite + react + ts",
+  "react app", "next.js app", "create react app",
+]);
+
+const GENERIC_LATIN_STOP_WORDS = new Set([
+  "app", "web", "src", "docs", "demo", "test", "mvp",
+  "readme", "agents", "claude", "index", "home",
+]);
+
+const GENERIC_AGGREGATE_KEYS = new Set([
+  "app", "web", "frontend", "backend", "server", "client", "api", "docs",
+  "demo", "test", "src", "main", "project", "tool", "tools", "home", "index",
+  "应用", "项目", "前端", "后端", "测试", "工具", "文档",
+]);
+
+const TRAILING_STATUS_PAREN_RE = /\s*[（(]\s*(?:MVP|WIP|Beta|Alpha|Draft|Demo|Prototype|v\d+(?:\.\d+)*)\s*[）)]\s*$/i;
+const INNER_STATUS_ONLY_RE = /^(?:MVP|WIP|Beta|Alpha|Draft|Demo|Prototype|v\d+(?:\.\d+)*)$/i;
+const DOC_TITLE_PREFIX_RE = /^(?:AGENTS(?:\.md)?|CLAUDE(?:\.md)?|README(?:\.(?:zh(?:-CN|-TW)?|en|ja|ko))?(?:\.md)?)\s*(?:[-—–:|｜·/]\s*)?/i;
+
+export function normalizeDiscoveryLocale(raw = "") {
+  const first = String(raw || "")
+    .split(",")[0]
+    .split(";")[0]
+    .split(".")[0]
+    .trim()
+    .replace(/_/g, "-")
+    .toLowerCase();
+  if (!first || first === "c" || first === "posix") return "";
+  if (first.startsWith("zh")) return "zh";
+  if (first.startsWith("en")) return "en";
+  if (first.startsWith("ja")) return "ja";
+  if (first.startsWith("ko")) return "ko";
+  return "";
+}
+
+export function humanizeRepoFolderName(folderName = "") {
+  const clean = String(folderName || "").trim();
+  if (!clean) return "";
+  if (/[\u4e00-\u9fff]/.test(clean)) return clean;
+  const parts = clean.split(/[-_\s]+/).filter(Boolean);
+  if (!parts.length) return clean;
+  return parts.map((part) => {
+    const low = part.toLowerCase();
+    if (FOLDER_ACRONYM_MAP[low]) return FOLDER_ACRONYM_MAP[low];
+    if (/[a-z]/.test(part) && /[A-Z]/.test(part)) return part;
+    if (/^\d+$/.test(part)) return part;
+    return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+  }).join(" ");
+}
+
+function cleanTitleFragment(raw = "") {
+  return String(raw || "")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[#*`_\s\p{Extended_Pictographic}\u2600-\u27BF]+/gu, "")
+    .replace(/[#*`_\s]+$/g, "")
+    .trim();
+}
+
+function splitStrongTitleSegments(text = "") {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return [];
+  const pipePair = trimmed.match(/^([^｜|]+?)\s*[｜|]\s*([^｜|]+?)$/);
+  if (pipePair) {
+    const left = pipePair[1].replace(TRAILING_STATUS_PAREN_RE, "").trim();
+    const right = pipePair[2].replace(TRAILING_STATUS_PAREN_RE, "").trim();
+    if (
+      /[\u4e00-\u9fff]/.test(left)
+      && /[\u4e00-\u9fff]/.test(right)
+      && !/[｜|]/.test(left)
+      && right.length >= 2
+      && right.length <= 12
+      && (left.length > right.length || /[·•]/.test(left))
+    ) {
+      return [right, left];
+    }
+  }
+  return trimmed
+    .split(/\s+[—–-]\s+|\s*[｜|]\s*|\s*[：:]\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+export function extractBilingualNameCandidates(rawTitle = "") {
+  let clean = cleanTitleFragment(rawTitle);
+  if (!clean) return { zh: [], en: [] };
+  clean = clean.replace(DOC_TITLE_PREFIX_RE, "").trim();
+  clean = clean.replace(/^[#*`_\s—–\-:|｜·/]+/, "").trim();
+  if (!clean || GENERIC_TITLE_PLACEHOLDERS.has(clean.toLowerCase())) {
+    return { zh: [], en: [] };
+  }
+  clean = clean.replace(TRAILING_STATUS_PAREN_RE, "").trim();
+  if (!clean || GENERIC_TITLE_PLACEHOLDERS.has(clean.toLowerCase())) {
+    return { zh: [], en: [] };
+  }
+
+  const expanded = [];
+  for (const seg of splitStrongTitleSegments(clean)) {
+    const strippedSeg = seg.replace(TRAILING_STATUS_PAREN_RE, "").trim();
+    if (!strippedSeg) continue;
+    const parenMatch = strippedSeg.match(/^(.+?)\s*[（(]([^()（）]+)[）)]\s*$/);
+    if (parenMatch) {
+      const outer = parenMatch[1].replace(TRAILING_STATUS_PAREN_RE, "").trim();
+      const inner = parenMatch[2].replace(TRAILING_STATUS_PAREN_RE, "").trim();
+      if (outer) expanded.push(outer);
+      if (inner && !INNER_STATUS_ONLY_RE.test(inner) && inner.length <= 26) {
+        for (const sub of splitStrongTitleSegments(inner)) {
+          if (sub) expanded.push(sub);
+        }
+      }
+    } else {
+      expanded.push(strippedSeg);
+    }
+  }
+
+  const zh = [];
+  const en = [];
+  const seenZh = new Set();
+  const seenEn = new Set();
+
+  for (const rawSeg of expanded) {
+    const seg = rawSeg.replace(/^["'“”‘’]+|["'“”‘’，。.;；!?！？]+$/g, "").trim();
+    if (!seg || GENERIC_TITLE_PLACEHOLDERS.has(seg.toLowerCase())) continue;
+    if (/[\u4e00-\u9fff]/.test(seg)) {
+      let candidate = seg;
+      if (Array.from(candidate).length > 20 && /[·•]/.test(candidate)) {
+        const sub = candidate
+          .split(/\s*[·•]\s*/)
+          .map((s) => s.trim())
+          .find((s) => {
+            const len = Array.from(s).length;
+            return len >= 2 && len <= 20 && !/[。；;!?！？]/.test(s);
+          });
+        if (sub) candidate = sub;
+      }
+      if (Array.from(candidate).length <= 24 && !/[。；;!?！？]/.test(candidate)) {
+        const key = candidate.toLowerCase();
+        if (!seenZh.has(key)) {
+          seenZh.add(key);
+          zh.push(candidate);
+        }
+      }
+      continue;
+    }
+    if (/[A-Za-z]{2,}/.test(seg)) {
+      const words = seg.split(/\s+/).filter(Boolean);
+      if (seg.length <= 36 && words.length <= 6 && !GENERIC_LATIN_STOP_WORDS.has(seg.toLowerCase())) {
+        const key = seg.toLowerCase();
+        if (!seenEn.has(key)) {
+          seenEn.add(key);
+          en.push(seg);
+        }
+      }
+    }
+  }
+
+  return { zh, en };
+}
+
+async function readHeadText(filePath, maxBytes = 4096) {
+  let fh = null;
+  try {
+    fh = await open(filePath, "r");
+    const buf = Buffer.allocUnsafe(maxBytes);
+    const { bytesRead } = await fh.read(buf, 0, maxBytes, 0);
+    return buf.toString("utf8", 0, bytesRead);
+  } catch {
+    return "";
+  } finally {
+    await fh?.close?.().catch(() => {});
+  }
+}
+
+function decodeHtmlEntities(text = "") {
+  return String(text || "")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&mdash;/gi, "—")
+    .replace(/&ndash;/gi, "–")
+    .replace(/&middot;/gi, "·");
+}
+
+function safeParseJsonFields(rawText = "", keys = []) {
+  if (!rawText) return {};
+  try {
+    const parsed = JSON.parse(rawText);
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch {}
+  const out = {};
+  for (const key of keys) {
+    const re = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`);
+    const m = rawText.match(re);
+    if (m) {
+      try {
+        out[key] = JSON.parse(`"${m[1]}"`);
+      } catch {
+        out[key] = m[1];
+      }
+    }
+  }
+  return out;
+}
+
+function extractMarkdownHeadingTitle(rawText = "") {
+  if (!rawText) return "";
+  const lines = String(rawText).replace(/\r\n/g, "\n").split("\n");
+  let idx = 0;
+  if (lines[0]?.trim() === "---") {
+    for (let i = 1; i < lines.length; i += 1) {
+      if (lines[i].trim() === "---") {
+        idx = i + 1;
+        break;
+      }
+    }
+  }
+  let inFence = false;
+  let fenceChar = "";
+  const keptLines = [];
+  for (let i = idx; i < lines.length; i += 1) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    const fenceMatch = trimmed.match(/^(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const ch = fenceMatch[1][0];
+      if (!inFence) {
+        inFence = true;
+        fenceChar = ch;
+      } else if (ch === fenceChar) {
+        inFence = false;
+        fenceChar = "";
+      }
+      continue;
+    }
+    if (!inFence) keptLines.push(line);
+  }
+  const body = keptLines.join("\n");
+  const mdMatch = body.match(/^#\s+(.+)$/m);
+  const htmlMatch = body.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+  const mdIdx = mdMatch?.index ?? Number.POSITIVE_INFINITY;
+  const htmlIdx = htmlMatch?.index ?? Number.POSITIVE_INFINITY;
+  if (mdIdx === Number.POSITIVE_INFINITY && htmlIdx === Number.POSITIVE_INFINITY) return "";
+  if (mdIdx <= htmlIdx && mdMatch) return decodeHtmlEntities(mdMatch[1].trim());
+  return htmlMatch ? decodeHtmlEntities(htmlMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()) : "";
+}
+
+function extractHtmlTitle(rawText = "") {
+  const m = String(rawText || "").match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  if (!m) return "";
+  return decodeHtmlEntities(m[1].replace(/\s+/g, " ").trim());
+}
+
+export async function readRepoMetadata(cwd = "") {
+  const cleanCwd = normPath(cwd);
+  if (!cleanCwd) return { zh: "", en: "", aliases: [] };
+  const folderLower = (basename(cleanCwd) || "").trim().toLowerCase();
+
+  const relFiles = [
+    "project.config.json",
+    "package.json",
+    "manifest.json",
+    "extension/manifest.json",
+    "public/manifest.webmanifest",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "README.zh-CN.md",
+    "README.zh.md",
+    "README.md",
+    "README.en.md",
+    "index.html",
+    "web/index.html",
+    "public/index.html",
+  ];
+  const contents = await Promise.all(
+    relFiles.map((rel) => readHeadText(join(cleanCwd, rel), 4096)),
+  );
+  const byRel = Object.fromEntries(relFiles.map((rel, i) => [rel, contents[i]]));
+
+  const rawTitles = [];
+  if (byRel["project.config.json"]) {
+    const cfg = safeParseJsonFields(byRel["project.config.json"], ["projectname"]);
+    let pname = String(cfg.projectname || "").trim();
+    if (pname && /%[0-9a-f]{2}/i.test(pname)) {
+      try {
+        pname = decodeURIComponent(pname);
+      } catch {}
+    }
+    if (pname && pname.toLowerCase() !== folderLower) {
+      rawTitles.push(pname);
+    }
+  }
+
+  if (byRel["package.json"]) {
+    const pkg = safeParseJsonFields(byRel["package.json"], ["displayName", "productName"]);
+    for (const val of [pkg.displayName, pkg.productName]) {
+      const s = String(val || "").trim();
+      if (s) rawTitles.push(s);
+    }
+  }
+
+  for (const rel of ["manifest.json", "extension/manifest.json", "public/manifest.webmanifest"]) {
+    if (!byRel[rel]) continue;
+    const mf = safeParseJsonFields(byRel[rel], ["name", "short_name"]);
+    for (const val of [mf.name, mf.short_name]) {
+      const s = String(val || "").trim();
+      if (s && !/^__MSG_.+__$/i.test(s)) rawTitles.push(s);
+    }
+  }
+
+  for (const rel of ["AGENTS.md", "CLAUDE.md", "README.zh-CN.md", "README.zh.md", "README.md", "README.en.md"]) {
+    const heading = extractMarkdownHeadingTitle(byRel[rel]);
+    if (heading) rawTitles.push(heading);
+  }
+
+  for (const rel of ["index.html", "web/index.html", "public/index.html"]) {
+    const title = extractHtmlTitle(byRel[rel]);
+    if (title) rawTitles.push(title);
+  }
+
+  let zh = "";
+  let en = "";
+  const allCandidates = [];
+  const seen = new Set();
+  for (const rawTitle of rawTitles) {
+    const { zh: zhList, en: enList } = extractBilingualNameCandidates(rawTitle);
+    for (const item of zhList) {
+      if (!zh) zh = item;
+      const k = item.toLowerCase();
+      if (!seen.has(k)) {
+        seen.add(k);
+        allCandidates.push(item);
+      }
+    }
+    for (const item of enList) {
+      if (!en) en = item;
+      const k = item.toLowerCase();
+      if (!seen.has(k)) {
+        seen.add(k);
+        allCandidates.push(item);
+      }
+    }
+  }
+  const aliases = allCandidates.filter((item) => item !== zh && item !== en).slice(0, 6);
+  return { zh, en, aliases };
+}
+
+export function inferThreadsDominantLang(threads = []) {
+  let zhCount = 0;
+  let enCount = 0;
+  for (const t of Array.isArray(threads) ? threads : []) {
+    const title = String(t?.title || "").trim();
+    if (!title) continue;
+    if (/[\u4e00-\u9fff]/.test(title)) zhCount += 1;
+    else if (/[A-Za-z]/.test(title)) enCount += 1;
+  }
+  if (zhCount > 0 && zhCount >= enCount) return "zh";
+  if (enCount > 0) return "en";
+  return "";
+}
+
+function inferRepeatedChineseThreadPrefix(threads = []) {
+  const byPrefix = new Map();
+  for (const t of Array.isArray(threads) ? threads : []) {
+    const title = String(t?.title || "").replace(/\s+/g, " ").trim();
+    if (!title) continue;
+    const m = title.match(/^([^\s｜|][^｜|]{1,15}?)\s*[｜|]\s*(.+)$/);
+    if (!m) continue;
+    const prefix = m[1].trim();
+    const len = Array.from(prefix).length;
+    if (len < 2 || len > 12 || !/[\u4e00-\u9fff]/.test(prefix)) continue;
+    if (/^(?:修复|排查|实现|优化|新增|重构|检查|更新|测试|帮我|请)/.test(prefix)) continue;
+    let set = byPrefix.get(prefix);
+    if (!set) {
+      set = new Set();
+      byPrefix.set(prefix, set);
+    }
+    set.add(title);
+  }
+  let best = "";
+  let bestCount = 0;
+  for (const [prefix, titles] of byPrefix.entries()) {
+    if (titles.size >= 2 && titles.size > bestCount) {
+      best = prefix;
+      bestCount = titles.size;
+    }
+  }
+  return best;
+}
+
+export function resolveLocalizedWorkspaceNames({
+  folderName = "",
+  vaultCard = null,
+  projectAlias = "",
+  repoMeta = null,
+  threads = [],
+  locale = "",
+} = {}) {
+  let sysLocale = "";
+  try {
+    sysLocale = normalizeDiscoveryLocale(Intl.DateTimeFormat().resolvedOptions().locale || "");
+  } catch {}
+  const lang = normalizeDiscoveryLocale(locale) || inferThreadsDominantLang(threads) || sysLocale || "zh";
+
+  let tier1Zh = "";
+  let tier1En = "";
+  for (const explicitName of [vaultCard?.name, projectAlias]) {
+    const clean = String(explicitName || "").trim();
+    if (!clean) continue;
+    const { zh: zList, en: eList } = extractBilingualNameCandidates(clean);
+    if (zList.length || eList.length) {
+      if (!tier1Zh && zList[0]) tier1Zh = zList[0];
+      if (!tier1En && eList[0]) tier1En = eList[0];
+    } else if (/[\u4e00-\u9fff]/.test(clean)) {
+      if (!tier1Zh) tier1Zh = clean;
+    } else if (/[A-Za-z0-9]/.test(clean)) {
+      if (!tier1En) tier1En = clean;
+    }
+  }
+
+  const tier2Zh = String(repoMeta?.zh || "").trim();
+  const tier2En = String(repoMeta?.en || "").trim();
+  const threadZh = inferRepeatedChineseThreadPrefix(threads);
+  const cleanFolder = String(folderName || "").trim();
+  const folderZh = /[\u4e00-\u9fff]/.test(cleanFolder) ? cleanFolder : "";
+  const folderEn = !folderZh && /[A-Za-z]/.test(cleanFolder) ? humanizeRepoFolderName(cleanFolder) : "";
+
+  const zh = tier1Zh || tier2Zh || folderZh || threadZh || "";
+  const en = tier1En || tier2En || (!tier1Zh ? folderEn : "") || "";
+  const name = lang === "zh"
+    ? (zh || en || folderEn || cleanFolder)
+    : (en || zh || folderEn || cleanFolder);
+  const names = {
+    ...(zh ? { zh } : {}),
+    ...(en ? { en } : {}),
+  };
+
+  const aliasSet = new Set();
+  const aliases = [];
+  for (const candidate of [
+    ...(Array.isArray(repoMeta?.aliases) ? repoMeta.aliases : []),
+    ...(Array.isArray(vaultCard?.aliases) ? vaultCard.aliases : []),
+    projectAlias,
+  ]) {
+    const s = String(candidate || "").trim();
+    if (!s || s === name || s === zh || s === en) continue;
+    const k = s.toLowerCase();
+    if (!aliasSet.has(k)) {
+      aliasSet.add(k);
+      aliases.push(s);
+    }
+  }
+
+  return { name, names, lang, aliases: aliases.slice(0, 6) };
+}
+
+export function canonicalProjectAggregateKey(name = "") {
+  const key = String(name || "")
+    .toLowerCase()
+    .replace(/[\s\-_·•｜|:：()（）【】[\].,!?]+/g, "")
+    .trim();
+  if (!key || GENERIC_AGGREGATE_KEYS.has(key)) return "";
+  if (/[\u4e00-\u9fff]/.test(key)) {
+    return Array.from(key).length >= 2 ? key : "";
+  }
+  return key.length >= 3 ? key : "";
+}
+
+function pickTopicDisplayName(topic = {}, lang = "") {
+  if (!topic) return "";
+  const localized = lang && topic.names && typeof topic.names === "object"
+    ? String(topic.names[lang] || "").trim()
+    : "";
+  if (!localized) return topic.name || "";
+  if (topic.autoDiscovered === true) return localized;
+  const known = Object.values(topic.names).map((v) => String(v || "").trim()).filter(Boolean);
+  return known.includes(String(topic.name || "").trim()) ? localized : (topic.name || "");
 }
 
 const ARCHIVE_TRANSCRIPT_TURNS = 8;
@@ -515,9 +1089,9 @@ const MODEL_TIERS_BY_PROVIDER = Object.freeze({
     fast: { models: ["claude-haiku-4-5", "claude-sonnet-5-5", "claude-sonnet-4-6"], effort: "low" },
   },
   antigravity: {
-    heavy: { models: ["gemini-4-pro", "gemini-3.8-pro", "claude-opus-4-6-thinking", "gemini-4-hydrogen"], effort: "high" },
-    balanced: { models: ["gemini-4-hydrogen", "claude-sonnet-4-6", "gemini-3.8-flash"], effort: "medium" },
-    fast: { models: ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-4-flash"], effort: "low" },
+    heavy: { models: ["gemini-4-carbon", "gemini-4-neon", "claude-opus-5-5", "gemini-pro-orchestrator", "gemini-4-hydrogen"], effort: "high" },
+    balanced: { models: ["gemini-4-hydrogen", "gemini-4-argon", "claude-sonnet-5-5", "gemini-3.8-flash"], effort: "medium" },
+    fast: { models: ["gemini-4-hydrogen", "gemini-3.8-flash"], effort: "low" },
   },
   grok: {
     heavy: { models: ["grok-4", "grok-3"], effort: "high" },
@@ -557,7 +1131,12 @@ export function normalizeDispatchPrefs(raw = {}) {
 export function classifyDispatchTaskDifficulty(text = "") {
   const clean = String(text || "").replace(/\s+/g, " ").trim();
   if (!clean) return "balanced";
-  const heavyRe = /重构|架构|深度|疑难|根因|全量|多文件|跨仓库|迁移|性能优化|安全审计|从零|从头|系统性|复杂|设计方案|底层|并发|死锁|内存泄漏|redesign|architect|refactor|deep\s+dive|root\s+cause/i;
+  const heavyRe = /重构|架构|深度|疑难|根因|全量(?:重构|迁移|改造|审计|排查|重写|替换)|多文件|跨仓库|迁移|性能优化|安全审计|从零|从头|系统性|复杂|设计方案|底层|并发|死锁|内存泄漏|redesign|architect|refactor|deep\s+dive|root\s+cause/i;
+  const metricsFastRe = /\.agent-metrics(?:\.[^.\s]+)?\.json|采数|(?:采集|拉取|抓取|同步|汇总|更新).{0,24}(?:指标|明细|数据|创收|粉丝|阅读|播放|KPI)/i;
+  const codingTaskRe = /实现|开发|新增|编写|修复|排查|改造|重构|接口|服务|组件|单测|测试|bug|fix/i;
+  if (metricsFastRe.test(clean) && !heavyRe.test(clean) && !codingTaskRe.test(clean)) {
+    return "fast";
+  }
   const fastRe = /^(?:请|帮我|麻烦|先)?(?:查一下|查下|看看|看下|确认|检查|汇报|总结|整理|翻译|微调|改个文案|改下文字|重命名|加个图标|补个|问一下|简单|快速|顺便)|(?:状态|进度|汇总|文案|配色|图标|提示语|报错截图)/i;
   if (heavyRe.test(clean) || (clean.length >= 110 && /排查|修复|实现|改造|优化|开发/.test(clean))) {
     return "heavy";
@@ -872,6 +1451,7 @@ export class MissionOverviewService {
   #broadcast;
   #runAiImpl;
   #collectGitImpl;
+  #readRepoMetaImpl;
   #env;
 
   #domains = [...DEFAULT_MISSION_DOMAINS];
@@ -879,6 +1459,8 @@ export class MissionOverviewService {
   #ignoredCwds = [];
   #domainsMtimeMs = 0;
   #vaultCardsCache = { at: 0, cards: [] };
+  #repoMetaCache = new Map();
+  #lastRequestedLocale = "";
   #lastSyncDiscoverAt = 0;
   #sparksState = {
     version: 1,
@@ -923,6 +1505,7 @@ export class MissionOverviewService {
     broadcast = null,
     runAiImpl = null,
     collectGitImpl = null,
+    readRepoMetaImpl = null,
     env = process.env,
     assistantOptions = {},
   } = {}) {
@@ -939,6 +1522,7 @@ export class MissionOverviewService {
     this.#broadcast = typeof broadcast === "function" ? broadcast : null;
     this.#runAiImpl = typeof runAiImpl === "function" ? runAiImpl : null;
     this.#collectGitImpl = typeof collectGitImpl === "function" ? collectGitImpl : collectRepoGitSnapshot;
+    this.#readRepoMetaImpl = typeof readRepoMetaImpl === "function" ? readRepoMetaImpl : readRepoMetadata;
     this.#env = env;
     this.voiceService = null;
     this.assistant = new AssistantService({
@@ -1251,6 +1835,38 @@ export class MissionOverviewService {
     }
     const value = await this.#collectGitImpl(clean).catch(() => null);
     this.#gitCache.set(clean, { at: Date.now(), value });
+    return value;
+  }
+
+  #resolveEffectiveLocale(explicitLocale = "", threads = []) {
+    const explicit = normalizeDiscoveryLocale(explicitLocale);
+    if (explicit) {
+      this.#lastRequestedLocale = explicit;
+      return explicit;
+    }
+    if (this.#lastRequestedLocale) return this.#lastRequestedLocale;
+    const inferred = inferThreadsDominantLang(threads);
+    if (inferred) return inferred;
+    const envLoc = normalizeDiscoveryLocale(
+      this.#env?.AC_LOCALE || this.#env?.LC_ALL || this.#env?.LC_MESSAGES || this.#env?.LANG || "",
+    );
+    if (envLoc) return envLoc;
+    try {
+      const sysLoc = normalizeDiscoveryLocale(Intl.DateTimeFormat().resolvedOptions().locale || "");
+      if (sysLoc) return sysLoc;
+    } catch {}
+    return "zh";
+  }
+
+  async #getRepoMetadataCached(cwd, { force = false } = {}) {
+    const clean = normPath(cwd);
+    if (!clean) return { zh: "", en: "", aliases: [] };
+    const hit = this.#repoMetaCache.get(clean);
+    if (!force && hit && (Date.now() - hit.at) < 5 * 60 * 1000) {
+      return hit.value;
+    }
+    const value = await this.#readRepoMetaImpl(clean).catch(() => ({ zh: "", en: "", aliases: [] }));
+    this.#repoMetaCache.set(clean, { at: Date.now(), value });
     return value;
   }
 
@@ -2420,7 +3036,8 @@ export class MissionOverviewService {
     agentKey = "auto",
     mode = "auto",
     excludedAgentKeys = null,
-    preferredModel = "auto",
+    preferredModel = DEFAULT_DISPATCH_PLANNER_MODEL,
+    allowChat = true,
   } = {}) {
     const excludedSet = new Set(
       Array.isArray(excludedAgentKeys)
@@ -2465,6 +3082,12 @@ export class MissionOverviewService {
       scopedTopicId ? `- 当前聚焦产线 ID：${scopedTopicId}（若用户未明确指派其他项目，优先归入此产线）` : "- 当前为全厂总览视角（请根据语义匹配最合适的产线）",
       agentKey && agentKey !== "auto" ? `- 用户已显式指定账号：${agentKey}（请勿更换为其他账号）` : "- 账号由你结合任务性质与剩余额度自动优选",
       mode === "new" ? "- 用户要求强制新开独立并发工位（action 必须为 spawn_parallel）" : "- 若存在同账号且语义高度相关的空闲干净工位，可建议 reuse_clean，否则建议 spawn_parallel",
+      ...(allowChat === false ? ["- 当前来自派单台显式任务提交，不要返回 chat，请直接输出 dispatch 与对应 tasks。"] : []),
+      "",
+      "【任务难度分级标准（difficulty 务必克制准确，禁止盲目给 heavy）】",
+      "- fast: 轻量查询、信息/指标采集（如采集业务与创收指标写入 `.agent-metrics.json`、统计汇总、状态巡检）、翻译、文案微调、改名等机械或资料收集型任务（即使包含「全面/全量/不要遗漏」，只要本质是信息采集汇总就选 `fast`）",
+      "- balanced: 常规功能开发、接口编写、一般 Bug 修复、页面样式调整、单测补齐等日常任务",
+      "- heavy: 高难度架构设计、跨模块大规模重构、复杂并发/死锁/内存泄漏等疑难根因排查、底层协议或安全审计",
       "",
       `【用户输入】「${text}」`,
       "",
@@ -2475,7 +3098,7 @@ export class MissionOverviewService {
       '  "tasks": [',
       "    {",
       '      "topicId": "匹配到的产线 id",',
-      '      "instruction": "提炼后的清晰、可直接交给 AI 员工执行的任务描述（去掉称呼和口癖）",',
+      '      "instruction": "提炼后的清晰、可直接交给 AI 员工执行的任务描述（去掉称呼和口癖；若为单任务且原文包含精确文件路径、JSON 格式要求、字段名或口径约束，必须完整保留，不得省略）",',
       '      "specialty": "hardcore | creative | general",',
       '      "difficulty": "fast | balanced | heavy",',
       '      "agentKey": "推荐的账号 agentKey",',
@@ -2489,7 +3112,40 @@ export class MissionOverviewService {
       "如果用户一句话里包含多个互不依赖或跨项目的事项，请主动拆分为 2~5 条并行 tasks。",
     ].join("\n");
 
-    const aiRes = await this.#invokeLightweightModel(prompt, preferredModel || this.#cache.preferredModel || "auto").catch(() => null);
+    const healthyProviders = new Set(
+      pool
+        .filter((p) => p?.installed !== false && !extractProfileQuotaScore(p).exhausted)
+        .map((p) => p.provider)
+        .filter(Boolean),
+    );
+    const installedProviders = healthyProviders.size > 0
+      ? healthyProviders
+      : new Set(pool.filter((p) => p?.installed !== false).map((p) => p.provider).filter(Boolean));
+    let effectivePreferred = preferredModel || DEFAULT_DISPATCH_PLANNER_MODEL;
+    if (
+      effectivePreferred === DEFAULT_DISPATCH_PLANNER_MODEL
+      && installedProviders.size > 0
+      && !installedProviders.has("antigravity")
+      && this.#cache.preferredModel
+      && this.#cache.preferredModel !== "auto"
+    ) {
+      const cachedPrefProvider = String(this.#cache.preferredModel).split(":")[0];
+      if (installedProviders.has(cachedPrefProvider)) {
+        effectivePreferred = this.#cache.preferredModel;
+      }
+    }
+
+    const aiRes = await this.#invokeLightweightModel(
+      prompt,
+      effectivePreferred,
+      {
+        fallbackToAuto: true,
+        deadlineMs: Date.now() + 18_000,
+        maxAttempts: 2,
+        availableProviders: installedProviders,
+        dedupeByProvider: true,
+      },
+    ).catch(() => null);
     if (!aiRes?.parsed || typeof aiRes.parsed !== "object") {
       return null;
     }
@@ -2522,6 +3178,7 @@ export class MissionOverviewService {
     sparkId = "",
     inheritContext = true,
     useAiPlanner = false,
+    allowChat = true,
     approvedRoutes = null,
   } = {}) {
     await this.#ensureLoaded();
@@ -2554,9 +3211,14 @@ export class MissionOverviewService {
     // Fast path: execute already-previewed & user-approved routes verbatim when confirmOnly is false
     if (!confirmOnly && Array.isArray(approvedRoutes) && approvedRoutes.length > 0) {
       for (const rt of approvedRoutes.slice(0, 5)) {
-        const targetTopic = topicMap.get(rt?.topicId) || flatTopics[0];
+        const targetTopic = topicMap.get(rt?.topicId) || flatTopics[0] || {
+          id: rt?.topicId || "general-workspace",
+          name: rt?.topicName || "默认工作区",
+          primaryCwd: normPath(rt?.cwd) || process.cwd(),
+          activeThreads: [],
+        };
         const segText = String(rt?.segmentText || cleanText).trim();
-        if (!targetTopic || !segText) continue;
+        if (!segText) continue;
         const resolvedKey = String(rt?.agentKey || "").trim();
         const prof = profileByKey.get(resolvedKey);
         const agent = prof
@@ -2620,8 +3282,8 @@ export class MissionOverviewService {
       aiPlanned = Boolean(approvedRoutes.some((r) => r?.agentSource === "ai"));
     }
 
-    // AI-assisted planning path for natural-language sprite dispatch previews
-    if (!routes.length && confirmOnly && useAiPlanner) {
+    // AI-assisted planning path for natural-language dispatch previews
+    if (!routes.length && useAiPlanner) {
       const aiPlan = await this.#planDispatchWithAi({
         text: cleanText,
         scopedTopicId: topicId,
@@ -2630,197 +3292,208 @@ export class MissionOverviewService {
         agentKey,
         mode,
         excludedAgentKeys,
+        allowChat,
       });
       if (aiPlan) {
-        aiPlanned = true;
-        aiModel = aiPlan.modelLabel || "";
-        aiReply = aiPlan.reply || "";
         if (aiPlan.intent === "chat") {
-          return {
-            ok: true,
-            confirmOnly: true,
-            chatOnly: true,
-            aiPlanned: true,
-            aiModel,
-            reply: aiReply || "我在听，请告诉我你需要处理哪个项目或具体任务。",
-            routes: [],
-          };
-        }
-        const usedThreadIds = new Set();
-        const excludedSet = new Set(
-          Array.isArray(excludedAgentKeys)
-            ? excludedAgentKeys
-            : (this.#cache.dispatchPrefs?.excludedAgentKeys || []),
-        );
-        for (const item of aiPlan.tasks) {
-          const segText = String(item?.instruction || "").trim();
-          if (!segText) continue;
-          let targetTopic = topicMap.get(item?.topicId) || (topicId ? topicMap.get(topicId) : null);
-          if (!targetTopic) {
-            let bestScore = 0;
-            for (const tp of flatTopics) {
-              const sc = scoreTextAgainstTopic(segText, tp);
-              if (sc > bestScore) {
-                bestScore = sc;
-                targetTopic = tp;
-              }
-            }
-          }
-          if (!targetTopic) {
-            targetTopic = flatTopics[0] || {
-              id: "general-workspace",
-              name: "默认工作区",
-              primaryCwd: process.cwd(),
-              activeThreads: [],
+          if (confirmOnly && allowChat) {
+            return {
+              ok: true,
+              confirmOnly: true,
+              chatOnly: true,
+              aiPlanned: true,
+              aiModel: aiPlan.modelLabel || "",
+              reply: aiPlan.reply || "我在听，请告诉我你需要处理哪个项目或具体任务。",
+              routes: [],
             };
           }
-
-          const taskSpecialty = ["hardcore", "creative", "general"].includes(item?.specialty)
-            ? item.specialty
-            : classifyDispatchTaskSpecialty(segText);
-          const difficulty = ["fast", "balanced", "heavy"].includes(item?.difficulty)
-            ? item.difficulty
-            : classifyDispatchTaskDifficulty(segText);
-
-          let agent = null;
-          const aiKey = String(item?.agentKey || "").trim();
-          if (agentKey && agentKey !== "auto") {
-            agent = this.#resolveDispatchAgent({
-              agentKey,
-              preferredProvider,
-              topic: targetTopic,
-              profiles: profileInfo.profiles,
-              defaultKey: profileInfo.defaultKey,
-              flatTopics,
-              priorityStrategy,
-              providerOrder,
-              excludedAgentKeys,
-              taskSpecialty,
-            });
-          } else if (aiKey && profileByKey.has(aiKey) && !excludedSet.has(aiKey)) {
-            const p = profileByKey.get(aiKey);
-            const quotaInfo = extractProfileQuotaScore(p);
-            const hasHealthyAlt = profileInfo.profiles.some(
-              (cand) => !excludedSet.has(`${cand.provider}:${cand.id || "default"}`) && !extractProfileQuotaScore(cand).exhausted,
-            );
-            if (!quotaInfo.exhausted || !hasHealthyAlt) {
-              agent = {
-                provider: p.provider,
-                profileId: p.id || "default",
-                agentKey: aiKey,
-                agentLabel: this.#describeProfile(p),
-                agentSource: "ai",
-                agentReason: [quotaInfo.summary, String(item?.reason || "").trim()].filter(Boolean).join(" · ") || "AI 结合任务性质优选",
+        } else {
+          const usedThreadIds = new Set();
+          const excludedSet = new Set(
+            Array.isArray(excludedAgentKeys)
+              ? excludedAgentKeys
+              : (this.#cache.dispatchPrefs?.excludedAgentKeys || []),
+          );
+          for (const item of aiPlan.tasks) {
+            let segText = String(item?.instruction || "").trim();
+            if (!segText) continue;
+            if (
+              aiPlan.tasks.length === 1
+              && cleanText.length > segText.length
+              && (segText.length < cleanText.length * 0.75 || /\{[^}]+\}|\/[\w.-]+\.\w+|\.agent-metrics/.test(cleanText))
+            ) {
+              segText = cleanText;
+            }
+            let targetTopic = topicMap.get(item?.topicId) || (topicId ? topicMap.get(topicId) : null);
+            if (!targetTopic) {
+              let bestScore = 0;
+              for (const tp of flatTopics) {
+                const sc = scoreTextAgainstTopic(segText, tp);
+                if (sc > bestScore) {
+                  bestScore = sc;
+                  targetTopic = tp;
+                }
+              }
+            }
+            if (!targetTopic) {
+              targetTopic = flatTopics[0] || {
+                id: "general-workspace",
+                name: "默认工作区",
+                primaryCwd: process.cwd(),
+                activeThreads: [],
               };
             }
-          }
-          if (!agent) {
-            agent = this.#resolveDispatchAgent({
-              agentKey,
-              preferredProvider,
-              topic: targetTopic,
-              profiles: profileInfo.profiles,
-              defaultKey: profileInfo.defaultKey,
-              flatTopics,
-              priorityStrategy,
-              providerOrder,
-              excludedAgentKeys,
-              taskSpecialty,
-            });
-          }
 
-          const availableModels = typeof this.#hub?.listModels === "function"
-            ? await this.#hub.listModels(agent.provider, agent.profileId).catch(() => [])
-            : [];
-          const selectedModel = selectAdaptiveModelForRoute({
-            provider: agent.provider,
-            difficulty,
-            explicitModel: cleanModel,
-            availableModels,
-          });
-          const resolvedEffort = String(effort || selectedModel.effort || "").trim();
-          const segStage = inferStageTag({ title: segText, preview: "" }, targetTopic);
+            const taskSpecialty = ["hardcore", "creative", "general"].includes(item?.specialty)
+              ? item.specialty
+              : classifyDispatchTaskSpecialty(segText);
+            const difficulty = ["fast", "balanced", "heavy"].includes(item?.difficulty)
+              ? item.difficulty
+              : classifyDispatchTaskDifficulty(segText);
 
-          const topicDigest = this.#contextsStore.topics?.[targetTopic.id] || null;
-          const hasTopicDigest = Boolean(topicDigest?.summary);
-          const forceNew = mode === "new";
-          const effectiveCwd = resolveTargetCwd(targetTopic);
-          const isSubOverride = Boolean(cleanCwdOverride && effectiveCwd === cleanCwdOverride && effectiveCwd !== normPath(targetTopic.primaryCwd));
+            let agent = null;
+            const aiKey = String(item?.agentKey || "").trim();
+            if (agentKey && agentKey !== "auto") {
+              agent = this.#resolveDispatchAgent({
+                agentKey,
+                preferredProvider,
+                topic: targetTopic,
+                profiles: profileInfo.profiles,
+                defaultKey: profileInfo.defaultKey,
+                flatTopics,
+                priorityStrategy,
+                providerOrder,
+                excludedAgentKeys,
+                taskSpecialty,
+              });
+            } else if (aiKey && profileByKey.has(aiKey) && !excludedSet.has(aiKey)) {
+              const p = profileByKey.get(aiKey);
+              const quotaInfo = extractProfileQuotaScore(p);
+              const hasHealthyAlt = profileInfo.profiles.some(
+                (cand) => !excludedSet.has(`${cand.provider}:${cand.id || "default"}`) && !extractProfileQuotaScore(cand).exhausted,
+              );
+              if (!quotaInfo.exhausted || !hasHealthyAlt) {
+                agent = {
+                  provider: p.provider,
+                  profileId: p.id || "default",
+                  agentKey: aiKey,
+                  agentLabel: this.#describeProfile(p),
+                  agentSource: "ai",
+                  agentReason: [quotaInfo.summary, String(item?.reason || "").trim()].filter(Boolean).join(" · ") || "AI 结合任务性质优选",
+                };
+              }
+            }
+            if (!agent) {
+              agent = this.#resolveDispatchAgent({
+                agentKey,
+                preferredProvider,
+                topic: targetTopic,
+                profiles: profileInfo.profiles,
+                defaultKey: profileInfo.defaultKey,
+                flatTopics,
+                priorityStrategy,
+                providerOrder,
+                excludedAgentKeys,
+                taskSpecialty,
+              });
+            }
 
-          let reuseThread = null;
-          if (!forceNew && item?.action === "reuse_clean" && item?.targetThreadId) {
-            const cand = (targetTopic.activeThreads || []).find((t) => (
-              t.id === item.targetThreadId
-              && !t.isSlice
-              && !usedThreadIds.has(t.id)
-              && !t.live
-              && !(t.pendingCount > 0)
-              && !t.isCrossWorkspace
-              && !t.isMultiTaskSession
-              && agentKeyOfThread(t) === agent.agentKey
-              && (!isSubOverride || (t.cwd && pathMatchesPrefix(t.cwd, effectiveCwd)))
-            ));
-            if (cand) reuseThread = cand;
-          }
-
-          if (reuseThread) {
-            usedThreadIds.add(reuseThread.id);
-            routes.push({
-              segmentText: segText,
-              action: "reuse_clean",
-              topicId: targetTopic.id,
-              topicName: targetTopic.name,
-              cwd: effectiveCwd,
-              stage: segStage,
-              threadId: reuseThread.id,
-              threadTitle: reuseThread.title,
+            const availableModels = await this.#listModelsForAgent(agent.provider, agent.profileId);
+            const selectedModel = selectAdaptiveModelForRoute({
               provider: agent.provider,
-              profileId: agent.profileId,
-              agentKey: agent.agentKey,
-              agentLabel: agent.agentLabel,
-              agentSource: agent.agentSource,
-              agentSourceLabel: AGENT_SOURCE_LABELS[agent.agentSource] || "",
-              agentReason: agent.agentReason || "",
-              model: selectedModel.model || cleanModel,
-              effort: resolvedEffort,
-              taskDifficulty: difficulty,
-              taskDifficultyLabel: TASK_DIFFICULTY_LABELS[difficulty] || "",
-              hasTopicDigest,
-              willInheritContext: false,
-              contextSummaryPreview: "",
-              contextFilePath: topicDigest?.contextFilePath || "",
-              reason: String(item?.reason || "").trim() || `AI 匹配并复用空闲工位「${compactHeadline(reuseThread.title, 18)}」`,
+              difficulty,
+              explicitModel: cleanModel,
+              availableModels,
             });
-          } else {
-            const willInherit = Boolean(inheritContext !== false && hasTopicDigest);
-            routes.push({
-              segmentText: segText,
-              action: "spawn_parallel",
-              topicId: targetTopic.id,
-              topicName: targetTopic.name,
-              cwd: effectiveCwd,
-              stage: segStage,
-              threadId: "",
-              threadTitle: compactHeadline(segText, 24),
-              provider: agent.provider,
-              profileId: agent.profileId,
-              agentKey: agent.agentKey,
-              agentLabel: agent.agentLabel,
-              agentSource: agent.agentSource,
-              agentSourceLabel: AGENT_SOURCE_LABELS[agent.agentSource] || "",
-              agentReason: agent.agentReason || "",
-              model: selectedModel.model || cleanModel,
-              effort: resolvedEffort,
-              taskDifficulty: difficulty,
-              taskDifficultyLabel: TASK_DIFFICULTY_LABELS[difficulty] || "",
-              hasTopicDigest,
-              willInheritContext: willInherit,
-              contextSummaryPreview: willInherit ? compactHeadline(topicDigest.summary, 64) : "",
-              contextFilePath: topicDigest?.contextFilePath || "",
-              reason: String(item?.reason || "").trim() || (isSubOverride
-                ? `在「${targetTopic.name} · ${basename(effectiveCwd)}」子项目目录开启独立干净工位`
-                : `在「${targetTopic.name}」开启独立干净工位`),
-            });
+            const resolvedEffort = String(effort || selectedModel.effort || "").trim();
+            const segStage = inferStageTag({ title: segText, preview: "" }, targetTopic);
+
+            const topicDigest = this.#contextsStore.topics?.[targetTopic.id] || null;
+            const hasTopicDigest = Boolean(topicDigest?.summary);
+            const forceNew = mode === "new";
+            const effectiveCwd = resolveTargetCwd(targetTopic);
+            const isSubOverride = Boolean(cleanCwdOverride && effectiveCwd === cleanCwdOverride && effectiveCwd !== normPath(targetTopic.primaryCwd));
+
+            let reuseThread = null;
+            if (!forceNew && item?.action === "reuse_clean" && item?.targetThreadId) {
+              const cand = (targetTopic.activeThreads || []).find((t) => (
+                t.id === item.targetThreadId
+                && !t.isSlice
+                && !usedThreadIds.has(t.id)
+                && !t.live
+                && !(t.pendingCount > 0)
+                && !t.isCrossWorkspace
+                && !t.isMultiTaskSession
+                && agentKeyOfThread(t) === agent.agentKey
+                && (!isSubOverride || (t.cwd && pathMatchesPrefix(t.cwd, effectiveCwd)))
+              ));
+              if (cand) reuseThread = cand;
+            }
+
+            if (reuseThread) {
+              usedThreadIds.add(reuseThread.id);
+              routes.push({
+                segmentText: segText,
+                action: "reuse_clean",
+                topicId: targetTopic.id,
+                topicName: targetTopic.name,
+                cwd: effectiveCwd,
+                stage: segStage,
+                threadId: reuseThread.id,
+                threadTitle: reuseThread.title,
+                provider: agent.provider,
+                profileId: agent.profileId,
+                agentKey: agent.agentKey,
+                agentLabel: agent.agentLabel,
+                agentSource: agent.agentSource,
+                agentSourceLabel: AGENT_SOURCE_LABELS[agent.agentSource] || "",
+                agentReason: agent.agentReason || "",
+                model: selectedModel.model || cleanModel,
+                effort: resolvedEffort,
+                taskDifficulty: difficulty,
+                taskDifficultyLabel: TASK_DIFFICULTY_LABELS[difficulty] || "",
+                hasTopicDigest,
+                willInheritContext: false,
+                contextSummaryPreview: "",
+                contextFilePath: topicDigest?.contextFilePath || "",
+                reason: String(item?.reason || "").trim() || `AI 匹配并复用空闲工位「${compactHeadline(reuseThread.title, 18)}」`,
+              });
+            } else {
+              const willInherit = Boolean(inheritContext !== false && hasTopicDigest);
+              routes.push({
+                segmentText: segText,
+                action: "spawn_parallel",
+                topicId: targetTopic.id,
+                topicName: targetTopic.name,
+                cwd: effectiveCwd,
+                stage: segStage,
+                threadId: "",
+                threadTitle: compactHeadline(segText, 24),
+                provider: agent.provider,
+                profileId: agent.profileId,
+                agentKey: agent.agentKey,
+                agentLabel: agent.agentLabel,
+                agentSource: agent.agentSource,
+                agentSourceLabel: AGENT_SOURCE_LABELS[agent.agentSource] || "",
+                agentReason: agent.agentReason || "",
+                model: selectedModel.model || cleanModel,
+                effort: resolvedEffort,
+                taskDifficulty: difficulty,
+                taskDifficultyLabel: TASK_DIFFICULTY_LABELS[difficulty] || "",
+                hasTopicDigest,
+                willInheritContext: willInherit,
+                contextSummaryPreview: willInherit ? compactHeadline(topicDigest.summary, 64) : "",
+                contextFilePath: topicDigest?.contextFilePath || "",
+                reason: String(item?.reason || "").trim() || (isSubOverride
+                  ? `在「${targetTopic.name} · ${basename(effectiveCwd)}」子项目目录开启独立干净工位`
+                  : `在「${targetTopic.name}」开启独立干净工位`),
+              });
+            }
+          }
+          if (routes.length > 0) {
+            aiPlanned = true;
+            aiModel = aiPlan.modelLabel || "";
+            aiReply = aiPlan.reply || "";
           }
         }
       }
@@ -2868,9 +3541,7 @@ export class MissionOverviewService {
         taskSpecialty,
       });
       const difficulty = classifyDispatchTaskDifficulty(segText);
-      const availableModels = typeof this.#hub?.listModels === "function"
-        ? await this.#hub.listModels(agent.provider, agent.profileId).catch(() => [])
-        : [];
+      const availableModels = await this.#listModelsForAgent(agent.provider, agent.profileId);
       const selectedModel = selectAdaptiveModelForRoute({
         provider: agent.provider,
         difficulty,
@@ -3073,18 +3744,30 @@ export class MissionOverviewService {
     };
   }
 
-  #lightweightCandidates(preferredModel = "auto") {
-    return preferredModel && preferredModel !== "auto"
-      ? [OVERVIEW_MODEL_OPTIONS.find((o) => o.key === preferredModel)].filter(Boolean)
-      : [
-          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "antigravity:gemini-3.8-flash"),
-          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "antigravity:gemini-4-hydrogen"),
-          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "codex:gpt-6.1-terra"),
-          OVERVIEW_MODEL_OPTIONS.find((o) => o.key === "claude:claude-sonnet-5-5"),
-        ].filter(Boolean);
+  async #listModelsForAgent(provider, profileId = "") {
+    if (typeof this.#hub?.listModels !== "function") return [];
+    const res = await this.#hub.listModels({ provider, profileId }).catch(() => null);
+    if (Array.isArray(res)) return res;
+    if (Array.isArray(res?.data)) return res.data;
+    if (provider && Array.isArray(res?.byProvider?.[provider])) return res.byProvider[provider];
+    return [];
   }
 
-  async #invokeLightweightModel(prompt, preferredModel = "auto") {
+  #lightweightCandidates(preferredModel = "auto") {
+    return selectLightweightModelCandidates({ preferredModel });
+  }
+
+  async #invokeLightweightModel(
+    prompt,
+    preferredModel = "auto",
+    {
+      fallbackToAuto = false,
+      deadlineMs = 0,
+      maxAttempts = 0,
+      availableProviders = null,
+      dedupeByProvider = false,
+    } = {},
+  ) {
     if (this.#runAiImpl) {
       const raw = await this.#runAiImpl({ prompt, preferredModel });
       const parsed = typeof raw === "object" && raw !== null ? raw : parseJsonFromAiText(raw);
@@ -3094,9 +3777,18 @@ export class MissionOverviewService {
       return { parsed: null, error: "测试环境跳过外部模型" };
     }
 
-    const candidates = this.#lightweightCandidates(preferredModel);
+    const candidates = selectLightweightModelCandidates({
+      preferredModel,
+      fallbackToAuto,
+      availableProviders,
+      dedupeByProvider,
+      maxAttempts,
+    });
 
-    const result = await this.#runModelChain(prompt, candidates, parseJsonFromAiText);
+    const chainOpts = {
+      ...(deadlineMs > 0 ? { deadlineMs } : {}),
+    };
+    const result = await this.#runModelChain(prompt, candidates, parseJsonFromAiText, chainOpts);
     return result.value ? { parsed: result.value, modelLabel: result.modelLabel } : { parsed: null, error: result.error };
   }
 

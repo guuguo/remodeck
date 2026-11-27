@@ -251,18 +251,19 @@ $CfgLines = @(
 )
 [System.IO.File]::WriteAllText($CfgPath, ($CfgLines -join "`r`n") + "`r`n", [System.Text.UTF8Encoding]::new($false))
 
-$LauncherCs = Join-Path $ScriptDir "RemoteDeckLauncher.cs"
-$ExePath = Join-Path $LocalBase "RemoteDeck.exe"
+$LauncherCs = Join-Path $ScriptDir "RemoDeckLauncher.cs"
+$ExePath = Join-Path $LocalBase "RemoDeck.exe"
 $BuiltExePath = ""
 $CscExe = Find-CscExe
 if ($CscExe -and (Test-Path -LiteralPath $LauncherCs -PathType Leaf)) {
   try {
-    $StageExe = Join-Path $LocalBase "RemoteDeck.new.exe"
+    $StageExe = Join-Path $LocalBase "RemoDeck.new.exe"
     Remove-Item -LiteralPath $StageExe -Force -ErrorAction SilentlyContinue
     & $CscExe /nologo /optimize+ /target:winexe /utf8output "/win32icon:$IconPath" "/out:$StageExe" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $LauncherCs | Out-Null
     if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $StageExe -PathType Leaf)) {
       Move-Item -LiteralPath $StageExe -Destination $ExePath -Force
       $BuiltExePath = $ExePath
+      Remove-Item -LiteralPath (Join-Path $LocalBase "RemoteDeck.exe") -Force -ErrorAction SilentlyContinue
     } else {
       Remove-Item -LiteralPath $StageExe -Force -ErrorAction SilentlyContinue
     }
@@ -317,7 +318,7 @@ $ShellHelperCs = @"
 using System;
 using System.Runtime.InteropServices;
 
-namespace RemoteDeckShell {
+namespace RemoDeckShell {
   [StructLayout(LayoutKind.Sequential)]
   public struct PropertyKey {
     public Guid fmtid;
@@ -422,7 +423,7 @@ namespace RemoteDeckShell {
 
 $shellHelperReady = $false
 try {
-  if (-not ("RemoteDeckShell.ShortcutHelper" -as [type])) {
+  if (-not ("RemoDeckShell.ShortcutHelper" -as [type])) {
     Add-Type -TypeDefinition $ShellHelperCs -ErrorAction Stop
   }
   $shellHelperReady = $true
@@ -441,27 +442,29 @@ foreach ($entry in @(
   }
 
   Remove-Item -LiteralPath (Join-Path $dir "Agent Control.lnk") -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath (Join-Path $dir "RemoteDeck.lnk") -Force -ErrorAction SilentlyContinue
   if ($entry.Kind -eq "desktop") {
     Remove-Item -LiteralPath (Join-Path $dir "Agent Control.url") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $dir "RemoteDeck.url") -Force -ErrorAction SilentlyContinue
   }
 
-  $LnkPath = Join-Path $dir "RemoteDeck.lnk"
+  $LnkPath = Join-Path $dir "RemoDeck.lnk"
   $Shortcut = $WshShell.CreateShortcut($LnkPath)
   $Shortcut.TargetPath = $TargetPath
   $Shortcut.Arguments = $TargetArgs
   $Shortcut.WorkingDirectory = $RootDir
-  $Shortcut.Description = "RemoteDeck (RemoDeck / Agent Control) Desktop Console"
+  $Shortcut.Description = "RemoDeck (Agent Control) Desktop Console"
   $Shortcut.IconLocation = $IconLocation
   $Shortcut.Save()
 
   if ($shellHelperReady -and (Test-Path -LiteralPath $LnkPath)) {
     try {
-      [RemoteDeckShell.ShortcutHelper]::ApplyAppUserModel($LnkPath, $AppUserModelId, $RelaunchCmd, $IconLocation, "RemoteDeck")
+      [RemoDeckShell.ShortcutHelper]::ApplyAppUserModel($LnkPath, $AppUserModelId, $RelaunchCmd, $IconLocation, "RemoDeck")
     } catch {
       Write-Warning "写入快捷方式 AppUserModel 属性失败 ($LnkPath): $($_.Exception.Message)"
     }
     try {
-      [RemoteDeckShell.ShortcutHelper]::NotifyIconChanged($dir)
+      [RemoDeckShell.ShortcutHelper]::NotifyIconChanged($dir)
     } catch {}
   }
 
@@ -497,7 +500,7 @@ $MetaObj = [ordered]@{
 $MetaJson = ($MetaObj | ConvertTo-Json -Depth 4) + "`r`n"
 [System.IO.File]::WriteAllText($MetaPath, $MetaJson, [System.Text.UTF8Encoding]::new($false))
 
-Write-Host "已安装 RemoteDeck Windows 桌面 App："
+Write-Host "已安装 RemoDeck Windows 桌面 App："
 if ($StartMenuShortcutPath) { Write-Host "  开始菜单: $StartMenuShortcutPath" }
 if ($DesktopShortcutPath) { Write-Host "  桌面快捷方式: $DesktopShortcutPath" }
 if ($BuiltExePath) { Write-Host "  原生启动器: $BuiltExePath" }

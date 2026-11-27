@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="ac-ui-version" content="20261126remotedeck4" />
-  <title>RemoteDeck · 多智能体远程控制台</title>
+  <meta name="ac-ui-version" content="20261127remodeck1" />
+  <title>RemoDeck · 多智能体远程控制台</title>
   <link rel="icon" href="./favicon.ico" sizes="any" />
   <link rel="icon" type="image/svg+xml" href="./icon.svg" />
   <link rel="apple-touch-icon" href="./icon-192.png" />
@@ -22,10 +22,10 @@
       } catch {}
     })();
   </script>
-  <link rel="stylesheet" href="./app.css?v=20261126remotedeck4" />
-  <link rel="stylesheet" href="./project-workspace.css?v=20261126remotedeck4" />
-  <link rel="stylesheet" href="./tycoon-assistant.css?v=20261126remotedeck4" />
-  <link rel="stylesheet" href="./sprite-assistant.css?v=20261126remotedeck4" />
+  <link rel="stylesheet" href="./app.css?v=20261127remodeck1" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261127remodeck1" />
+  <link rel="stylesheet" href="./tycoon-assistant.css?v=20261127remodeck1" />
+  <link rel="stylesheet" href="./sprite-assistant.css?v=20261127remodeck1" />
 </head>
 <body>
   <div id="appShell" class="app-shell">
@@ -42,7 +42,7 @@
             aria-label="切换日间与深色模式"
           >
             <span class="brand-dot" id="sseStatusDot" title="实时连接状态"></span>
-            <strong>RemoteDeck</strong>
+            <strong>RemoDeck</strong>
             <span id="themeToggleIcon" class="brand-theme-icon" data-icon="monitor" data-icon-size="12" aria-hidden="true"></span>
           </button>
           <div class="brand-row-meta">
@@ -861,7 +861,7 @@
           <label class="update-toggle-row">
             <input id="automationsGlobalToggle" type="checkbox" checked />
             <span class="update-toggle-copy">
-              <strong>原 App 未开启时，由 RemoteDeck 到点自动唤起执行</strong>
+              <strong>原 App 未开启时，由 RemoDeck 到点自动唤起执行</strong>
               <small>每 30 秒检查一次 Codex / Claude / 自定义计划任务；若原客户端已运行过则自动跳过，绝不重复触发或篡改原库。</small>
             </span>
           </label>
@@ -954,7 +954,7 @@
         <button type="button" id="closeInstanceManagerBtn" class="icon-btn" data-close-modal="instanceManagerModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
       </div>
       <div class="modal-body instance-manager-modal-body">
-        <p class="instance-mgr-intro">每个实例使用独立隔离目录保存登录态；首次登录授权后即可关闭外部窗口，平时由 RemoteDeck 在后台直接接管控制。</p>
+        <p class="instance-mgr-intro">每个实例使用独立隔离目录保存登录态；首次登录授权后即可关闭外部窗口，平时由 RemoDeck 在后台直接接管控制。</p>
         <div id="instProviderTabs" class="inst-provider-tabs" role="tablist" aria-label="选择智能体">
           <button type="button" class="inst-provider-tab is-active" data-inst-provider="codex">Codex</button>
           <button type="button" class="inst-provider-tab" data-inst-provider="claude">Claude Code</button>
@@ -1009,7 +1009,7 @@
     <div id="newThreadCwdList" class="cwd-picker-list" role="listbox" aria-label="工作目录列表"></div>
   </div>
 
-  <script type="module" src="./i18n.js?v=20261126remotedeck4"></script>
-  <script type="module" src="./app.js?v=20261126remotedeck4"></script>
+  <script type="module" src="./i18n.js?v=20261127remodeck1"></script>
+  <script type="module" src="./app.js?v=20261127remodeck1"></script>
 </body>
 </html>

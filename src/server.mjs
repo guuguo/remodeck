@@ -63,6 +63,16 @@ function splitSpeechSegments(text = "") {
   }
   return segments.length ? segments : [clean];
 }
+
+function extractOverviewLocale(request, url, body = null) {
+  return String(
+    body?.locale
+    || url?.searchParams?.get("locale")
+    || url?.searchParams?.get("lang")
+    || request?.headers?.["accept-language"]
+    || "",
+  ).trim();
+}
 import { getSkillSyncStatus, installSkill, uninstallSkill } from "./skill-sync.mjs";
 import { buildTaskTree, TaskStore } from "./task-store.mjs";
 import { UpdateService } from "./update-service.mjs";
@@ -647,7 +657,8 @@ export async function createAgentControlServer({
       if (pathname === "/api/overview" && request.method === "GET") {
         const trigger = url.searchParams.get("trigger") || "view";
         const force = url.searchParams.get("force") === "1" || url.searchParams.get("force") === "true";
-        const result = await overviewService.getOverview({ trigger, force });
+        const locale = extractOverviewLocale(request, url);
+        const result = await overviewService.getOverview({ trigger, force, locale });
         sendJson(response, 200, result, { requestId });
         return;
       }
@@ -1365,6 +1376,7 @@ export async function createAgentControlServer({
         const body = await readJsonBody(request);
         const result = await overviewService.syncProjects({
           clearExisting: Boolean(body.clearExisting),
+          locale: extractOverviewLocale(request, url, body),
         });
         sendJson(response, 200, result, { requestId });
         return;
@@ -1421,6 +1433,7 @@ export async function createAgentControlServer({
           sparkId: body.sparkId || "",
           inheritContext: body.inheritContext !== false,
           useAiPlanner: Boolean(body.useAiPlanner),
+          ...(body.allowChat === false ? { allowChat: false } : {}),
           approvedRoutes: Array.isArray(body.approvedRoutes) ? body.approvedRoutes : null,
         });
         sendJson(response, 200, result, { requestId });
@@ -1458,6 +1471,7 @@ export async function createAgentControlServer({
           confirmOnly: body.confirmOnly !== false,
           operations: Array.isArray(body.operations) ? body.operations : null,
           preferredModel: body.preferredModel || "auto",
+          locale: extractOverviewLocale(request, url, body),
         });
         sendJson(response, 200, result, { requestId });
         return;
@@ -1687,6 +1701,17 @@ export async function createAgentControlServer({
           });
           rs.pipe(response);
         });
+        return;
+      }
+
+      if (pathname === "/api/thread/upload" && request.method === "POST") {
+        const body = await readJsonBody(request, 28 * 1024 * 1024);
+        context.threadId = body.threadId || "";
+        const result = await hub.saveUploadedFiles({
+          threadId: body.threadId || "",
+          files: Array.isArray(body.files) ? body.files : [],
+        });
+        sendJson(response, 200, result, { requestId });
         return;
       }
 

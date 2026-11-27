@@ -496,6 +496,7 @@ export async function createHotExtensionServer({
           sparkId: body.sparkId || "",
           inheritContext: body.inheritContext !== false,
           useAiPlanner: Boolean(body.useAiPlanner),
+          ...(body.allowChat === false ? { allowChat: false } : {}),
           approvedRoutes: Array.isArray(body.approvedRoutes) ? body.approvedRoutes : null,
         });
         sendJson(response, 200, result);

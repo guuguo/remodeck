@@ -214,7 +214,7 @@ test("Quick Tunnel end-to-end: gateway auth, DNS-rebinding block, /health redact
   // 5. Authenticated tunnel access succeeds, but remote management & secrets stay blocked.
   const authedHome = await fetch(`${tunnelUrl}/`, { headers: { Cookie: cookieHeader } });
   assert.equal(authedHome.status, 200);
-  assert.match(await authedHome.text(), /RemoteDeck/);
+  assert.match(await authedHome.text(), /RemoDeck/);
 
   const authedThreads = await fetch(`${tunnelUrl}/api/threads`, { headers: { Cookie: cookieHeader } });
   assert.equal(authedThreads.status, 200);

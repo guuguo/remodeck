@@ -7,7 +7,7 @@ import { gzipSync } from "node:zlib";
 import { WebSocket, WebSocketServer } from "ws";
 
 const DEFAULT_PORT = Number(process.env.PORT || 8080);
-const DEFAULT_MAX_BODY_BYTES = 24 * 1024 * 1024;
+const DEFAULT_MAX_BODY_BYTES = 28 * 1024 * 1024;
 const STREAM_REQUEST_THRESHOLD_BYTES = 64 * 1024;
 const STREAM_REQUEST_CHUNK_BYTES = 32 * 1024;
 const RELAY_WS_HIGH_WATER_MARK = 256 * 1024;
@@ -113,7 +113,7 @@ function offlineHtml(instanceId) {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="refresh" content="3" />
-  <title>RemoteDeck · 等待主机上线</title>
+  <title>RemoDeck · 等待主机上线</title>
   <style>
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; background: #0d1117; color: #e6edf3; display: grid; place-items: center; min-height: 100vh; padding: 24px; }
     .card { max-width: 420px; width: 100%; background: #161b22; border: 1px solid #30363d; border-radius: 16px; padding: 24px; box-sizing: border-box; text-align: center; }
@@ -139,7 +139,7 @@ function unauthorizedHtml() {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>RemoteDeck · 需要重新扫码配对</title>
+  <title>RemoDeck · 需要重新扫码配对</title>
   <style>
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; background: #0d1117; color: #e6edf3; display: grid; place-items: center; min-height: 100vh; padding: 24px; }
     .card { max-width: 420px; width: 100%; background: #161b22; border: 1px solid #30363d; border-radius: 16px; padding: 24px; box-sizing: border-box; text-align: center; }
@@ -150,7 +150,7 @@ function unauthorizedHtml() {
 <body>
   <div class="card">
     <h1>登录已失效或未配对</h1>
-    <p>请在 Mac 本机打开 RemoteDeck 控制台，重新扫描远程访问二维码。</p>
+    <p>请在 Mac 本机打开 RemoDeck 控制台，重新扫描远程访问二维码。</p>
   </div>
 </body>
 </html>`;

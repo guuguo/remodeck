@@ -48,10 +48,13 @@ import {
   cleanClipboardTextForPastedImages,
   compressImageFileForUpload,
   estimateDataUrlBytes,
+  filterFilesNeedingUpload,
   formatByteSize,
+  partitionDataTransferFiles,
   stripAttachedImagePaths,
+  stripCoveredFileNamesFromText,
   validateImageBatchBudget,
-} from "./image-attachment.js?v=20261123imgpaste";
+} from "./image-attachment.js?v=20261127filepaste";
 import {
   abbreviateMiddleText,
   buildSelectableTelemetryItems,
@@ -84,13 +87,14 @@ import {
   resolveVisibleTelemetryKeys,
   sortProfilesByAvailability,
   summarizeTelemetryMobileBadge,
-} from "./instance-switcher.js?v=20261126agymodel";
+} from "./instance-switcher.js?v=20261127remodeck1";
 import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity, summarizeToolUseActivity } from "./live-state.js?v=20261120claude";
 import {
   cleanStreamingAgentText,
   dedupeAdjacentTurns,
   escapeHtml,
   formatClipboardFilesAsMarkdownLinks,
+  formatPastedFileMarkdownLink,
   formatToolExecutionError,
   formatTurnModelBadge,
   isRecoverableToolErrorText,
@@ -101,7 +105,7 @@ import {
   renderMessageCopyButton,
   renderTurnHtml,
   turnEndsWithProcessGroup,
-} from "./markdown.js?v=20261126agymodel";
+} from "./markdown.js?v=20261127remodeck1";
 import {
   SIDEBAR_MANUAL_HOLD_MS,
   THREAD_EXPAND_STEP,
@@ -126,8 +130,8 @@ import {
   normalizeDraftCwdInput,
   renderNewThreadCwdListHtml,
 } from "./new-thread-cwd.js?v=20261125cwd1";
-import { renderMissionOverviewHtml, renderTycoonHudHtml } from "./mission-overview.js?v=20261126remotedeck1";
-import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261126remotedeck1";
+import { renderMissionOverviewHtml, renderTycoonHudHtml } from "./mission-overview.js?v=20261127remodeck1";
+import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261127remodeck1";
 import {
   createInitialSpriteState,
   createSpriteController,
@@ -642,6 +646,7 @@ const state = {
   slashFetchSeq: 0,
   images: [],
   imageProcessingCount: 0,
+  fileUploadingCount: 0,
   composerGoal: false,
   isSubmitting: false,
   composerStatusTimer: null,
@@ -837,8 +842,8 @@ function openProjectWindow(cwd) {
 }
 
 const DEFAULT_DOCUMENT_TITLE = typeof document !== "undefined"
-  ? (document.title || "RemoteDeck · 多智能体远程控制台")
-  : "RemoteDeck · 多智能体远程控制台";
+  ? (document.title || "RemoDeck · 多智能体远程控制台")
+  : "RemoDeck · 多智能体远程控制台";
 
 function syncScopedDocumentTitle() {
   if (typeof document === "undefined") return;
@@ -848,7 +853,7 @@ function syncScopedDocumentTitle() {
     const meta = state.projectsMeta?.[state.scopedProjectCwd]
       || Object.entries(state.projectsMeta || {}).find(([k]) => isSameProjectCwd(k, state.scopedProjectCwd))?.[1];
     const projName = meta?.alias || projectBaseName(state.scopedProjectCwd) || "项目";
-    document.title = `${prefix}${projName} · RemoteDeck`;
+    document.title = `${prefix}${projName} · RemoDeck`;
     return;
   }
   document.title = `${prefix}${DEFAULT_DOCUMENT_TITLE}`;
@@ -5083,8 +5088,8 @@ function renderComposerControls() {
     imageCount: state.images.length,
   });
   const sendBtn = $("sendBtn");
-  if (state.imageProcessingCount > 0 && !state.isSubmitting) {
-    sendBtn.textContent = "处理图片…";
+  if ((state.imageProcessingCount > 0 || state.fileUploadingCount > 0) && !state.isSubmitting) {
+    sendBtn.textContent = state.fileUploadingCount > 0 ? "上传文件…" : "处理图片…";
     sendBtn.disabled = true;
     sendBtn.setAttribute("aria-busy", "true");
   } else {
@@ -6114,6 +6119,10 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
     setComposerStatus("error", "图片正在压缩处理中，请稍候再发送", { autoClearMs: 2500 });
     return;
   }
+  if (state.fileUploadingCount > 0) {
+    setComposerStatus("error", "文件正在上传中，请稍候再发送", { autoClearMs: 2500 });
+    return;
+  }
   if (state.chatTts.enabled) {
     unlockChatReplySpeechAudio();
   }
@@ -6787,7 +6796,7 @@ async function triggerProfileLogin({ provider = "", profileId = "", mode = "" } 
         authUrl: res.authUrl,
         loginCommand: res.loginCommand || "",
         title: res.openedBrowser ? "已在浏览器打开独立实例 OAuth 登录页" : "已生成独立实例 OAuth 登录链接",
-        detail: "在浏览器完成授权后，RemoteDeck 会自动接管并在后台保持在线；授权后即可关闭浏览器窗口。",
+        detail: "在浏览器完成授权后，RemoDeck 会自动接管并在后台保持在线；授权后即可关闭浏览器窗口。",
       });
       showToastBanner(
         res.openedBrowser ? "已打开独立登录页" : "已生成独立登录链接",
@@ -6800,7 +6809,7 @@ async function triggerProfileLogin({ provider = "", profileId = "", mode = "" } 
         profileId: cleanProfileId,
         loginCommand: res.loginCommand || "",
         title: "已以独立隔离目录启动 Codex 桌面端",
-        detail: "完成登录或配置后可直接关闭桌面端窗口，RemoteDeck 会在后台持续控制该实例。",
+        detail: "完成登录或配置后可直接关闭桌面端窗口，RemoDeck 会在后台持续控制该实例。",
       });
       showToastBanner("已拉起独立 Codex 客户端", {
         detail: "登录或操作完成后可随时关闭客户端窗口",
@@ -6819,7 +6828,7 @@ async function triggerProfileLogin({ provider = "", profileId = "", mode = "" } 
       }
       showToastBanner(
         res?.openedTerminal ? "已在终端开启独立登录" : "已复制独立登录命令",
-        { detail: "授权完成后可关闭终端，由 RemoteDeck 直接调度" },
+        { detail: "授权完成后可关闭终端，由 RemoDeck 直接调度" },
       );
       setComposerStatus("success", "已准备好独立终端登录引导", { autoClearMs: 3500 });
     }
@@ -8342,7 +8351,7 @@ function applyUpdateStatusSnapshot(snap, { fromReconnectReady = false } = {}) {
             location.reload();
             return;
           }
-          showToastBanner(manualRestart ? "后台服务已重启完成" : "RemoteDeck 已更新完成", {
+          showToastBanner(manualRestart ? "后台服务已重启完成" : "RemoDeck 已更新完成", {
             detail: snap.localShortSha ? `当前版本 ${snap.localShortSha}` : "服务已重新启动",
           });
         }
@@ -8351,7 +8360,7 @@ function applyUpdateStatusSnapshot(snap, { fromReconnectReady = false } = {}) {
       try { sessionStorage.removeItem(UPDATE_RESTART_FLAG_KEY); } catch {}
     }
   } else if (!prevHasUpdate && snap.hasUpdate && snap.behindCount > 0) {
-    showToastBanner("发现 RemoteDeck 新版本", {
+    showToastBanner("发现 RemoDeck 新版本", {
       detail: `领先 ${snap.behindCount} 个提交，点击右上角菜单或侧栏底部即可一键更新`,
     });
   } else if (!state.updateStatus?.desktopApp?.needsUpdate && snap.desktopApp?.installed && snap.desktopApp?.needsUpdate) {
@@ -9571,6 +9580,8 @@ async function loadMissionOverview({ trigger = "view", force = false } = {}) {
   try {
     const qs = new URLSearchParams({ trigger });
     if (force) qs.set("force", "1");
+    const locale = currentUiLocale();
+    if (locale) qs.set("locale", locale);
     const data = await apiGet(`/api/overview?${qs.toString()}`);
     if (data && Array.isArray(data.domains)) {
       state.missionOverview = data;
@@ -9613,7 +9624,10 @@ async function syncOverviewProjects({ clearExisting = false } = {}) {
   state.overviewSyncingProjects = true;
   renderProjectBoard();
   try {
-    const res = await apiPost("/api/overview/sync", { clearExisting });
+    const res = await apiPost("/api/overview/sync", {
+      clearExisting,
+      locale: currentUiLocale(),
+    });
     if (res?.overview && Array.isArray(res.overview.domains)) {
       state.missionOverview = res.overview;
     }
@@ -9751,14 +9765,28 @@ async function submitSmartDispatch({ confirmOnly = false } = {}) {
       model: chosenAgentKey !== "auto" ? (state.dispatchModel || "") : "",
       inheritContext: state.dispatchInheritContext !== false,
     };
-    // Pre-flight: never execute if the backend would ignore or override the chosen account.
-    const preflight = confirmOnly ? null : await apiPost("/api/overview/dispatch", { ...payload, confirmOnly: true });
+    const existingPreview = !confirmOnly
+      && !state.dispatchPreview?.rejected
+      && state.dispatchPreview?._draftText === text
+      && Array.isArray(state.dispatchPreview?.routes)
+      && state.dispatchPreview.routes.length > 0
+      ? state.dispatchPreview
+      : null;
+    // Pre-flight: plan once with Gemini 3.8 Flash (or reuse preview) and never execute if the backend would ignore or override the chosen account.
+    const preflight = confirmOnly
+      ? null
+      : (existingPreview || await apiPost("/api/overview/dispatch", {
+          ...payload,
+          confirmOnly: true,
+          useAiPlanner: true,
+          allowChat: false,
+        }));
     const routesToCheck = confirmOnly ? null : (Array.isArray(preflight?.routes) ? preflight.routes : []);
     if (routesToCheck) {
       const missingAgent = routesToCheck.some((rt) => !rt.agentKey);
       const mismatched = chosenAgentKey !== "auto" && routesToCheck.some((rt) => rt.agentKey !== chosenAgentKey);
       if (missingAgent || mismatched) {
-        state.dispatchPreview = preflight;
+        state.dispatchPreview = { ...preflight, _draftText: text, rejected: true };
         state.lastDispatchReceipt = null;
         showToastBanner("已拦截：后端没有按所选账号派单", {
           detail: missingAgent
@@ -9772,10 +9800,13 @@ async function submitSmartDispatch({ confirmOnly = false } = {}) {
     const res = await apiPost("/api/overview/dispatch", {
       ...payload,
       confirmOnly: Boolean(confirmOnly),
+      useAiPlanner: Boolean(confirmOnly),
+      ...(confirmOnly ? { allowChat: false } : {}),
+      ...(routesToCheck?.length ? { approvedRoutes: routesToCheck } : {}),
       sparkId: confirmOnly ? "" : (state.dispatchSparkId || ""),
     });
     if (confirmOnly) {
-      state.dispatchPreview = res;
+      state.dispatchPreview = { ...res, _draftText: text, rejected: false };
       state.lastDispatchReceipt = null;
     } else {
       state.dispatchPreview = null;
@@ -10647,7 +10678,7 @@ function applyThemeMode(mode = loadThemeMode(), { persist = false } = {}) {
         ? `点击切换为${resolved === "light" ? "深色" : "日间"}模式`
         : "点击恢复跟随系统";
     btn.title = `主题：${modeLabel} · ${nextAction}（右键恢复跟随系统）`;
-    btn.setAttribute("aria-label", `RemoteDeck · ${modeLabel}，${nextAction}`);
+    btn.setAttribute("aria-label", `RemoDeck · ${modeLabel}，${nextAction}`);
     btn.dataset.themeMode = safeMode;
     btn.dataset.theme = resolved;
   }
@@ -11444,6 +11475,9 @@ function bindEvents() {
           const next = { ...state.selectedSubProjectByTopic };
           delete next[tid];
           state.selectedSubProjectByTopic = next;
+        }
+        if (state.dispatchTopicId === tid) {
+          state.dispatchPreview = null;
         }
         renderProjectBoard();
       }
@@ -12331,35 +12365,20 @@ function bindEvents() {
     closeSlashCommandMenu();
   });
 
-  const insertTextIntoPrompt = (insertText, { padSpaces = true } = {}) => {
-    const input = $("promptInput");
-    if (!input || !insertText) return;
-    const start = input.selectionStart ?? input.value.length;
-    const end = input.selectionEnd ?? start;
-    const before = input.value.slice(0, start);
-    const after = input.value.slice(end);
-    const needsLeadingSpace = padSpaces && Boolean(before && !/[\s(\[{'"`]$/.test(before));
-    const needsTrailingSpace = padSpaces && Boolean(after && !/^[\s.,;:!?)\]}'"`]/.test(after));
-    const chunk = `${needsLeadingSpace ? " " : ""}${insertText}${needsTrailingSpace ? " " : ""}`;
-    input.setRangeText(chunk, start, end, "end");
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    autoResizePromptInput();
-  };
-
   $("promptInput").addEventListener("paste", (e) => {
-    const items = [...(e.clipboardData?.items || [])];
-    const imageFiles = [];
-    for (const item of items) {
-      if (item.type.startsWith("image/")) {
-        const file = item.getAsFile();
-        if (file) imageFiles.push(file);
-      }
-    }
+    const { imageFiles, nonImageFiles } = partitionDataTransferFiles(e.clipboardData);
+    const plainText = e.clipboardData?.getData("text/plain") || "";
+    const uriList = e.clipboardData?.getData("text/uri-list") || "";
+    const html = e.clipboardData?.getData("text/html") || "";
+    const clipboardFiles = [...(e.clipboardData?.files || [])];
+    const linkText = formatClipboardFilesAsMarkdownLinks({
+      uriList,
+      plainText,
+      files: clipboardFiles,
+    });
+    const filesToUpload = filterFilesNeedingUpload({ nonImageFiles, uriList, plainText, linkText });
+
     if (imageFiles.length > 0) {
-      const plainText = e.clipboardData?.getData("text/plain") || "";
-      const uriList = e.clipboardData?.getData("text/uri-list") || "";
-      const html = e.clipboardData?.getData("text/html") || "";
-      const clipboardFiles = [...(e.clipboardData?.files || [])];
       const cleanedText = cleanClipboardTextForPastedImages({
         plainText,
         uriList,
@@ -12367,25 +12386,27 @@ function bindEvents() {
         imageFiles,
         clipboardFiles,
       });
-      if (!cleanedText || cleanedText !== plainText) {
+      const residualText = (linkText || filesToUpload.length > 0)
+        ? stripCoveredFileNamesFromText(cleanedText, nonImageFiles)
+        : cleanedText;
+      if (!cleanedText || cleanedText !== plainText || linkText || filesToUpload.length > 0) {
         e.preventDefault();
-        if (cleanedText) {
-          insertTextIntoPrompt(cleanedText, { padSpaces: false });
+        if (residualText) {
+          insertTextIntoPrompt(residualText, { padSpaces: false });
         }
       }
       for (const file of imageFiles) {
         void addComposerImageFile(file);
       }
+      if (linkText) insertTextIntoPrompt(linkText);
+      if (filesToUpload.length > 0) void uploadAndInsertComposerFiles(filesToUpload);
       return;
     }
-    const linkText = formatClipboardFilesAsMarkdownLinks({
-      uriList: e.clipboardData?.getData("text/uri-list") || "",
-      plainText: e.clipboardData?.getData("text/plain") || "",
-      files: [...(e.clipboardData?.files || [])],
-    });
-    if (linkText) {
+
+    if (linkText || filesToUpload.length > 0) {
       e.preventDefault();
-      insertTextIntoPrompt(linkText);
+      if (linkText) insertTextIntoPrompt(linkText);
+      if (filesToUpload.length > 0) void uploadAndInsertComposerFiles(filesToUpload);
     }
   });
 
@@ -12509,18 +12530,25 @@ function bindEvents() {
       dragDepth = 0;
       composerBox.classList.remove("is-dragover");
       const allFiles = [...(e.dataTransfer?.files || [])];
-      const imageFiles = allFiles.filter(
-        (file) => String(file?.type || "").startsWith("image/") || /\.(?:png|jpe?g|webp|gif|bmp)$/i.test(String(file?.name || "")),
-      );
+      const { imageFiles, nonImageFiles } = partitionDataTransferFiles(e.dataTransfer);
+      const uriList = e.dataTransfer?.getData("text/uri-list") || "";
+      const plainText = e.dataTransfer?.getData("text/plain") || "";
       const nonImageLinkText = formatClipboardFilesAsMarkdownLinks({
-        uriList: e.dataTransfer?.getData("text/uri-list") || "",
-        plainText: e.dataTransfer?.getData("text/plain") || "",
+        uriList,
+        plainText,
         files: allFiles,
       });
-      if (!imageFiles.length && !nonImageLinkText) return;
+      const filesToUpload = filterFilesNeedingUpload({
+        nonImageFiles,
+        uriList,
+        plainText,
+        linkText: nonImageLinkText,
+      });
+      if (!imageFiles.length && !nonImageLinkText && !filesToUpload.length) return;
       e.preventDefault();
       for (const file of imageFiles) void addComposerImageFile(file);
       if (nonImageLinkText) insertTextIntoPrompt(nonImageLinkText);
+      if (filesToUpload.length > 0) void uploadAndInsertComposerFiles(filesToUpload);
     });
   }
 
@@ -13764,6 +13792,9 @@ function bindEvents() {
   $("openUpdateModalBtn")?.addEventListener("click", () => void openUpdateModal());
   window.addEventListener("ac:locale-change", () => {
     if ($("updateModal")?.open) renderUpdateModal();
+    if (state.missionOverview && !state.scopedProjectCwd) {
+      void loadMissionOverview({ trigger: "view", force: false });
+    }
   });
   spriteController.bindFullscreenEvents();
 
@@ -14414,6 +14445,115 @@ function addComposerImageFile(file) {
 
   imageQueueChain = task.catch(() => {});
   return task;
+}
+
+const MAX_UPLOAD_FILE_COUNT = 10;
+const MAX_UPLOAD_SINGLE_BYTES = 15 * 1024 * 1024;
+const MAX_UPLOAD_TOTAL_BYTES = 20 * 1024 * 1024;
+
+function insertTextIntoPrompt(insertText, { padSpaces = true } = {}) {
+  const input = $("promptInput");
+  if (!input || !insertText) return;
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  const before = input.value.slice(0, start);
+  const after = input.value.slice(end);
+  const needsLeadingSpace = padSpaces && Boolean(before && !/[\s(\[{'"`]$/.test(before));
+  const needsTrailingSpace = padSpaces && Boolean(after && !/^[\s.,;:!?)\]}'"`]/.test(after));
+  const chunk = `${needsLeadingSpace ? " " : ""}${insertText}${needsTrailingSpace ? " " : ""}`;
+  input.setRangeText(chunk, start, end, "end");
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  autoResizePromptInput();
+}
+
+async function uploadAndInsertComposerFiles(files = []) {
+  const list = Array.isArray(files) ? files.filter(Boolean) : [];
+  if (!list.length) return;
+
+  if (list.length > MAX_UPLOAD_FILE_COUNT) {
+    const msg = `单次最多粘贴 ${MAX_UPLOAD_FILE_COUNT} 个文件`;
+    setComposerStatus("error", msg, { autoClearMs: 4200 });
+    showToastBanner("上传文件失败", { detail: msg, error: true });
+    return;
+  }
+
+  let totalBytes = 0;
+  for (const file of list) {
+    const size = Number(file.size) || 0;
+    if (size > MAX_UPLOAD_SINGLE_BYTES) {
+      const msg = `文件 ${file.name || "未命名"} 超过 ${formatByteSize(MAX_UPLOAD_SINGLE_BYTES)} 上限`;
+      setComposerStatus("error", msg, { autoClearMs: 4200 });
+      showToastBanner("上传文件失败", { detail: msg, error: true });
+      return;
+    }
+    totalBytes += size;
+  }
+  if (totalBytes > MAX_UPLOAD_TOTAL_BYTES) {
+    const msg = `单次粘贴文件总大小超过 ${formatByteSize(MAX_UPLOAD_TOTAL_BYTES)} 上限`;
+    setComposerStatus("error", msg, { autoClearMs: 4200 });
+    showToastBanner("上传文件失败", { detail: msg, error: true });
+    return;
+  }
+
+  const originThreadId = state.activeThreadId || "";
+  state.fileUploadingCount += 1;
+  renderComposerControls();
+  setComposerStatus(
+    "pending",
+    list.length > 1 ? `正在上传 ${list.length} 个文件…` : `正在上传 ${list[0].name || "文件"}…`,
+  );
+
+  try {
+    const payloadFiles = [];
+    for (const file of list) {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      payloadFiles.push({
+        name: file.name || "pasted-file",
+        type: file.type || "application/octet-stream",
+        dataBase64: uint8ArrayToBase64(buf),
+      });
+    }
+    const res = await apiPost(
+      "api/thread/upload",
+      {
+        threadId: originThreadId,
+        files: payloadFiles,
+      },
+      { timeoutMs: 60_000 },
+    );
+    const saved = Array.isArray(res?.files) ? res.files : [];
+    const links = saved
+      .map((item) => formatPastedFileMarkdownLink(item?.path || "", { trustedLocalPath: true }))
+      .filter(Boolean);
+    if (originThreadId && state.activeThreadId !== originThreadId) {
+      clearComposerStatus();
+      showToastBanner("原会话已切换，未向当前输入框插入上传链接", {
+        detail: saved.length ? `文件已保存至本机：${saved[0].name}` : "",
+      });
+      return;
+    }
+    if (links.length) {
+      insertTextIntoPrompt(links.join(" "));
+      setComposerStatus(
+        "success",
+        saved.length > 1 ? `已附加 ${saved.length} 个文件` : `已附加文件 ${saved[0]?.name || ""}`.trim(),
+        { autoClearMs: 2200 },
+      );
+    } else if (saved.length > 0) {
+      const msg = "文件已保存但未能生成可预览路径链接";
+      setComposerStatus("error", msg, { autoClearMs: 4200 });
+      showToastBanner("上传文件失败", { detail: msg, error: true });
+    } else {
+      clearComposerStatus();
+    }
+  } catch (error) {
+    const msg = error?.message || "上传文件失败";
+    setComposerStatus("error", msg, { autoClearMs: 4200 });
+    showToastBanner("上传文件失败", { detail: msg, error: true });
+  } finally {
+    state.fileUploadingCount = Math.max(0, state.fileUploadingCount - 1);
+    renderComposerControls();
+  }
 }
 
 let lastVisualViewportHeight = 0;

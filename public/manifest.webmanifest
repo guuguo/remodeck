@@ -1,6 +1,6 @@
 {
-  "name": "RemoteDeck",
-  "short_name": "RemoteDeck",
+  "name": "RemoDeck",
+  "short_name": "RemoDeck",
   "description": "Self-hosted remote control console for local Codex, Claude Code, and Antigravity sessions.",
   "start_url": "./",
   "scope": "./",

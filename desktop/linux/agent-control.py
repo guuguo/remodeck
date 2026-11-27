@@ -34,13 +34,13 @@ class AgentControl(Gtk.Application):
         if self.window:
             self.window.present()
             return
-        GLib.set_application_name("RemoteDeck")
+        GLib.set_application_name("RemoDeck")
         Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
-        self.window = Gtk.ApplicationWindow(application=self, title="RemoteDeck")
+        self.window = Gtk.ApplicationWindow(application=self, title="RemoDeck")
         self.window.set_default_size(1280, 840)
         self.window.set_size_request(760, 520)
         self.window.set_icon_name("agent-control")
-        header = Gtk.HeaderBar(title="RemoteDeck", show_close_button=True)
+        header = Gtk.HeaderBar(title="RemoDeck", show_close_button=True)
         self.window.set_titlebar(header)
 
         self.back = self.button(header, "go-previous-symbolic", "返回（Alt+←）", lambda *_: self.web.go_back())
@@ -167,7 +167,7 @@ class AgentControl(Gtk.Application):
         self.active_web().set_zoom_level(1.0)
 
     def restart_local_service(self):
-        self.show_notice("正在重启本地 RemoteDeck 服务…")
+        self.show_notice("正在重启本地 RemoDeck 服务…")
 
         def worker():
             try:
@@ -232,12 +232,12 @@ class AgentControl(Gtk.Application):
 
     def default_child_title(self, uri):
         if self.is_local_plugin_url(uri):
-            return "RemoteDeck 插件"
+            return "RemoDeck 插件"
         project = parse_qs(urlsplit(uri).query).get("project", [""])[0]
         if project:
             leaf = Path(project).name
-            return f"{leaf} · RemoteDeck" if leaf else "RemoteDeck"
-        return "RemoteDeck"
+            return f"{leaf} · RemoDeck" if leaf else "RemoDeck"
+        return "RemoDeck"
 
     def open_plugin_window(self, uri):
         key = self.plugin_window_key(uri)

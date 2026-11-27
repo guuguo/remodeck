@@ -17,6 +17,7 @@ const COMPRESSION_STEPS = [
 ];
 
 const LOCAL_IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif|bmp|svg|heic|heif|tiff?|avif)$/i;
+const COMPOSER_IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif|bmp)$/i;
 const GENERIC_CLIPBOARD_IMAGE_NAME_RE = /^(?:image|clipboard(?:\s*image)?|pasted(?:\s*image)?|blob)(?:\.[a-z0-9]{2,5})?$/i;
 const IMAGE_EXT_SRC = "(?:png|jpe?g|webp|gif|bmp|svg|heic|heif|tiff?|avif)";
 const LOCAL_PATH_ROOT_SRC = "(?:file:\\/\\/(?:localhost)?\\/|\\/|[A-Za-z]:[\\\\/])";
@@ -104,6 +105,124 @@ function cleanLinesWithPathPass(lines, cleanLine) {
     return { next, changed };
   });
   return { anyChanged, results };
+}
+
+export function isComposerImageFile(file) {
+  if (!file) return false;
+  return String(file?.type || "").startsWith("image/") || COMPOSER_IMAGE_EXT_RE.test(String(file?.name || ""));
+}
+
+/**
+ * Split DataTransfer items/files into image attachments and non-image files while skipping directories.
+ */
+export function partitionDataTransferFiles(dataTransfer) {
+  const imageFiles = [];
+  const nonImageFiles = [];
+  let hasDirectory = false;
+
+  const pushFile = (file) => {
+    if (!file) return;
+    if (isComposerImageFile(file)) imageFiles.push(file);
+    else nonImageFiles.push(file);
+  };
+
+  const items = [...(dataTransfer?.items || [])];
+  if (items.length > 0) {
+    for (const item of items) {
+      if (item?.kind !== "file" && !String(item?.type || "").startsWith("image/")) continue;
+      const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+      if (entry?.isDirectory) {
+        hasDirectory = true;
+        continue;
+      }
+      pushFile(item.getAsFile?.());
+    }
+  }
+  if (!imageFiles.length && !nonImageFiles.length && !hasDirectory) {
+    for (const file of [...(dataTransfer?.files || [])]) {
+      pushFile(file);
+    }
+  }
+  return { imageFiles, nonImageFiles, hasDirectory };
+}
+
+/**
+ * Extract decoded file basename from a file:// URI or local filesystem path.
+ */
+function extractCoveredLocalBasename(raw = "") {
+  const candidate = stripMatchingQuotes(raw);
+  if (!candidate) return "";
+  if (/^file:\/\//i.test(candidate)) {
+    const pathPart = decodeUriSafe(candidate.split(/[?#]/)[0].replace(/^file:\/\/(?:localhost)?/i, ""));
+    return pathPart.replace(/\\/g, "/").replace(/\/+$/, "").split("/").filter(Boolean).pop() || "";
+  }
+  if (/^\/(?!\/)/.test(candidate) || /^[A-Za-z]:[\\/]/.test(candidate)) {
+    const stripped = candidate.replace(/(?:#L\d+(?:-L?\d+)?|:\d+(?::\d+)?)$/i, "");
+    return stripped.replace(/\\/g, "/").replace(/\/+$/, "").split("/").filter(Boolean).pop() || "";
+  }
+  return "";
+}
+
+/**
+ * Return non-image File objects that lack a local path and are not already covered by URI/text links.
+ */
+export function filterFilesNeedingUpload({ nonImageFiles = [], uriList = "", plainText = "", linkText = "" } = {}) {
+  const list = Array.isArray(nonImageFiles) ? nonImageFiles.filter(Boolean) : [];
+  if (!list.length) return [];
+
+  const coveredBasenames = new Set();
+  for (const line of String(uriList || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || !/^file:\/\//i.test(trimmed)) continue;
+    const base = extractCoveredLocalBasename(trimmed);
+    if (base) coveredBasenames.add(base.toLowerCase());
+  }
+  for (const line of String(plainText || "").split(/\r?\n/)) {
+    const base = extractCoveredLocalBasename(line);
+    if (base) coveredBasenames.add(base.toLowerCase());
+  }
+  const mdLinkRe = /\[([^\]\n]+)\]\(\s*<?(file:\/\/[^>\s)]+)>?/gi;
+  let match;
+  while ((match = mdLinkRe.exec(String(linkText || ""))) !== null) {
+    const base = extractCoveredLocalBasename(match[2] || "");
+    if (base) coveredBasenames.add(base.toLowerCase());
+  }
+
+  return list.filter((file) => {
+    if (String(file?.path || "").trim()) return false;
+    const name = String(file?.name || "").trim().toLowerCase();
+    if (name && coveredBasenames.has(name)) return false;
+    return true;
+  });
+}
+
+/**
+ * Strip standalone filename/path lines that match already-handled files while preserving surrounding prose.
+ */
+export function stripCoveredFileNamesFromText(text = "", files = []) {
+  const raw = String(text || "");
+  if (!raw) return "";
+  const coveredNames = new Set();
+  for (const file of Array.isArray(files) ? files : []) {
+    const name = String(file?.name || "").trim().toLowerCase();
+    if (name) coveredNames.add(name);
+    const pathBase = extractCoveredLocalBasename(file?.path || "");
+    if (pathBase) coveredNames.add(pathBase.toLowerCase());
+  }
+  if (!coveredNames.size) return raw;
+
+  const lineBreak = raw.includes("\r\n") ? "\r\n" : "\n";
+  const keptLines = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = stripMatchingQuotes(line);
+    const base = extractCoveredLocalBasename(trimmed).toLowerCase();
+    if (trimmed && (coveredNames.has(trimmed.toLowerCase()) || (base && coveredNames.has(base)))) {
+      continue;
+    }
+    keptLines.push(line);
+  }
+  const result = keptLines.join(lineBreak);
+  return result.trim() ? result : "";
 }
 
 // 仅移除已经成功附加的同名本地图片路径；正文、网址和其他文件引用保持原样。

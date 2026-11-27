@@ -152,11 +152,12 @@ function buildThreadImageUrls(threadId, filePath) {
 function localPathToFileHref(rawTarget = "") {
   const trimmed = String(rawTarget || "").trim();
   if (!trimmed) return "#";
+  const encodeHrefPath = (pathStr) => pathStr.replace(/%/g, "%25").replace(/#/g, "%23");
   if (/^[A-Za-z]:[\\/]/.test(trimmed)) {
-    return `file:///${trimmed.replace(/\\/g, "/")}`;
+    return `file:///${encodeHrefPath(trimmed.replace(/\\/g, "/"))}`;
   }
   if (trimmed.startsWith("/")) {
-    return `file://${trimmed}`;
+    return `file://${encodeHrefPath(trimmed)}`;
   }
   return "#";
 }
@@ -173,12 +174,15 @@ function stripOptionalMatchingQuotes(raw = "") {
   return trimmed;
 }
 
-export function formatPastedFileMarkdownLink(rawInput = "") {
+export function formatPastedFileMarkdownLink(rawInput = "", { trustedLocalPath = false } = {}) {
   const candidate = stripOptionalMatchingQuotes(rawInput);
   if (!candidate) return "";
   const isFileUri = /^file:\/\//i.test(candidate);
   const { cleanPath, startLine, endLine } = splitClientFileRefAndAnchor(candidate);
-  if (!cleanPath || (!isFileUri && !isLocalFileSystemPath(cleanPath))) return "";
+  const isAnyAbsPath = cleanPath.startsWith("/") || /^[A-Za-z]:[\\/]/.test(cleanPath);
+  if (!cleanPath || (!isFileUri && !isLocalFileSystemPath(cleanPath) && !(trustedLocalPath && isAnyAbsPath))) {
+    return "";
+  }
   // 排除相对路径与 ~ 简写，确保链接始终带上文件绝对路径。
   if (/^~\//.test(cleanPath)) return "";
 

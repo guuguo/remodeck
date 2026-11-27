@@ -709,8 +709,15 @@ test("Adaptive dispatch respects configurable priority, avoids exhausted quotas,
   } = await import("../src/mission-overview-service.mjs");
 
   assert.equal(classifyDispatchTaskDifficulty("深度重构鉴权架构并排查跨仓库内存泄漏根因"), "heavy");
+  assert.equal(classifyDispatchTaskDifficulty("全量重构核心架构并排查跨仓库内存泄漏根因"), "heavy");
   assert.equal(classifyDispatchTaskDifficulty("查一下状态"), "fast");
   assert.equal(classifyDispatchTaskDifficulty("新增导出接口并补齐单测"), "balanced");
+  assert.equal(
+    classifyDispatchTaskDifficulty('请尽可能全面采集「RemoDeck」所有能拿到的重要业务与创收指标（包含变现/收入/付费、阅读/播放/流量、粉丝/订阅/Star、转化率/完播/留存、发布与待办规模等各维度，尽量采集全量明细不要遗漏，且只采集「RemoDeck」自身口径），按 {"topicId":"agent-control"} 格式写入 /repo/.agent-metrics.json'),
+    "fast",
+  );
+  assert.equal(classifyDispatchTaskDifficulty("修复更新订单数据时丢失字段的 bug"), "balanced");
+  assert.equal(classifyDispatchTaskDifficulty("新增同步用户数据的接口并补齐单测"), "balanced");
   assert.equal(classifyDispatchTaskSpecialty("深度重构鉴权架构并排查并发死锁根因"), "hardcore");
   assert.equal(classifyDispatchTaskSpecialty("帮我策划一个短剧分镜脚本与前端视觉设计"), "creative");
 
@@ -738,6 +745,7 @@ test("Adaptive dispatch respects configurable priority, avoids exhausted quotas,
 
   const dir = await mkdtemp(join(os.tmpdir(), "ac-dispatch-adaptive-"));
   try {
+    const listModelsCalls = [];
     const hub = {
       async listThreads() { return { threads: [] }; },
       async listProvidersAndProfiles() {
@@ -772,14 +780,22 @@ test("Adaptive dispatch respects configurable priority, avoids exhausted quotas,
           ],
         };
       },
-      async listModels(provider) {
+      async listModels({ provider, profileId } = {}) {
+        listModelsCalls.push({ provider, profileId });
         if (provider === "claude") {
-          return [{ id: "claude-opus-5-5" }, { id: "claude-sonnet-5-5" }, { id: "claude-haiku-4-5" }];
+          return { data: [{ id: "claude-opus-5-5" }, { id: "claude-sonnet-5-5" }, { id: "claude-haiku-4-5" }] };
         }
         if (provider === "antigravity") {
-          return [{ id: "gemini-4-pro" }, { id: "gemini-4-hydrogen" }];
+          return {
+            data: [
+              { id: "gemini-4-carbon" },
+              { id: "gemini-4-neon" },
+              { id: "gemini-4-hydrogen" },
+              { id: "gemini-3.8-flash" },
+            ],
+          };
         }
-        return [{ id: "gpt-6.2-sol" }, { id: "gpt-6.2-astra" }];
+        return { data: [{ id: "gpt-6.2-sol" }, { id: "gpt-6.2-astra" }] };
       },
     };
     const service = new MissionOverviewService({
@@ -810,6 +826,29 @@ test("Adaptive dispatch respects configurable priority, avoids exhausted quotas,
     assert.equal(fastRes.routes[0].model, "gemini-4-hydrogen");
     assert.equal(fastRes.routes[0].effort, "low");
     assert.equal(fastRes.routes[0].taskDifficulty, "fast");
+
+    // Metrics collection prompt containing "全量明细" stays in fast tier (hydrogen low), never escalating to neon/4-pro.
+    const metricsRes = await service.dispatchTask({
+      text: '请尽可能全面采集「Demo」所有能拿到的重要业务与创收指标（尽量采集全量明细不要遗漏），按 {"topicId":"demo"} 格式写入 /repo/.agent-metrics.json',
+      topicId: "demo",
+      confirmOnly: true,
+    });
+    assert.equal(metricsRes.routes[0].provider, "antigravity");
+    assert.equal(metricsRes.routes[0].model, "gemini-4-hydrogen");
+    assert.equal(metricsRes.routes[0].effort, "low");
+    assert.equal(metricsRes.routes[0].taskDifficulty, "fast");
+
+    // True heavy refactor on Antigravity resolves to current catalog model (gemini-4-carbon), never stale gemini-4-pro.
+    const agyHeavyRes = await service.dispatchTask({
+      text: "全量重构任务调度架构并排查并发死锁根因",
+      topicId: "demo",
+      confirmOnly: true,
+    });
+    assert.equal(agyHeavyRes.routes[0].provider, "antigravity");
+    assert.equal(agyHeavyRes.routes[0].model, "gemini-4-carbon");
+    assert.equal(agyHeavyRes.routes[0].effort, "high");
+    assert.equal(agyHeavyRes.routes[0].taskDifficulty, "heavy");
+    assert.ok(listModelsCalls.some((c) => c.provider === "antigravity" && c.profileId === "desktop"));
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
   }
@@ -1252,6 +1291,196 @@ test("AI-assisted sprite dispatch plans semantic splits, chat-only replies, appr
     assert.equal(fallbackRes.aiPlanned, false);
     assert.equal(fallbackRes.routes.length, 1);
     assert.equal(fallbackRes.routes[0].topicId, "manga-trans");
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
+  }
+});
+
+test("Dispatch planner defaults to gemini-3.8-flash, preserves structured sync prompts, respects allowChat:false, and smart dispatch UI wires Flash preflight", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { DEFAULT_DISPATCH_PLANNER_MODEL } = await import("../src/mission-overview-service.mjs");
+  assert.equal(DEFAULT_DISPATCH_PLANNER_MODEL, "antigravity:gemini-3.8-flash");
+
+  const dir = await mkdtemp(join(os.tmpdir(), "ac-dispatch-flash-planner-"));
+  const plannerModelsSeen = [];
+  let plannerBehavior = "metrics_fast";
+
+  const hub = createMockHub([], [
+    { provider: "antigravity", id: "desktop", name: "Agy", installed: true, quota: { windows: { weekly: { remainingPercent: 95 } } } },
+  ]);
+  hub.listModels = async ({ provider } = {}) => (
+    provider === "antigravity"
+      ? { data: [{ id: "gemini-4-carbon" }, { id: "gemini-4-hydrogen" }, { id: "gemini-3.8-flash" }] }
+      : { data: [] }
+  );
+
+  try {
+    await seedGenericTestDomains(dir, [
+      {
+        id: "agent-control",
+        domainId: "indie-lab",
+        name: "Agent Control",
+        primaryCwd: "/repo/agent-control",
+        cwdPrefixes: ["/repo/agent-control"],
+        keywords: ["Agent Control", "RemoDeck"],
+        order: 1,
+      },
+    ]);
+    // Write a different preferredModel in overview cache to ensure dispatch planner still defaults to gemini-3.8-flash.
+    await writeFile(join(dir, "mission-overview.json"), JSON.stringify({
+      version: 1,
+      preferredModel: "claude:claude-sonnet-5-5",
+      dispatchPrefs: { strategy: "provider", providerOrder: ["antigravity", "claude", "codex", "grok"] },
+    }), "utf8");
+
+    const service = new MissionOverviewService({
+      hub,
+      dataDir: dir,
+      collectGitImpl: async () => null,
+      runAiImpl: async ({ preferredModel }) => {
+        plannerModelsSeen.push(preferredModel);
+        if (plannerBehavior === "chat") {
+          return { intent: "chat", reply: "你好", tasks: [] };
+        }
+        return {
+          intent: "dispatch",
+          reply: "已安排轻量采数。",
+          tasks: [
+            {
+              topicId: "agent-control",
+              instruction: "采集 Agent Control 业务与创收指标",
+              specialty: "general",
+              difficulty: plannerBehavior === "metrics_balanced" ? "balanced" : "fast",
+              agentKey: "antigravity:desktop",
+              action: "spawn_parallel",
+              targetThreadId: "",
+              reason: "指标采集走轻量模型",
+            },
+          ],
+        };
+      },
+    });
+
+    const fullSyncPrompt = '请尽可能全面采集「Agent Control」所有能拿到的重要业务与创收指标（尽量采集全量明细不要遗漏），按 {"topicId":"agent-control","updatedAt":"YYYY-MM-DD HH:mm","kpis":[]} 格式写入 /repo/agent-control/.agent-metrics.json';
+
+    // 1. fast verdict -> gemini-4-hydrogen (low) while preserving exact schema/path in segmentText
+    const fastRes = await service.dispatchTask({
+      text: fullSyncPrompt,
+      topicId: "agent-control",
+      confirmOnly: true,
+      useAiPlanner: true,
+      allowChat: false,
+    });
+    assert.equal(plannerModelsSeen[0], "antigravity:gemini-3.8-flash");
+    assert.equal(fastRes.aiPlanned, true);
+    assert.equal(fastRes.routes[0].model, "gemini-4-hydrogen");
+    assert.equal(fastRes.routes[0].effort, "low");
+    assert.equal(fastRes.routes[0].segmentText, fullSyncPrompt);
+
+    // 2. balanced verdict -> gemini-4-hydrogen (medium)
+    plannerBehavior = "metrics_balanced";
+    const balRes = await service.dispatchTask({
+      text: fullSyncPrompt,
+      topicId: "agent-control",
+      confirmOnly: true,
+      useAiPlanner: true,
+      allowChat: false,
+    });
+    assert.equal(balRes.routes[0].model, "gemini-4-hydrogen");
+    assert.equal(balRes.routes[0].effort, "medium");
+
+    // 3. allowChat:false falls through to deterministic routing even if AI answers intent:"chat"
+    plannerBehavior = "chat";
+    const noChatRes = await service.dispatchTask({
+      text: fullSyncPrompt,
+      topicId: "agent-control",
+      confirmOnly: true,
+      useAiPlanner: true,
+      allowChat: false,
+    });
+    assert.equal(noChatRes.chatOnly, undefined);
+    assert.equal(noChatRes.aiPlanned, false);
+    assert.equal(noChatRes.routes.length, 1);
+    assert.equal(noChatRes.routes[0].model, "gemini-4-hydrogen");
+    assert.equal(noChatRes.routes[0].effort, "low");
+
+    // 4. Static wiring check in public/app.js submitSmartDispatch
+    const appSource = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+    const submitStart = appSource.indexOf("async function submitSmartDispatch");
+    const submitSlice = appSource.slice(submitStart, submitStart + 2800);
+    assert.match(submitSlice, /useAiPlanner:\s*true/);
+    assert.match(submitSlice, /allowChat:\s*false/);
+    assert.match(submitSlice, /approvedRoutes:\s*routesToCheck/);
+    assert.match(submitSlice, /rejected:\s*true/);
+
+    // 5. Planner candidate selection reaches Codex/Claude within maxAttempts:2 when deduplicated or Antigravity is unavailable.
+    const { selectLightweightModelCandidates } = await import("../src/mission-overview-service.mjs");
+    const dedupedCands = selectLightweightModelCandidates({
+      preferredModel: "antigravity:gemini-3.8-flash",
+      fallbackToAuto: true,
+      availableProviders: new Set(["antigravity", "codex", "claude"]),
+      dedupeByProvider: true,
+      maxAttempts: 2,
+    });
+    assert.deepEqual(dedupedCands.map((c) => c.key), ["antigravity:gemini-3.8-flash", "codex:gpt-6.1-terra"]);
+
+    const codexOnlyCands = selectLightweightModelCandidates({
+      preferredModel: "antigravity:gemini-3.8-flash",
+      fallbackToAuto: true,
+      availableProviders: new Set(["codex"]),
+      dedupeByProvider: true,
+      maxAttempts: 2,
+    });
+    assert.deepEqual(codexOnlyCands.map((c) => c.key), ["codex:gpt-6.1-terra"]);
+
+    // 6. Empty AI tasks array falls back to deterministic routing with aiPlanned:false.
+    const emptyAiService = new MissionOverviewService({
+      hub,
+      dataDir: dir,
+      collectGitImpl: async () => null,
+      runAiImpl: async () => ({ intent: "dispatch", reply: "空计划", tasks: [] }),
+    });
+    const emptyAiRes = await emptyAiService.dispatchTask({
+      text: "新增导出接口并补齐单测",
+      topicId: "agent-control",
+      confirmOnly: true,
+      useAiPlanner: true,
+      allowChat: false,
+    });
+    assert.equal(emptyAiRes.aiPlanned, false);
+    assert.equal(emptyAiRes.routes.length, 1);
+
+    // 7. Zero-topic install preserves approvedRoutes during execution instead of dropping them.
+    const emptyDir = await mkdtemp(join(os.tmpdir(), "ac-zero-topic-"));
+    try {
+      const zeroHub = createMockHub([], [
+        { provider: "codex", id: "default", name: "Codex", installed: true, quota: { windows: { weekly: { remainingPercent: 90 } } } },
+      ]);
+      const zeroService = new MissionOverviewService({
+        hub: zeroHub,
+        dataDir: emptyDir,
+        collectGitImpl: async () => null,
+      });
+      const zeroRes = await zeroService.dispatchTask({
+        text: "测试零项目路由",
+        confirmOnly: false,
+        approvedRoutes: [{
+          segmentText: "测试零项目路由",
+          action: "spawn_parallel",
+          topicId: "general-workspace",
+          topicName: "默认工作区",
+          cwd: emptyDir,
+          agentKey: "codex:default",
+          agentSource: "ai",
+          model: "gpt-6.1-terra",
+          effort: "low",
+        }],
+      });
+      assert.equal(zeroRes.dispatched.length, 1);
+      assert.equal(zeroRes.dispatched[0].topicId, "general-workspace");
+    } finally {
+      await rm(emptyDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
+    }
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
   }
